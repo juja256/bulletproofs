@@ -119,6 +119,10 @@ impl<T: BorrowMut<Transcript>> ConstraintSystem for Verifier<T> {
         Ok((l_var, r_var, o_var))
     }
 
+    fn eval(&self, _: &LinearCombination) -> Option<Scalar> {
+        None
+    }
+
     fn metrics(&self) -> Metrics {
         Metrics {
             multipliers: self.num_vars,
@@ -170,6 +174,10 @@ impl<T: BorrowMut<Transcript>> ConstraintSystem for RandomizingVerifier<T> {
         input_assignments: Option<(Scalar, Scalar)>,
     ) -> Result<(Variable, Variable, Variable), R1CSError> {
         self.verifier.allocate_multiplier(input_assignments)
+    }
+
+    fn eval(&self, _: &LinearCombination) -> Option<Scalar> {
+        None    
     }
 
     fn metrics(&self) -> Metrics {

@@ -1,11 +1,12 @@
 //! Definition of linear combinations.
 
 use curve25519_dalek::scalar::Scalar;
+use std::collections::HashMap;
 use std::iter::FromIterator;
 use std::ops::{Add, Mul, Neg, Sub};
 
 /// Represents a variable in a constraint system.
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Variable {
     /// Represents an external input specified by a commitment.
     Committed(usize),
@@ -18,6 +19,23 @@ pub enum Variable {
     /// Represents the constant 1.
     One(),
 }
+
+impl LinearCombination {
+    pub fn simplify(&self) -> LinearCombination {
+        let mut vars: HashMap<Variable, Scalar> = HashMap::new();
+
+        for (var, val) in &self.terms {
+            *vars.entry(*var).or_insert(Scalar::ZERO) += val;
+        }
+
+        let mut new_lc_terms = vec![];
+        for (var, val) in vars {
+            new_lc_terms.push((var, val));
+        }
+        new_lc_terms.iter().collect()
+    }
+}
+
 
 impl From<Variable> for LinearCombination {
     fn from(v: Variable) -> LinearCombination {

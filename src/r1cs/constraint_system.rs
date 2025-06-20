@@ -66,6 +66,9 @@ pub trait ConstraintSystem {
         input_assignments: Option<(Scalar, Scalar)>,
     ) -> Result<(Variable, Variable, Variable), R1CSError>;
 
+    /// Evaluate a linear combination
+    fn eval(&self, lc: &LinearCombination) -> Option<Scalar>;
+    
     /// Counts the amount of constraints in the constraint system.
     fn metrics(&self) -> crate::r1cs::Metrics;
 

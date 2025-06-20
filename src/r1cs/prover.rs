@@ -168,6 +168,10 @@ impl<'g, T: BorrowMut<Transcript>> ConstraintSystem for Prover<'g, T> {
         Ok((l_var, r_var, o_var))
     }
 
+    fn eval(&self, lc: &LinearCombination) -> Option<Scalar> {
+        Some(self.eval(lc))
+    }
+
     fn metrics(&self) -> Metrics {
         Metrics {
             multipliers: self.secrets.a_L.len(),
@@ -218,6 +222,10 @@ impl<'g, T: BorrowMut<Transcript>> ConstraintSystem for RandomizingProver<'g, T>
         input_assignments: Option<(Scalar, Scalar)>,
     ) -> Result<(Variable, Variable, Variable), R1CSError> {
         self.prover.allocate_multiplier(input_assignments)
+    }
+
+    fn eval(&self, lc: &LinearCombination) -> Option<Scalar> {
+        Some(self.prover.eval(lc))
     }
 
     fn metrics(&self) -> Metrics {

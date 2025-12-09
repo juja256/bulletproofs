@@ -30,7 +30,7 @@ pub fn create_range_proof(value: u64, nbits: usize) -> (RangeProof, CompressedRi
     .expect("failed to create range proof");
 
     let elapsed = start.elapsed();
-    println!("create_range_proof execution time: {:.2?}", elapsed);
+    println!("create_range_proof execution time: {:.2?}, size = {}", elapsed, proof.to_bytes().len());
     
     (proof, committed)
 }
@@ -56,8 +56,6 @@ pub fn verify_range_proof(proof: &RangeProof, commitment: &CompressedRistretto, 
 
 /// Create multiple range proofs for a vector of values.
 pub fn create_multiple_range_proofs(values: &[u64], nbits: usize) -> (RangeProof, Vec<CompressedRistretto>) {
-    
-    
     let pc_gens = PedersenGens::default();
     let bp_gens = BulletproofGens::new(64, values.len());
     let start = Instant::now();
@@ -79,15 +77,13 @@ pub fn create_multiple_range_proofs(values: &[u64], nbits: usize) -> (RangeProof
     .expect("failed to create range proofs");
 
     let elapsed = start.elapsed();
-    println!("create_multiple_range_proofs execution time: {:.2?}", elapsed);
+    println!("create_multiple_range_proofs execution time: {:.2?}, size = {}", elapsed, proof.to_bytes().len());
     
     (proof, commitments)
 }
 
 /// Verify multiple range proofs.
 pub fn verify_multiple_range_proofs(proof: &RangeProof, commitments: &[CompressedRistretto], nbits: usize) -> bool {
-    
-    
     let pc_gens = PedersenGens::default();
     let bp_gens = BulletproofGens::new(64, commitments.len());
 
@@ -209,42 +205,44 @@ pub fn range_proof_reciprocal_gadget<CS: RandomizableConstraintSystem>(
     n: usize,
     b: usize, // 2^b is the size of lookup table
 ) -> Result<(), R1CSError> {
-    cs.specify_randomized_constraints(move |cs| {
-        let c = cs.challenge_scalar(b"challenge"); // get FS challenge from CS
-        let mut exp_2b = Scalar::ONE;
-        let mut sum_reciprocals = LinearCombination::from(Scalar::ZERO);
-        let multiplicities = v_assignment
+     let multiplicities = v_assignment
             .map(|val| get_multiplicities(val, b));
 
-        let m_assignments: Vec<Option<u64>> = (0..(1<<b))
-            .map(|i| multiplicities.as_ref().map(|vec| vec[i]))
-            .collect();
-        
-        // could be before challenge
-        let m_vars: Vec<Variable> = m_assignments.iter()
-            .map(|&assign| {
-                cs.allocate(assign.map(|v| Scalar::from(v)))
-            })
-            .collect::<Result<Vec<Variable>, R1CSError>>()?;
-        // TODO: check soundness of this approach
+    let m_assignments: Vec<Option<u64>> = (0..(1<<b))
+        .map(|i| multiplicities.as_ref().map(|vec| vec[i]))
+        .collect(); // multiplicity assignments
+    
+    let m_vars: Vec<Variable> = m_assignments.iter()
+        .map(|&assign| {
+            cs.allocate(assign.map(|v| Scalar::from(v)))
+        })
+        .collect::<Result<Vec<Variable>, R1CSError>>()?; // commit to multiplicities
+
+    let d_vars = (0..(n / b)).map(|i| {
+        cs.allocate(v_assignment.map(|q| {
+            Scalar::from((q >> (i*b)) & ((1u64 << b) - 1))
+        }))
+    }).collect::<Result<Vec<Variable>, R1CSError>>()?; // commit to digits
+
+    cs.specify_randomized_constraints(move |cs| {
+        let c = cs.challenge_scalar(b"challenge"); // get phase2 Fiat-Shamir challenge from the CS
+        let mut exp_2b = Scalar::ONE;
+        let mut sum_reciprocals = LinearCombination::from(Scalar::ZERO);
+       
         let sum_m = m_vars.iter().enumerate()
             .fold(LinearCombination::from(Scalar::ZERO), |acc, (i, &var)| {
                 acc + var * (Scalar::from(i as u64) + c).invert()
-            });
+            }); // Sum(m_i / (c + i), i = 0..2^b-1)
 
         for i in 0..n/b {
-            /*let d = cs.allocate(v_assignment.map(|q| {
-                Scalar::from((q >> i) & ((1u64 << b) - 1))
-            }))?;
-            let r = cs.allocate(v_assignment.map(|q| {
-                (Scalar::from((q >> i) & ((1u64 << b) - 1)) + c).invert()
-            }))?;
-            cs.multiply(left, right)*/
             let (r, d_plus_c, o) = cs.allocate_multiplier(v_assignment.map(|q| {
                 let d: u64 = (q >> (i*b)) & ((1u64 << b) - 1); // extract digit value
                 let r = (Scalar::from(d) + c).invert(); // compute reciprocal with challenge
                 (r, c + Scalar::from(d)) // r*(c+d) = 1
             }))?;
+
+            // enforce that d_plus_c is constructed correctly
+            cs.constrain(d_plus_c - c - d_vars[i]);
 
             // Enforce the product to be 1 to assure reciprocity
             cs.constrain(o - Scalar::ONE);
@@ -259,7 +257,9 @@ pub fn range_proof_reciprocal_gadget<CS: RandomizableConstraintSystem>(
 
         // Enforce that v = Sum(d_i * 2^{b*i}, i = 0..n/b-1)
         cs.constrain(v);
+        // Enforce that Sum(m_i / (c + i), i = 0..2^b-1) = Sum(1 / (c + d_i), i = 0..n/b-1) -- core of the reciprocal argument
         cs.constrain(sum_m - sum_reciprocals);
+        
         Ok(())
     })
 }
@@ -268,7 +268,7 @@ pub fn range_proof_reciprocal_gadget<CS: RandomizableConstraintSystem>(
 /// Returns (proof, commitment, blinding).
 pub fn create_range_proof_reciprocal(value: u64, nbits: usize) -> (R1CSProof, CompressedRistretto) {
     let pc_gens = PedersenGens::default();
-    let bp_gens = BulletproofGens::new(64, 1);
+    let bp_gens = BulletproofGens::new(32, 1);
 
     let start = Instant::now();
     let mut transcript = Transcript::new(b"r1cs-range-proof-reciprocal");
@@ -286,7 +286,7 @@ pub fn create_range_proof_reciprocal(value: u64, nbits: usize) -> (R1CSProof, Co
     let proof = prover.prove(&bp_gens).expect("prover failed to create proof");
 
     let elapsed = start.elapsed();
-    println!("create_range_proof_reciprocal execution time: {:.2?}", elapsed);
+    println!("create_range_proof_reciprocal execution time: {:.2?}, size = {}", elapsed, proof.to_bytes().len());
 
     (proof, commitment)
 }
@@ -294,7 +294,7 @@ pub fn create_range_proof_reciprocal(value: u64, nbits: usize) -> (R1CSProof, Co
 /// Verify an R1CS range proof produced by `create_range_proof_reciprocal` (b = 4).
 pub fn verify_range_proof_reciprocal(proof: &R1CSProof, commitment: &CompressedRistretto, nbits: usize) -> bool {
     let pc_gens = PedersenGens::default();
-    let bp_gens = BulletproofGens::new(64, 1);
+    let bp_gens = BulletproofGens::new(32, 1);
 
     let start = Instant::now();
     let mut transcript = Transcript::new(b"r1cs-range-proof-reciprocal");
@@ -327,13 +327,6 @@ mod tests {
     }
 
     #[test]
-    fn test_create_and_verify_r1cs_range_proof_reciprocal() {
-        let value = 42u64;
-        let (proof, commit) = create_range_proof_reciprocal(value, 64);
-        assert!(verify_range_proof_reciprocal(&proof, &commit, 64));
-    }
-
-    #[test]
     fn test_create_and_verify_multiple_range_proofs() {
         let values = vec![10u64, 20u64, 30u64, 50u64];
         let (proof, commits) = create_multiple_range_proofs(&values, 64);
@@ -344,5 +337,12 @@ mod tests {
     fn test_create_and_verify_range_proof() {
         let (proof, commit) = create_range_proof(42u64, 64);
         assert!(verify_range_proof(&proof, &commit, 64));
+    }
+
+    #[test]
+    fn test_create_and_verify_r1cs_range_proof_reciprocal() {
+        let value = 42u64;
+        let (proof, commit) = create_range_proof_reciprocal(value, 64);
+        assert!(verify_range_proof_reciprocal(&proof, &commit, 64));
     }
 }

@@ -21,6 +21,35 @@ pub const MSM_CHUNK_CT: usize = 1 << 12;
 /// the window is capped at 8 bits, so larger batches are barely faster).
 pub const MSM_CHUNK_VT: usize = 1 << 14;
 
+/// $\sum_i s_i P_i$ over slices, by chunks of `chunk` terms without copying (in parallel
+/// with `parallel`). Variable time: for public scalars only.
+pub fn vartime_msm_slices(scalars: &[Scalar], points: &[RistrettoPoint], chunk: usize) -> RistrettoPoint {
+    assert_eq!(scalars.len(), points.len());
+    let msm = |(s, p): (&[Scalar], &[RistrettoPoint])| RistrettoPoint::vartime_multiscalar_mul(s, p);
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        scalars
+            .par_chunks(chunk)
+            .zip(points.par_chunks(chunk))
+            .map(msm)
+            .reduce(RistrettoPoint::identity, |a, b| a + b)
+    }
+    #[cfg(not(feature = "parallel"))]
+    scalars.chunks(chunk).zip(points.chunks(chunk)).map(msm).fold(RistrettoPoint::identity(), |a, b| a + b)
+}
+
+/// `(0..n).map(f).collect()`, in parallel with `parallel`.
+pub fn map_index<T: Send, F: Fn(usize) -> T + Sync + Send>(n: usize, f: F) -> Vec<T> {
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        (0..n).into_par_iter().map(f).collect()
+    }
+    #[cfg(not(feature = "parallel"))]
+    (0..n).map(f).collect()
+}
+
 /// $\sum_i s_i P_i$ computed in chunks of `chunk` terms, so that the multiscalar
 /// multiplication buffers stay small. `vartime` must only be used for public scalars or
 /// scalars whose timing leakage is acceptable.

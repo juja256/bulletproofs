@@ -15,6 +15,7 @@ use crate::errors::R1CSError;
 use crate::generators::{BulletproofGens, PedersenGens};
 use crate::r1cs::Metrics;
 use crate::transcript::TranscriptProtocol;
+use super::compact::{ConstraintStore, Flattened};
 
 /// A [`ConstraintSystem`] implementation for use by the verifier.
 ///
@@ -27,7 +28,7 @@ use crate::transcript::TranscriptProtocol;
 /// that instantiate the randomized constraints, and verifies the proof.
 pub struct Verifier<T: BorrowMut<Transcript>> {
     transcript: T,
-    constraints: Vec<LinearCombination>,
+    constraints: ConstraintStore,
 
     /// Records the number of low-level variables allocated in the
     /// constraint system.
@@ -135,7 +136,7 @@ impl<T: BorrowMut<Transcript>> ConstraintSystem for Verifier<T> {
         // TODO: check that the linear combinations are valid
         // (e.g. that variables are valid, that the linear combination
         // evals to 0 for prover, etc).
-        self.constraints.push(lc);
+        self.constraints.push(&lc);
     }
 }
 
@@ -230,7 +231,7 @@ impl<T: BorrowMut<Transcript>> Verifier<T> {
             transcript,
             num_vars: 0,
             V: Vec::new(),
-            constraints: Vec::new(),
+            constraints: ConstraintStore::new(true),
             deferred_constraints: Vec::new(),
             pending_multiplier: None,
         }
@@ -275,44 +276,9 @@ impl<T: BorrowMut<Transcript>> Verifier<T> {
     /// This has the same logic as `ProverCS::flattened_constraints()`
     /// but also computes the constant terms (which the prover skips
     /// because they're not needed to construct the proof).
-    fn flattened_constraints(
-        &mut self,
-        z: &Scalar,
-    ) -> (Vec<Scalar>, Vec<Scalar>, Vec<Scalar>, Vec<Scalar>, Scalar) {
-        let n = self.num_vars;
-        let m = self.V.len();
-
-        let mut wL = vec![Scalar::ZERO; n];
-        let mut wR = vec![Scalar::ZERO; n];
-        let mut wO = vec![Scalar::ZERO; n];
-        let mut wV = vec![Scalar::ZERO; m];
-        let mut wc = Scalar::ZERO;
-
-        let mut exp_z = *z;
-        for lc in self.constraints.iter() {
-            for (var, coeff) in &lc.terms {
-                match var {
-                    Variable::MultiplierLeft(i) => {
-                        wL[*i] += exp_z * coeff;
-                    }
-                    Variable::MultiplierRight(i) => {
-                        wR[*i] += exp_z * coeff;
-                    }
-                    Variable::MultiplierOutput(i) => {
-                        wO[*i] += exp_z * coeff;
-                    }
-                    Variable::Committed(i) => {
-                        wV[*i] -= exp_z * coeff;
-                    }
-                    Variable::One() => {
-                        wc -= exp_z * coeff;
-                    }
-                }
-            }
-            exp_z *= z;
-        }
-
-        (wL, wR, wO, wV, wc)
+    fn flattened_constraints(&mut self, z: &Scalar) -> Flattened {
+        let (n, m) = (self.num_vars, self.V.len());
+        self.constraints.flatten(z, n, m)
     }
 
     /// Calls all remembered callbacks with an API that
@@ -379,7 +345,6 @@ impl<T: BorrowMut<Transcript>> Verifier<T> {
 
         // If the number of multiplications is not 0 or a power of 2, then pad the circuit.
         let n = self.num_vars;
-        let n2 = n - n1;
         let padded_n = self.num_vars.next_power_of_two();
         let pad = padded_n - n;
 
@@ -440,31 +405,15 @@ impl<T: BorrowMut<Transcript>> Verifier<T> {
 
         let delta = inner_product(&yneg_wR[0..n], &wL);
 
-        let u_for_g = iter::repeat(Scalar::ONE)
-            .take(n1)
-            .chain(iter::repeat(u).take(n2 + pad));
-        let u_for_h = u_for_g.clone();
+        // Scalars of the G and H generators, computed per index (in parallel with `parallel`).
+        let u_or_1 = |i: usize| if i < n1 { Scalar::ONE } else { u };
+        let g_scalars = util::map_index(padded_n, |i| u_or_1(i) * (x * yneg_wR[i] - a * s[i]));
+        let h_scalars = util::map_index(padded_n, |i| {
+            let (wLi, wOi) = if i < n { (wL[i], wO[i]) } else { (Scalar::ZERO, Scalar::ZERO) };
+            u_or_1(i) * (y_inv_vec[i] * (x * wLi + wOi - b * s[padded_n - 1 - i]) - Scalar::ONE)
+        });
+        drop((wL, wO, yneg_wR, y_inv_vec, s));
 
-        // define parameters for P check
-        let g_scalars = yneg_wR
-            .iter()
-            .zip(u_for_g)
-            .zip(s.iter().take(padded_n))
-            .map(|((yneg_wRi, u_or_1), s_i)| u_or_1 * (x * yneg_wRi - a * s_i));
-
-        let h_scalars = y_inv_vec
-            .iter()
-            .zip(u_for_h)
-            .zip(s.iter().rev().take(padded_n))
-            .zip(wL.into_iter().chain(iter::repeat(Scalar::ZERO).take(pad)))
-            .zip(wO.into_iter().chain(iter::repeat(Scalar::ZERO).take(pad)))
-            .map(|((((y_inv_i, u_or_1), s_i_inv), wLi), wOi)| {
-                u_or_1 * (y_inv_i * (x * wLi + wOi - b * s_i_inv) - Scalar::ONE)
-            });
-
-        // Create a `TranscriptRng` from the transcript. The verifier
-        // has no witness data to commit, so this just mixes external
-        // randomness into the existing transcript.
         use rand::thread_rng;
         let mut rng = self
             .transcript
@@ -497,7 +446,10 @@ impl<T: BorrowMut<Transcript>> Verifier<T> {
         let R_points = decompress(&mut proof.ipp_proof.R_vec.iter())?;
 
         // One multiscalar multiplication, computed in chunks (in parallel with `parallel`).
-        let mega_check = crate::util::chunked_msm(
+        // The final check is one multiscalar multiplication; the generator parts are
+        // computed over slices without copying.
+        let (G_gens, H_gens) = gens.G_H_slices(padded_n);
+        let small = crate::util::chunked_msm(
             iter::once(x) // A_I1
                 .chain(iter::once(xx)) // A_O1
                 .chain(iter::once(xxx)) // S1
@@ -510,21 +462,19 @@ impl<T: BorrowMut<Transcript>> Verifier<T> {
                     w * (proof.t_x - a * b) + r * (xx * (wc + delta) - proof.t_x),
                 )) // B
                 .chain(iter::once(-proof.e_blinding - r * proof.t_x_blinding)) // B_blinding
-                .chain(g_scalars) // G
-                .chain(h_scalars) // H
                 .chain(u_sq.iter().cloned()) // ipp_proof.L_vec
                 .chain(u_inv_sq.iter().cloned()), // ipp_proof.R_vec
             head.iter()
                 .chain(iter::once(&pc_gens.B))
                 .chain(iter::once(&pc_gens.B_blinding))
-                .chain(gens.G(padded_n))
-                .chain(gens.H(padded_n))
                 .chain(L_points.iter())
                 .chain(R_points.iter()),
             crate::util::MSM_CHUNK_VT,
             true,
         );
-
+        let mega_check = small
+            + util::vartime_msm_slices(&g_scalars, G_gens, util::MSM_CHUNK_VT)
+            + util::vartime_msm_slices(&h_scalars, H_gens, util::MSM_CHUNK_VT);
         use curve25519_dalek::traits::IsIdentity;
 
         if !mega_check.is_identity() {

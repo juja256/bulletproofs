@@ -4,6 +4,7 @@ use core::borrow::BorrowMut;
 use core::mem;
 use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
 use curve25519_dalek::scalar::Scalar;
+use curve25519_dalek::traits::VartimeMultiscalarMul;
 use merlin::Transcript;
 
 use super::{
@@ -346,9 +347,7 @@ impl<T: BorrowMut<Transcript>> Verifier<T> {
         // If the number of multiplications is not 0 or a power of 2, then pad the circuit.
         let n = self.num_vars;
         let padded_n = self.num_vars.next_power_of_two();
-        let pad = padded_n - n;
 
-        use crate::inner_product_proof::inner_product;
         use crate::util;
         use std::iter;
 
@@ -393,17 +392,11 @@ impl<T: BorrowMut<Transcript>> Verifier<T> {
         let b = proof.ipp_proof.b;
 
         let y_inv = y.invert();
-        let y_inv_vec = util::exp_iter(y_inv)
-            .take(padded_n)
-            .collect::<Vec<Scalar>>();
-        let yneg_wR = wR
-            .into_iter()
-            .zip(y_inv_vec.iter())
-            .map(|(wRi, exp_y_inv)| wRi * exp_y_inv)
-            .chain(iter::repeat(Scalar::ZERO).take(pad))
-            .collect::<Vec<Scalar>>();
+        let y_inv_vec = util::powers(y_inv, padded_n);
+        let yneg_wR = util::map_index(padded_n, |i| if i < n { wR[i] * y_inv_vec[i] } else { Scalar::ZERO });
+        drop(wR);
 
-        let delta = inner_product(&yneg_wR[0..n], &wL);
+        let delta = util::inner_product_par(&yneg_wR[0..n], &wL);
 
         // Scalars of the G and H generators, computed per index (in parallel with `parallel`).
         let u_or_1 = |i: usize| if i < n1 { Scalar::ONE } else { u };
@@ -445,11 +438,10 @@ impl<T: BorrowMut<Transcript>> Verifier<T> {
         let L_points = decompress(&mut proof.ipp_proof.L_vec.iter())?;
         let R_points = decompress(&mut proof.ipp_proof.R_vec.iter())?;
 
-        // One multiscalar multiplication, computed in chunks (in parallel with `parallel`).
-        // The final check is one multiscalar multiplication; the generator parts are
-        // computed over slices without copying.
+        // The final check is one multiscalar multiplication: the few proof points directly,
+        // the generator parts over slices without copying (in parallel with `parallel`).
         let (G_gens, H_gens) = gens.G_H_slices(padded_n);
-        let small = crate::util::chunked_msm(
+        let small = RistrettoPoint::vartime_multiscalar_mul(
             iter::once(x) // A_I1
                 .chain(iter::once(xx)) // A_O1
                 .chain(iter::once(xxx)) // S1
@@ -469,8 +461,6 @@ impl<T: BorrowMut<Transcript>> Verifier<T> {
                 .chain(iter::once(&pc_gens.B_blinding))
                 .chain(L_points.iter())
                 .chain(R_points.iter()),
-            crate::util::MSM_CHUNK_VT,
-            true,
         );
         let mega_check = small
             + util::vartime_msm_slices(&g_scalars, G_gens, util::MSM_CHUNK_VT)

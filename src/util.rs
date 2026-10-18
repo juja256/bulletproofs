@@ -9,7 +9,6 @@ use clear_on_drop::clear::Clear;
 use curve25519_dalek::scalar::Scalar;
 
 use crate::inner_product_proof::inner_product;
-use core::borrow::Borrow;
 use curve25519_dalek::ristretto::RistrettoPoint;
 use curve25519_dalek::traits::{Identity, MultiscalarMul, VartimeMultiscalarMul};
 
@@ -22,10 +21,16 @@ pub const MSM_CHUNK_CT: usize = 1 << 12;
 pub const MSM_CHUNK_VT: usize = 1 << 14;
 
 /// $\sum_i s_i P_i$ over slices, by chunks of `chunk` terms without copying (in parallel
-/// with `parallel`). Variable time: for public scalars only.
-pub fn vartime_msm_slices(scalars: &[Scalar], points: &[RistrettoPoint], chunk: usize) -> RistrettoPoint {
+/// with `parallel`). `vartime` must only be used for public scalars.
+pub fn msm_slices(scalars: &[Scalar], points: &[RistrettoPoint], chunk: usize, vartime: bool) -> RistrettoPoint {
     assert_eq!(scalars.len(), points.len());
-    let msm = |(s, p): (&[Scalar], &[RistrettoPoint])| RistrettoPoint::vartime_multiscalar_mul(s, p);
+    let msm = |(s, p): (&[Scalar], &[RistrettoPoint])| {
+        if vartime {
+            RistrettoPoint::vartime_multiscalar_mul(s, p)
+        } else {
+            RistrettoPoint::multiscalar_mul(s, p)
+        }
+    };
     #[cfg(feature = "parallel")]
     {
         use rayon::prelude::*;
@@ -39,6 +44,61 @@ pub fn vartime_msm_slices(scalars: &[Scalar], points: &[RistrettoPoint], chunk: 
     scalars.chunks(chunk).zip(points.chunks(chunk)).map(msm).fold(RistrettoPoint::identity(), |a, b| a + b)
 }
 
+/// [`msm_slices`] in variable time: for public scalars only.
+pub fn vartime_msm_slices(scalars: &[Scalar], points: &[RistrettoPoint], chunk: usize) -> RistrettoPoint {
+    msm_slices(scalars, points, chunk, true)
+}
+
+/// $\sum_v s_v P_v$ over `v in 0..len` with the terms given by `term(v)`, by chunks of
+/// `chunk` terms (in parallel with `parallel`). Variable time: for public scalars only.
+pub fn vartime_msm_index<'a, F>(len: usize, chunk: usize, term: F) -> RistrettoPoint
+where
+    F: Fn(usize) -> (Scalar, &'a RistrettoPoint) + Sync,
+{
+    let run = |c: usize| {
+        let (start, end) = (c * chunk, ((c + 1) * chunk).min(len));
+        let (s, p): (Vec<Scalar>, Vec<&RistrettoPoint>) = (start..end).map(&term).unzip();
+        RistrettoPoint::vartime_multiscalar_mul(s, p)
+    };
+    let chunks = (len + chunk - 1) / chunk;
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        (0..chunks).into_par_iter().map(run).reduce(RistrettoPoint::identity, |a, b| a + b)
+    }
+    #[cfg(not(feature = "parallel"))]
+    (0..chunks).map(run).fold(RistrettoPoint::identity(), |a, b| a + b)
+}
+
+/// `[1, x, x^2, ..., x^(len-1)]`, by chunks (in parallel with `parallel`).
+pub fn powers(x: Scalar, len: usize) -> Vec<Scalar> {
+    const CHUNK: usize = 1 << 12;
+    let chunks = map_index((len + CHUNK - 1) / CHUNK, |c| {
+        let start = c * CHUNK;
+        let mut p = scalar_exp_vartime(&x, start as u64);
+        let end = (start + CHUNK).min(len);
+        let mut out = Vec::with_capacity(end - start);
+        for _ in start..end {
+            out.push(p);
+            p *= x;
+        }
+        out
+    });
+    chunks.concat()
+}
+
+/// `<a, b>`, by chunks (in parallel with `parallel`).
+pub fn inner_product_par(a: &[Scalar], b: &[Scalar]) -> Scalar {
+    const CHUNK: usize = 1 << 14;
+    assert_eq!(a.len(), b.len());
+    map_index((a.len() + CHUNK - 1) / CHUNK, |c| {
+        let r = c * CHUNK..((c + 1) * CHUNK).min(a.len());
+        inner_product(&a[r.clone()], &b[r])
+    })
+    .into_iter()
+    .sum()
+}
+
 /// `(0..n).map(f).collect()`, in parallel with `parallel`.
 pub fn map_index<T: Send, F: Fn(usize) -> T + Sync + Send>(n: usize, f: F) -> Vec<T> {
     #[cfg(feature = "parallel")]
@@ -50,72 +110,6 @@ pub fn map_index<T: Send, F: Fn(usize) -> T + Sync + Send>(n: usize, f: F) -> Ve
     (0..n).map(f).collect()
 }
 
-/// $\sum_i s_i P_i$ computed in chunks of `chunk` terms, so that the multiscalar
-/// multiplication buffers stay small. `vartime` must only be used for public scalars or
-/// scalars whose timing leakage is acceptable.
-pub fn chunked_msm<I, J>(scalars: I, points: J, chunk: usize, vartime: bool) -> RistrettoPoint
-where
-    I: IntoIterator,
-    I::Item: Borrow<Scalar>,
-    J: IntoIterator,
-    J::Item: Borrow<RistrettoPoint>,
-{
-    let msm = |s: &[Scalar], p: &[RistrettoPoint]| {
-        if vartime {
-            RistrettoPoint::vartime_multiscalar_mul(s, p)
-        } else {
-            RistrettoPoint::multiscalar_mul(s, p)
-        }
-    };
-    // Number of chunks buffered and processed together (in parallel with `parallel`).
-    #[cfg(feature = "parallel")]
-    let wave = rayon::current_num_threads().max(1);
-    #[cfg(not(feature = "parallel"))]
-    let wave = 1;
-
-    let mut acc = RistrettoPoint::identity();
-    let (mut s, mut p) = (scalars.into_iter(), points.into_iter());
-    let mut bufs: Vec<(Vec<Scalar>, Vec<RistrettoPoint>)> =
-        (0..wave).map(|_| (Vec::with_capacity(chunk), Vec::with_capacity(chunk))).collect();
-    let mut done = false;
-    while !done {
-        let mut filled = 0;
-        for (sbuf, pbuf) in bufs.iter_mut() {
-            sbuf.clear();
-            pbuf.clear();
-            for (x, y) in s.by_ref().zip(p.by_ref()).take(chunk) {
-                sbuf.push(*x.borrow());
-                pbuf.push(*y.borrow());
-            }
-            if !sbuf.is_empty() {
-                filled += 1;
-            }
-            if sbuf.len() < chunk {
-                done = true;
-                break;
-            }
-        }
-        let full = &bufs[..filled];
-        #[cfg(feature = "parallel")]
-        {
-            use rayon::prelude::*;
-            acc += full
-                .par_iter()
-                .map(|(s, p)| msm(s, p))
-                .reduce(RistrettoPoint::identity, |a, b| a + b);
-        }
-        #[cfg(not(feature = "parallel"))]
-        for (s, p) in full {
-            acc += msm(s, p);
-        }
-    }
-    for (sbuf, _) in bufs.iter_mut() {
-        for x in sbuf.iter_mut() {
-            x.clear();
-        }
-    }
-    acc
-}
 
 /// Represents a degree-1 vector polynomial \\(\mathbf{a} + \mathbf{b} \cdot x\\).
 pub struct VecPoly1(pub Vec<Scalar>, pub Vec<Scalar>);

@@ -1,8 +1,8 @@
-//! Compact storage of linear constraints for the prover.
+//! Compact storage of linear constraints for the prover and the verifier.
 //!
 //! A `LinearCombination` term is a `(Variable, Scalar)` pair of 48 bytes in its own heap
-//! vector. The prover only needs the constraints once, to flatten them with powers of the
-//! challenge `z`, so it stores each term as 8 bytes: a packed variable and an index into a
+//! vector. Both sides need the constraints only once, to flatten them with powers of the
+//! challenge `z`, so each term is stored as 8 bytes: a packed variable and an index into a
 //! table of distinct coefficients (circuits use few distinct coefficients: ±1, powers of
 //! two, challenge powers). The prover does not use constant terms and drops them; the
 //! verifier keeps them. Coefficients ±1 (most terms) are flattened without a multiplication.
@@ -60,11 +60,20 @@ impl ConstraintStore {
                 Variable::One() if self.keep_constants => pack(TAG_ONE, 0),
                 Variable::One() => continue,
             };
-            let next = self.coeffs.len() as u32;
-            let c = *self.index.entry(coeff.to_bytes()).or_insert(next);
-            if c == next {
-                self.coeffs.push(*coeff);
-            }
+            // ±1 (most terms) without hashing; plain byte comparison of public values.
+            let bytes = coeff.as_bytes();
+            let c = if bytes == self.coeffs[COEFF_ONE as usize].as_bytes() {
+                COEFF_ONE
+            } else if bytes == self.coeffs[COEFF_MINUS_ONE as usize].as_bytes() {
+                COEFF_MINUS_ONE
+            } else {
+                let next = self.coeffs.len() as u32;
+                let c = *self.index.entry(coeff.to_bytes()).or_insert(next);
+                if c == next {
+                    self.coeffs.push(*coeff);
+                }
+                c
+            };
             self.terms.push((packed, c));
         }
         self.ends.push(self.terms.len());
@@ -72,30 +81,91 @@ impl ConstraintStore {
 
     /// $w_X[i] = \sum_q z^{q+1} W_X[q][i]$ for the multiplier columns, $-\ldots$ for the
     /// committed column and the constant (zero if constants are not kept); frees the storage.
+    ///
+    /// With `parallel`, every thread owns a range of variable indices and scans all terms,
+    /// recomputing the powers of `z` itself: no extra memory, and each sum is accumulated in
+    /// the same order as in the serial code.
     pub(super) fn flatten(&mut self, z: &Scalar, n: usize, m: usize) -> Flattened {
-        let mut w = [vec![Scalar::ZERO; n], vec![Scalar::ZERO; n], vec![Scalar::ZERO; n], vec![Scalar::ZERO; m]];
+        let mut wL = vec![Scalar::ZERO; n];
+        let mut wR = vec![Scalar::ZERO; n];
+        let mut wO = vec![Scalar::ZERO; n];
+        let mut wV = vec![Scalar::ZERO; m];
         let mut wc = Scalar::ZERO;
-        let mut exp_z = *z;
-        let mut start = 0;
-        for &end in &self.ends {
-            for &(packed, c) in &self.terms[start..end] {
-                let (tag, i) = (packed >> TAG_SHIFT, (packed & INDEX_MASK) as usize);
-                let t = match c {
-                    COEFF_ONE => exp_z,
-                    COEFF_MINUS_ONE => -exp_z,
-                    _ => exp_z * self.coeffs[c as usize],
-                };
-                match tag {
-                    TAG_COMMITTED => w[3][i] -= t,
-                    TAG_ONE => wc -= t,
-                    _ => w[tag as usize][i] += t,
+
+        // Scan all terms; `apply(tag, i, t)` gets every term with t = z^{q+1} * coeff.
+        let scan = |apply: &mut dyn FnMut(u32, usize, Scalar), wanted: &dyn Fn(u32, usize) -> bool| {
+            let mut exp_z = *z;
+            let mut start = 0;
+            for &end in &self.ends {
+                for &(packed, c) in &self.terms[start..end] {
+                    let (tag, i) = (packed >> TAG_SHIFT, (packed & INDEX_MASK) as usize);
+                    if !wanted(tag, i) {
+                        continue;
+                    }
+                    let t = match c {
+                        COEFF_ONE => exp_z,
+                        COEFF_MINUS_ONE => -exp_z,
+                        _ => exp_z * self.coeffs[c as usize],
+                    };
+                    apply(tag, i, t);
                 }
+                start = end;
+                exp_z *= z;
             }
-            start = end;
-            exp_z *= z;
+        };
+        let multiplier_part = |lo: usize, wl: &mut [Scalar], wr: &mut [Scalar], wo: &mut [Scalar]| {
+            let hi = lo + wl.len();
+            scan(
+                &mut |tag, i, t| match tag {
+                    TAG_LEFT => wl[i - lo] += t,
+                    TAG_RIGHT => wr[i - lo] += t,
+                    _ => wo[i - lo] += t,
+                },
+                &|tag, i| tag <= TAG_OUTPUT && lo <= i && i < hi,
+            );
+        };
+        let other_part = |wv: &mut [Scalar], wc: &mut Scalar| {
+            scan(
+                &mut |tag, i, t| match tag {
+                    TAG_COMMITTED => wv[i] -= t,
+                    _ => *wc -= t,
+                },
+                &|tag, _| tag >= TAG_COMMITTED,
+            );
+        };
+
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let part = (n + rayon::current_num_threads() - 1) / rayon::current_num_threads();
+            let part = part.max(1);
+            rayon::join(
+                || {
+                    wL.par_chunks_mut(part)
+                        .zip(wR.par_chunks_mut(part))
+                        .zip(wO.par_chunks_mut(part))
+                        .enumerate()
+                        .for_each(|(k, ((wl, wr), wo))| multiplier_part(k * part, wl, wr, wo))
+                },
+                || other_part(&mut wV, &mut wc),
+            );
         }
+        #[cfg(not(feature = "parallel"))]
+        {
+            let _ = (&multiplier_part, &other_part);
+            scan(
+                &mut |tag, i, t| match tag {
+                    TAG_LEFT => wL[i] += t,
+                    TAG_RIGHT => wR[i] += t,
+                    TAG_OUTPUT => wO[i] += t,
+                    TAG_COMMITTED => wV[i] -= t,
+                    _ => wc -= t,
+                },
+                &|_, _| true,
+            );
+        }
+
         *self = ConstraintStore::new(self.keep_constants);
-        let [wL, wR, wO, wV] = w;
         (wL, wR, wO, wV, wc)
     }
 }

@@ -166,6 +166,25 @@ The `yoloproofs` feature enables support for rank-1 constraint system proofs.
 It is **UNSTABLE AND UNSUITABLE FOR DEPLOYMENT**, and **PROVIDED FOR TESTING
 ONLY**.
 
+The `parallel` feature (this fork) runs the prover and verifier on all threads with
+[rayon](https://crates.io/crates/rayon): chunked multiscalar multiplications, the
+polynomial passes and constraint flattening, the inner-product argument and generator
+derivation. Proofs are identical to the serial ones.
+
+### Prover and verifier optimisations in this fork
+
+Compared to upstream, the R1CS prover needs about 3x less memory and is faster, the
+verifier too, with byte-identical proofs (`tests/golden.rs` pins proof bytes produced by
+upstream `d27dde0` with fixed randomness via `Prover::prove_with_rng`):
+
+- multiscalar multiplications run in chunks over slices (no lookup tables or buffers
+  for all points at once, no copies of the generators);
+- constraints are stored compactly, 8 bytes per term (`r1cs::compact`), on both sides;
+- the vector polynomials `l(X)`, `r(X)` are never materialised: `t(X)` is accumulated per
+  index and `l(x)`, `r(x)` overwrite the witness vectors in place;
+- the inner-product prover computes the first rounds from the input generators and
+  materialises the folded generators once, instead of folding them every round.
+
 The `avx2_backend` feature enables `curve25519-dalek`'s AVX2 backend,
 which implements curve arithmetic using [parallel
 formulas][parallel_edwards].  To use it for Bulletproofs, the

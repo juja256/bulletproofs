@@ -280,7 +280,7 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
                 a_R: Vec::new(),
                 a_O: Vec::new(),
             },
-            constraints: ConstraintStore::default(),
+            constraints: ConstraintStore::new(false),
             deferred_constraints: Vec::new(),
             pending_multiplier: None,
         }
@@ -582,7 +582,7 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
         let y = transcript.challenge_scalar(b"y");
         let z = transcript.challenge_scalar(b"z");
 
-        let (wL, wR, wO, wV) = self.flattened_constraints(&z);
+        let (wL, wR, wO, wV, _) = self.flattened_constraints(&z);
 
         // t(X) = <l(X), r(X)>, accumulated per index without materialising the vector
         // polynomials (l_0 = r_2 = 0):

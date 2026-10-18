@@ -3,7 +3,7 @@
 use clear_on_drop::clear::Clear;
 use core::borrow::BorrowMut;
 use core::mem;
-use curve25519_dalek::ristretto::CompressedRistretto;
+use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
 use curve25519_dalek::scalar::Scalar;
 use curve25519_dalek::traits::Identity;
 use merlin::Transcript;
@@ -21,6 +21,27 @@ use crate::r1cs::Metrics;
 use crate::transcript::TranscriptProtocol;
 use crate::util;
 use super::compact::{ConstraintStore, Flattened};
+
+/// Index chunk for the polynomial passes of the prover.
+const POLY_CHUNK: usize = 1 << 12;
+
+/// `<x, G> + <y, H> + blinding * B_blinding` in constant time (over slices, by chunks; in
+/// parallel with `parallel`).
+fn commit(
+    x: &[Scalar],
+    y: Option<&[Scalar]>,
+    G: &[RistrettoPoint],
+    H: &[RistrettoPoint],
+    blinding: &Scalar,
+    pc_gens: &PedersenGens,
+) -> CompressedRistretto {
+    let mut acc = blinding * pc_gens.B_blinding;
+    acc += util::msm_slices(x, &G[..x.len()], util::MSM_CHUNK_CT, false);
+    if let Some(y) = y {
+        acc += util::msm_slices(y, &H[..y.len()], util::MSM_CHUNK_CT, false);
+    }
+    acc.compress()
+}
 
 /// A [`ConstraintSystem`] implementation for use by the prover.
 ///
@@ -402,7 +423,6 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
         bp_gens: &BulletproofGens,
         external_rng: &mut R,
     ) -> Result<(R1CSProof, T), R1CSError> {
-        use std::iter;
 
         // Commit a length _suffix_ for the number of high-level variables.
         // We cannot do this in advance because user can commit variables one-by-one,
@@ -454,39 +474,12 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
         let mut s_R1: Vec<Scalar> = (0..n1).map(|_| Scalar::random(&mut rng)).collect();
 
         // A_I = <a_L, G> + <a_R, H> + i_blinding * B_blinding
-        let A_I1 = util::chunked_msm(
-            iter::once(&i_blinding1)
-                .chain(self.secrets.a_L.iter())
-                .chain(self.secrets.a_R.iter()),
-            iter::once(&self.pc_gens.B_blinding)
-                .chain(gens.G(n1))
-                .chain(gens.H(n1)),
-            util::MSM_CHUNK_CT,
-            false,
-        )
-        .compress();
-
         // A_O = <a_O, G> + o_blinding * B_blinding
-        let A_O1 = util::chunked_msm(
-            iter::once(&o_blinding1).chain(self.secrets.a_O.iter()),
-            iter::once(&self.pc_gens.B_blinding).chain(gens.G(n1)),
-            util::MSM_CHUNK_CT,
-            false,
-        )
-        .compress();
-
         // S = <s_L, G> + <s_R, H> + s_blinding * B_blinding
-        let S1 = util::chunked_msm(
-            iter::once(&s_blinding1)
-                .chain(s_L1.iter())
-                .chain(s_R1.iter()),
-            iter::once(&self.pc_gens.B_blinding)
-                .chain(gens.G(n1))
-                .chain(gens.H(n1)),
-            util::MSM_CHUNK_CT,
-            false,
-        )
-        .compress();
+        let (G1, H1) = gens.G_H_slices(n1);
+        let A_I1 = commit(&self.secrets.a_L, Some(&self.secrets.a_R), G1, H1, &i_blinding1, self.pc_gens);
+        let A_O1 = commit(&self.secrets.a_O, None, G1, H1, &o_blinding1, self.pc_gens);
+        let S1 = commit(&s_L1, Some(&s_R1), G1, H1, &s_blinding1, self.pc_gens);
 
         let transcript = self.transcript.borrow_mut();
         transcript.append_point(b"A_I1", &A_I1);
@@ -526,39 +519,13 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
         let mut s_R2: Vec<Scalar> = (0..n2).map(|_| Scalar::random(&mut rng)).collect();
 
         let (A_I2, A_O2, S2) = if has_2nd_phase_commitments {
+            let (G, H) = gens.G_H_slices(n);
+            let (G2, H2) = (&G[n1..], &H[n1..]);
+            let a = &self.secrets;
             (
-                // A_I = <a_L, G> + <a_R, H> + i_blinding * B_blinding
-                util::chunked_msm(
-                    iter::once(&i_blinding2)
-                        .chain(self.secrets.a_L.iter().skip(n1))
-                        .chain(self.secrets.a_R.iter().skip(n1)),
-                    iter::once(&self.pc_gens.B_blinding)
-                        .chain(gens.G(n).skip(n1))
-                        .chain(gens.H(n).skip(n1)),
-                    util::MSM_CHUNK_CT,
-                    false,
-                )
-                .compress(),
-                // A_O = <a_O, G> + o_blinding * B_blinding
-                util::chunked_msm(
-                    iter::once(&o_blinding2).chain(self.secrets.a_O.iter().skip(n1)),
-                    iter::once(&self.pc_gens.B_blinding).chain(gens.G(n).skip(n1)),
-                    util::MSM_CHUNK_CT,
-                    false,
-                )
-                .compress(),
-                // S = <s_L, G> + <s_R, H> + s_blinding * B_blinding
-                util::chunked_msm(
-                    iter::once(&s_blinding2)
-                        .chain(s_L2.iter())
-                        .chain(s_R2.iter()),
-                    iter::once(&self.pc_gens.B_blinding)
-                        .chain(gens.G(n).skip(n1))
-                        .chain(gens.H(n).skip(n1)),
-                    util::MSM_CHUNK_CT,
-                    false,
-                )
-                .compress(),
+                commit(&a.a_L[n1..], Some(&a.a_R[n1..]), G2, H2, &i_blinding2, self.pc_gens),
+                commit(&a.a_O[n1..], None, G2, H2, &o_blinding2, self.pc_gens),
+                commit(&s_L2, Some(&s_R2), G2, H2, &s_blinding2, self.pc_gens),
             )
         } else {
             // Since we are using zero blinding factors and
@@ -589,7 +556,7 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
         //   l_1 = a_L + y^-i w_R,  l_2 = a_O,  l_3 = s_L,
         //   r_0 = w_O - y^i,  r_1 = y^i a_R + w_L,  r_3 = y^i s_R.
         let y_inv = y.invert();
-        let exp_y_inv = util::exp_iter(y_inv).take(padded_n).collect::<Vec<_>>();
+        let exp_y_inv = util::powers(y_inv, padded_n);
         let s_L = |i: usize| if i < n1 { s_L1[i] } else { s_L2[i - n1] };
         let s_R = |i: usize| if i < n1 { s_R1[i] } else { s_R2[i - n1] };
         let secrets = &self.secrets;
@@ -599,25 +566,39 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
             let r = (wO[i] - exp_y, exp_y * a.a_R[i] + wL[i], exp_y * s_R(i));
             (l, r)
         };
-        let mut t_poly = util::Poly6 {
-            t1: Scalar::ZERO,
-            t2: Scalar::ZERO,
-            t3: Scalar::ZERO,
-            t4: Scalar::ZERO,
-            t5: Scalar::ZERO,
-            t6: Scalar::ZERO,
+        // Pass 1, by chunks of indices (in parallel with `parallel`): field additions are
+        // exact, so the order of summation does not matter.
+        let chunks = (n + POLY_CHUNK - 1) / POLY_CHUNK;
+        let partial = util::map_index(chunks, |c| {
+            let start = c * POLY_CHUNK;
+            let mut exp_y = util::scalar_exp_vartime(&y, start as u64); // y^i
+            let mut t = [Scalar::ZERO; 6];
+            for i in start..(start + POLY_CHUNK).min(n) {
+                let ((l1, l2, l3), (r0, r1, r3)) = coeffs(i, exp_y);
+                t[0] += l1 * r0;
+                t[1] += l1 * r1 + l2 * r0;
+                t[2] += l2 * r1 + l3 * r0;
+                t[3] += l1 * r3 + l3 * r1;
+                t[4] += l2 * r3;
+                t[5] += l3 * r3;
+                exp_y *= y;
+            }
+            t
+        });
+        let t = partial.iter().fold([Scalar::ZERO; 6], |mut acc, p| {
+            for k in 0..6 {
+                acc[k] += p[k];
+            }
+            acc
+        });
+        let t_poly = util::Poly6 {
+            t1: t[0],
+            t2: t[1],
+            t3: t[2],
+            t4: t[3],
+            t5: t[4],
+            t6: t[5],
         };
-        let mut exp_y = Scalar::ONE; // y^i
-        for i in 0..n {
-            let ((l1, l2, l3), (r0, r1, r3)) = coeffs(i, exp_y);
-            t_poly.t1 += l1 * r0;
-            t_poly.t2 += l1 * r1 + l2 * r0;
-            t_poly.t3 += l2 * r1 + l3 * r0;
-            t_poly.t4 += l1 * r3 + l3 * r1;
-            t_poly.t5 += l2 * r3;
-            t_poly.t6 += l3 * r3;
-            exp_y *= y;
-        }
 
         let t_1_blinding = Scalar::random(&mut rng);
         let t_3_blinding = Scalar::random(&mut rng);
@@ -660,24 +641,47 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
 
         let t_x = t_poly.eval(x);
         let t_x_blinding = t_blinding_poly.eval(x);
-        let mut l_vec = Vec::with_capacity(padded_n);
-        let mut r_vec = Vec::with_capacity(padded_n);
-        let mut exp_y = Scalar::ONE;
-        for i in 0..n {
-            let ((l1, l2, l3), (r0, r1, r3)) = coeffs(i, exp_y);
-            l_vec.push(x * (l1 + x * (l2 + x * l3)));
-            r_vec.push(r0 + x * (r1 + x * x * r3));
-            exp_y *= y;
+        // Pass 2: l(x) and r(x) overwrite a_L and a_R in place (by chunks, in parallel with
+        // `parallel`); the other witness vectors are then zeroed and freed, before the
+        // inner-product argument.
+        let mut l_vec = mem::take(&mut self.secrets.a_L);
+        let mut r_vec = mem::take(&mut self.secrets.a_R);
+        {
+            let (a_O, wL, wR, wO, exp_y_inv) = (&self.secrets.a_O, &wL, &wR, &wO, &exp_y_inv);
+            let xx = x * x;
+            let pass2 = |(c, (l_out, r_out)): (usize, (&mut [Scalar], &mut [Scalar]))| {
+                let start = c * POLY_CHUNK;
+                let mut exp_y = util::scalar_exp_vartime(&y, start as u64);
+                for (k, (l, r)) in l_out.iter_mut().zip(r_out.iter_mut()).enumerate() {
+                    let i = start + k;
+                    let (l1, l2, l3) = (*l + exp_y_inv[i] * wR[i], a_O[i], s_L(i));
+                    let (r0, r1, r3) = (wO[i] - exp_y, exp_y * *r + wL[i], exp_y * s_R(i));
+                    *l = x * (l1 + x * (l2 + x * l3));
+                    *r = r0 + x * (r1 + xx * r3);
+                    exp_y *= y;
+                }
+            };
+            #[cfg(feature = "parallel")]
+            {
+                use rayon::prelude::*;
+                l_vec
+                    .par_chunks_mut(POLY_CHUNK)
+                    .zip(r_vec.par_chunks_mut(POLY_CHUNK))
+                    .enumerate()
+                    .for_each(pass2);
+            }
+            #[cfg(not(feature = "parallel"))]
+            l_vec
+                .chunks_mut(POLY_CHUNK)
+                .zip(r_vec.chunks_mut(POLY_CHUNK))
+                .enumerate()
+                .for_each(pass2);
         }
         drop((wL, wR, wO));
-        // The witness vectors are not needed by the inner-product argument: zero and free
-        // them now rather than at the end, to lower the peak memory.
         for e in self
             .secrets
-            .a_L
+            .a_O
             .iter_mut()
-            .chain(self.secrets.a_R.iter_mut())
-            .chain(self.secrets.a_O.iter_mut())
             .chain(s_L1.iter_mut())
             .chain(s_L2.iter_mut())
             .chain(s_R1.iter_mut())
@@ -685,12 +689,14 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
         {
             e.clear();
         }
-        for v in [&mut self.secrets.a_L, &mut self.secrets.a_R, &mut self.secrets.a_O, &mut s_L1, &mut s_L2, &mut s_R1, &mut s_R2] {
+        for v in [&mut self.secrets.a_O, &mut s_L1, &mut s_L2, &mut s_R1, &mut s_R2] {
             *v = Vec::new();
         }
         // XXX this should refer to the notes to explain why this is correct
+        l_vec.resize(padded_n, Scalar::ZERO);
+        r_vec.reserve_exact(pad);
+        let mut exp_y = util::scalar_exp_vartime(&y, n as u64);
         for _ in n..padded_n {
-            l_vec.push(Scalar::ZERO);
             r_vec.push(-exp_y);
             exp_y = exp_y * y; // y^i -> y^(i+1)
         }
@@ -709,19 +715,14 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
         let w = transcript.challenge_scalar(b"w");
         let Q = w * self.pc_gens.B;
 
-        let G_factors = iter::repeat(Scalar::ONE)
-            .take(n1)
-            .chain(iter::repeat(u).take(n2 + pad))
-            .collect::<Vec<_>>();
-        let H_factors = exp_y_inv
-            .into_iter()
-            .zip(G_factors.iter())
-            .map(|(y, u_or_1)| y * u_or_1)
-            .collect::<Vec<_>>();
+        // Generator factors: 1 for the first-phase multipliers and u for the second phase
+        // (and padding) on G; additionally y^-i on H.
+        let gf = |i: usize| if i < n1 { Scalar::ONE } else { u };
+        let hf = |i: usize| exp_y_inv[i] * gf(i);
 
         let (G_gens, H_gens) = gens.G_H_slices(padded_n);
-        let ipp_proof = InnerProductProof::create_from_slices(
-            transcript, &Q, &G_factors, &H_factors, G_gens, H_gens, l_vec, r_vec,
+        let ipp_proof = InnerProductProof::create_with_factor_fns(
+            transcript, &Q, gf, hf, G_gens, H_gens, l_vec, r_vec,
         );
 
         // We do not yet have a ClearOnDrop wrapper for Vec<Scalar>.

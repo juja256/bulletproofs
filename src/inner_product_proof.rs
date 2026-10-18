@@ -25,6 +25,10 @@ pub struct InnerProductProof {
 }
 
 /// `lo[i] = x * lo[i] + y * hi[i]`.
+/// Number of initial rounds of [`InnerProductProof::create_with_factor_fns`] that compute
+/// L and R from the input generators instead of folding them.
+const DEFERRED_ROUNDS: usize = 4;
+
 fn fold_scalars(lo: &mut [Scalar], hi: &[Scalar], x: Scalar, y: Scalar) {
     for (l, h) in lo.iter_mut().zip(hi) {
         *l = *l * x + y * h;
@@ -70,9 +74,7 @@ impl InnerProductProof {
         Self::create_from_slices(transcript, Q, G_factors, H_factors, &G_vec, &H_vec, a_vec, b_vec)
     }
 
-    /// As [`InnerProductProof::create`], but reads the generators from slices: the first
-    /// round writes the folded halves into new vectors, so the caller does not need to
-    /// clone all \(2n\) generators.
+    /// As [`InnerProductProof::create`], but reads the generators from slices.
     pub fn create_from_slices(
         transcript: &mut Transcript,
         Q: &RistrettoPoint,
@@ -80,64 +82,100 @@ impl InnerProductProof {
         H_factors: &[Scalar],
         G_in: &[RistrettoPoint],
         H_in: &[RistrettoPoint],
+        a_vec: Vec<Scalar>,
+        b_vec: Vec<Scalar>,
+    ) -> InnerProductProof {
+        assert_eq!(G_factors.len(), G_in.len());
+        assert_eq!(H_factors.len(), G_in.len());
+        Self::create_with_factor_fns(
+            transcript,
+            Q,
+            |i| G_factors[i],
+            |i| H_factors[i],
+            G_in,
+            H_in,
+            a_vec,
+            b_vec,
+        )
+    }
+
+    /// The inner-product argument for the bases \\(G_i \cdot g(i)\\), \\(H_i \cdot h(i)\\),
+    /// with the factors given as functions of the index.
+    ///
+    /// Folding a generator costs about as much as six terms of a large multiscalar
+    /// multiplication, so the first [`DEFERRED_ROUNDS`] rounds do not fold. After \\(r\\)
+    /// rounds the folded generators are \\(G'_i = \sum_t c_t g(i + tB) G_{i+tB}\\) with block
+    /// size \\(B = n/2^r\\) and \\(c_t\\) a product of \\(u_j^{\pm 1}\\) selected by the bits of
+    /// \\(t\\), so \\(L\\) and \\(R\\) are multiscalar multiplications over the input generators.
+    /// The folded generators are then materialised once, each as a \\(2^r\\)-term combination,
+    /// and the remaining rounds fold as usual. The proof is the same as with folding in every
+    /// round; the input generators are not copied and only \\(2n/2^r\\) points are allocated.
+    pub(crate) fn create_with_factor_fns<GF, HF>(
+        transcript: &mut Transcript,
+        Q: &RistrettoPoint,
+        gf: GF,
+        hf: HF,
+        G_in: &[RistrettoPoint],
+        H_in: &[RistrettoPoint],
         mut a_vec: Vec<Scalar>,
         mut b_vec: Vec<Scalar>,
-    ) -> InnerProductProof {
-        let mut a = &mut a_vec[..];
-        let mut b = &mut b_vec[..];
-
-        let mut n = G_in.len();
+    ) -> InnerProductProof
+    where
+        GF: Fn(usize) -> Scalar + Sync,
+        HF: Fn(usize) -> Scalar + Sync,
+    {
+        let total = G_in.len();
+        let mut n = total;
 
         assert_eq!(H_in.len(), n);
-        assert_eq!(a.len(), n);
-        assert_eq!(b.len(), n);
-        assert_eq!(G_factors.len(), n);
-        assert_eq!(H_factors.len(), n);
-
+        assert_eq!(a_vec.len(), n);
+        assert_eq!(b_vec.len(), n);
         assert!(n.is_power_of_two());
 
         transcript.innerproduct_domain_sep(n as u64);
 
-        let lg_n = n.next_power_of_two().trailing_zeros() as usize;
+        let lg_n = n.trailing_zeros() as usize;
         let mut L_vec = Vec::with_capacity(lg_n);
         let mut R_vec = Vec::with_capacity(lg_n);
 
-        let mut G_vec: Vec<RistrettoPoint> = Vec::new();
-        let mut H_vec: Vec<RistrettoPoint> = Vec::new();
+        let mut a = &mut a_vec[..];
+        let mut b = &mut b_vec[..];
 
-        if n != 1 {
+        // Deferred rounds. `cg[t]`, `ch[t]`: coefficients of block `t` of the input
+        // generators in the current folded G and H.
+        let k = DEFERRED_ROUNDS.min(lg_n);
+        let mut cg = vec![Scalar::ONE];
+        let mut ch = vec![Scalar::ONE];
+        for _ in 0..k {
+            let block = n;
             n = n / 2;
             let (a_L, a_R) = a.split_at_mut(n);
             let (b_L, b_R) = b.split_at_mut(n);
-            let (G_L, G_R) = G_in.split_at(n);
-            let (H_L, H_R) = H_in.split_at(n);
 
             let c_L = inner_product(&a_L, &b_R);
             let c_R = inner_product(&a_R, &b_L);
 
-            let L = util::chunked_msm(
-                a_L.iter()
-                    .zip(G_factors[n..2 * n].iter())
-                    .map(|(a_L_i, g)| a_L_i * g)
-                    .chain(b_R.iter().zip(H_factors[0..n].iter()).map(|(b_R_i, h)| b_R_i * h))
-                    .chain(iter::once(c_L)),
-                G_R.iter().chain(H_L.iter()).chain(iter::once(Q)),
-                util::MSM_CHUNK_VT,
-                true,
-            )
-            .compress();
-
-            let R = util::chunked_msm(
-                a_R.iter()
-                    .zip(G_factors[0..n].iter())
-                    .map(|(a_R_i, g)| a_R_i * g)
-                    .chain(b_L.iter().zip(H_factors[n..2 * n].iter()).map(|(b_L_i, h)| b_L_i * h))
-                    .chain(iter::once(c_R)),
-                G_L.iter().chain(H_R.iter()).chain(iter::once(Q)),
-                util::MSM_CHUNK_VT,
-                true,
-            )
-            .compress();
+            // Input index v lies in block t = v / block at folded position w = v % block:
+            // L = <a_L, G'_hi> + <b_R, H'_lo> + c_L Q,  R = <a_R, G'_lo> + <b_L, H'_hi> + c_R Q.
+            let (aL, aR, bL, bR) = (&*a_L, &*a_R, &*b_L, &*b_R);
+            let (cg_, ch_, gf_, hf_) = (&cg, &ch, &gf, &hf);
+            let L = util::vartime_msm_index(total, util::MSM_CHUNK_VT, |v| {
+                let (t, w) = (v / block, v % block);
+                if w < n {
+                    (bR[w] * ch_[t] * hf_(v), &H_in[v])
+                } else {
+                    (aL[w - n] * cg_[t] * gf_(v), &G_in[v])
+                }
+            }) + c_L * Q;
+            let R = util::vartime_msm_index(total, util::MSM_CHUNK_VT, |v| {
+                let (t, w) = (v / block, v % block);
+                if w < n {
+                    (aR[w] * cg_[t] * gf_(v), &G_in[v])
+                } else {
+                    (bL[w - n] * ch_[t] * hf_(v), &H_in[v])
+                }
+            }) + c_R * Q;
+            let (L, R) = (L.compress(), R.compress());
 
             L_vec.push(L);
             R_vec.push(R);
@@ -150,33 +188,35 @@ impl InnerProductProof {
 
             fold_scalars(a_L, a_R, u, u_inv);
             fold_scalars(b_L, b_R, u_inv, u);
-            let fold_G = |i: usize| {
-                RistrettoPoint::vartime_multiscalar_mul(
-                    &[u_inv * G_factors[i], u * G_factors[n + i]],
-                    &[G_L[i], G_R[i]],
-                )
-            };
-            let fold_H = |i: usize| {
-                RistrettoPoint::vartime_multiscalar_mul(
-                    &[u * H_factors[i], u_inv * H_factors[n + i]],
-                    &[H_L[i], H_R[i]],
-                )
-            };
-            #[cfg(feature = "parallel")]
-            {
-                use rayon::prelude::*;
-                (0..n).into_par_iter().map(fold_G).collect_into_vec(&mut G_vec);
-                (0..n).into_par_iter().map(fold_H).collect_into_vec(&mut H_vec);
-            }
-            #[cfg(not(feature = "parallel"))]
-            {
-                G_vec = (0..n).map(fold_G).collect();
-                H_vec = (0..n).map(fold_H).collect();
-            }
+            // G' = u^-1 G'_lo + u G'_hi,  H' = u H'_lo + u^-1 H'_hi
+            cg = cg.iter().flat_map(|c| [c * u_inv, c * u]).collect();
+            ch = ch.iter().flat_map(|c| [c * u, c * u_inv]).collect();
 
             a = a_L;
             b = b_L;
         }
+
+        if n == 1 {
+            return InnerProductProof {
+                L_vec,
+                R_vec,
+                a: a[0],
+                b: b[0],
+            };
+        }
+
+        // Materialise the folded generators: G'_i = sum_t cg[t] g(i + t n) G_{i + t n}.
+        let rows = cg.len();
+        let materialise = |inputs: &[RistrettoPoint], c: &[Scalar], f: &(dyn Fn(usize) -> Scalar + Sync)| {
+            util::map_index(n, |i| {
+                RistrettoPoint::vartime_multiscalar_mul(
+                    (0..rows).map(|t| c[t] * f(i + t * n)),
+                    (0..rows).map(|t| &inputs[i + t * n]),
+                )
+            })
+        };
+        let mut G_vec = materialise(G_in, &cg, &gf);
+        let mut H_vec = materialise(H_in, &ch, &hf);
         let mut G = &mut G_vec[..];
         let mut H = &mut H_vec[..];
 
@@ -190,21 +230,14 @@ impl InnerProductProof {
             let c_L = inner_product(&a_L, &b_R);
             let c_R = inner_product(&a_R, &b_L);
 
-            let L = util::chunked_msm(
-                a_L.iter().chain(b_R.iter()).chain(iter::once(&c_L)),
-                G_R.iter().chain(H_L.iter()).chain(iter::once(Q)),
-                util::MSM_CHUNK_VT,
-                true,
-            )
-            .compress();
-
-            let R = util::chunked_msm(
-                a_R.iter().chain(b_L.iter()).chain(iter::once(&c_R)),
-                G_L.iter().chain(H_R.iter()).chain(iter::once(Q)),
-                util::MSM_CHUNK_VT,
-                true,
-            )
-            .compress();
+            let L = (util::vartime_msm_slices(a_L, G_R, util::MSM_CHUNK_VT)
+                + util::vartime_msm_slices(b_R, H_L, util::MSM_CHUNK_VT)
+                + c_L * Q)
+                .compress();
+            let R = (util::vartime_msm_slices(a_R, G_L, util::MSM_CHUNK_VT)
+                + util::vartime_msm_slices(b_L, H_R, util::MSM_CHUNK_VT)
+                + c_R * Q)
+                .compress();
 
             L_vec.push(L);
             R_vec.push(R);
@@ -227,8 +260,8 @@ impl InnerProductProof {
         }
 
         InnerProductProof {
-            L_vec: L_vec,
-            R_vec: R_vec,
+            L_vec,
+            R_vec,
             a: a[0],
             b: b[0],
         }
@@ -280,15 +313,27 @@ impl InnerProductProof {
 
         // 4. Compute s values inductively.
 
-        let mut s = Vec::with_capacity(n);
-        s.push(allinv);
-        for i in 1..n {
-            let lg_i = (32 - 1 - (i as u32).leading_zeros()) as usize;
+        // s[i] = s[i - 2^lg_i] * u_{lg_i + 1}^2 for 2^lg_i <= i < 2^(lg_i + 1): the block
+        // [2^lg_i, 2^(lg_i+1)) is the block [0, 2^lg_i) times one square, so each block is
+        // computed at once (in parallel with `parallel`).
+        let mut s = vec![Scalar::ZERO; n];
+        s[0] = allinv;
+        for lg_i in 0..lg_n {
             let k = 1 << lg_i;
             // The challenges are stored in "creation order" as [u_k,...,u_1],
             // so u_{lg(i)+1} = is indexed by (lg_n-1) - lg_i
             let u_lg_i_sq = challenges_sq[(lg_n - 1) - lg_i];
-            s.push(s[i - k] * u_lg_i_sq);
+            let (lo, hi) = s.split_at_mut(k);
+            let hi = &mut hi[..k];
+            #[cfg(feature = "parallel")]
+            {
+                use rayon::prelude::*;
+                hi.par_iter_mut().zip(lo.par_iter()).for_each(|(h, l)| *h = l * u_lg_i_sq);
+            }
+            #[cfg(not(feature = "parallel"))]
+            for (h, l) in hi.iter_mut().zip(lo.iter()) {
+                *h = l * u_lg_i_sq;
+            }
         }
 
         Ok((challenges_sq, challenges_inv_sq, s))

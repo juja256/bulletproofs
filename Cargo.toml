@@ -58,6 +58,10 @@ name = "range_proof"
 name = "r1cs"
 required-features = ["yoloproofs"]
 
+[[test]]
+name = "reciprocal"
+required-features = ["yoloproofs"]
+
 [[bench]]
 name = "range_proof"
 harness = false

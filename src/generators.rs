@@ -85,10 +85,11 @@ impl GeneratorsChain {
 impl GeneratorsChain {
     /// Append the next `n` generators to `v`. The XOF is read sequentially; with the
     /// `parallel` feature the hash-to-group maps run on all threads.
-    fn extend_vec(mut self, v: &mut Vec<RistrettoPoint>, n: usize) {
+    fn extend_vec(self, v: &mut Vec<RistrettoPoint>, n: usize) {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
+            let mut chain = self;
             const BATCH: usize = 1 << 14;
             let mut left = n;
             while left > 0 {
@@ -96,7 +97,7 @@ impl GeneratorsChain {
                 let bytes: Vec<[u8; 64]> = (0..k)
                     .map(|_| {
                         let mut b = [0u8; 64];
-                        self.reader.read(&mut b);
+                        chain.reader.read(&mut b);
                         b
                     })
                     .collect();

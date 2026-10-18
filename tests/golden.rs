@@ -1,0 +1,138 @@
+//! Golden proofs: with fixed randomness the prover must produce exactly the bytes that the
+//! upstream code (zkcrypto/bulletproofs as of d27dde0) produces. Guards the memory and
+//! parallelism optimisations of the prover and the inner-product argument, which must not
+//! change any value of the protocol.
+//!
+//! `cargo test --features yoloproofs --test golden` (also with `parallel`).
+
+#![cfg(feature = "yoloproofs")]
+#![allow(non_snake_case)]
+
+use bulletproofs::r1cs::*;
+use bulletproofs::{BulletproofGens, PedersenGens, RangeProof};
+use curve25519_dalek::scalar::Scalar;
+use merlin::Transcript;
+use rand_core::{CryptoRng, RngCore};
+
+/// A fixed "RNG" (64-bit LCG) — for test vectors only.
+struct FixedRng(u64);
+
+impl RngCore for FixedRng {
+    fn next_u32(&mut self) -> u32 {
+        self.next_u64() as u32
+    }
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0
+    }
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        rand_core::impls::fill_bytes_via_next(self, dest)
+    }
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+        self.fill_bytes(dest);
+        Ok(())
+    }
+}
+impl CryptoRng for FixedRng {}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// Shuffle gadget (as in tests/r1cs.rs): committed inputs, multipliers and randomized
+/// (second-phase) constraints.
+fn shuffle<CS: RandomizableConstraintSystem>(cs: &mut CS, x: Vec<Variable>, y: Vec<Variable>) -> Result<(), R1CSError> {
+    let k = x.len();
+    if k == 1 {
+        cs.constrain(y[0] - x[0]);
+        return Ok(());
+    }
+    cs.specify_randomized_constraints(move |cs| {
+        let z = cs.challenge_scalar(b"shuffle challenge");
+        let (_, _, last_mulx_out) = cs.multiply(x[k - 1] - z, x[k - 2] - z);
+        let first_mulx_out = (0..k - 2).rev().fold(last_mulx_out, |prev_out, i| {
+            let (_, _, o) = cs.multiply(prev_out.into(), x[i] - z);
+            o
+        });
+        let (_, _, last_muly_out) = cs.multiply(y[k - 1] - z, y[k - 2] - z);
+        let first_muly_out = (0..k - 2).rev().fold(last_muly_out, |prev_out, i| {
+            let (_, _, o) = cs.multiply(prev_out.into(), y[i] - z);
+            o
+        });
+        cs.constrain(first_mulx_out - first_muly_out);
+        Ok(())
+    })
+}
+
+/// A circuit with committed values, a first phase (multipliers, allocations, linear
+/// constraints with repeated and non-unit coefficients) and a second phase.
+fn circuit_proof(k: usize) -> (Vec<u8>, bool) {
+    let pc_gens = PedersenGens::default();
+    let bp_gens = BulletproofGens::new(1024, 1);
+    let xs: Vec<u64> = (0..k as u64).map(|i| 3 * i + 1).collect();
+    let ys: Vec<u64> = xs.iter().rev().copied().collect();
+
+    let mut t = Transcript::new(b"golden");
+    let mut prover = Prover::new(&pc_gens, &mut t);
+    let (comms_x, vars_x): (Vec<_>, Vec<_>) =
+        xs.iter().enumerate().map(|(i, v)| prover.commit(Scalar::from(*v), Scalar::from(1000 + i as u64))).unzip();
+    let (comms_y, vars_y): (Vec<_>, Vec<_>) =
+        ys.iter().enumerate().map(|(i, v)| prover.commit(Scalar::from(*v), Scalar::from(2000 + i as u64))).unzip();
+    let extra = |cs: &mut dyn ConstraintSystem, vals: Option<&[u64]>| {
+        // squares of the first few inputs, an unpaired allocation, a weighted sum
+        for i in 0..3 {
+            let a = vals.map(|v| Scalar::from(v[i]));
+            let (l, r, o) = cs.allocate_multiplier(a.map(|a| (a, a))).unwrap();
+            cs.constrain(l - r);
+            cs.constrain(o * Scalar::from(7u64) - l * Scalar::from(7 * 3 * i as u64 + 7) + Scalar::from(0u64));
+        }
+        let lone = cs.allocate(vals.map(|_| Scalar::from(5u64))).unwrap();
+        cs.constrain(lone - Scalar::from(5u64));
+    };
+    extra(&mut prover, Some(&xs));
+    shuffle(&mut prover, vars_x, vars_y).unwrap();
+    let proof = prover.prove_with_rng(&bp_gens, &mut FixedRng(1)).unwrap();
+
+    let mut t = Transcript::new(b"golden");
+    let mut verifier = Verifier::new(&mut t);
+    let vx: Vec<_> = comms_x.iter().map(|c| verifier.commit(*c)).collect();
+    let vy: Vec<_> = comms_y.iter().map(|c| verifier.commit(*c)).collect();
+    extra(&mut verifier, None);
+    shuffle(&mut verifier, vx, vy).unwrap();
+    let ok = verifier.verify(&proof, &pc_gens, &bp_gens).is_ok();
+    (proof.to_bytes(), ok)
+}
+
+fn range_proof_bytes() -> Vec<u8> {
+    let pc_gens = PedersenGens::default();
+    let bp_gens = BulletproofGens::new(64, 8);
+    let values = [3u64, 1 << 40, 77, u32::MAX as u64];
+    let blindings: Vec<Scalar> = (0..4u64).map(|i| Scalar::from(31 + i)).collect();
+    let mut t = Transcript::new(b"golden range");
+    let (proof, _) =
+        RangeProof::prove_multiple_with_rng(&bp_gens, &pc_gens, &mut t, &values, &blindings, 64, &mut FixedRng(2))
+            .unwrap();
+    proof.to_bytes()
+}
+
+// Generated by the upstream prover (d27dde0) with the same fixed randomness.
+const CIRCUIT_7: &str = "01ee570991fd4aa9ca98a62288bfde99b8920c92217c31994cdd7beac08a44b14594d8ba24ae7d8b7424d555dff2922edd6596b95d9ba8100e5bf8b122045fb50ff032095c455878a058583fd82094ae6b6275b35e63e6a892f4fd9e2d09559c2cd4dfd4b44aff3449d575e297da331388b34c71e84cf9f289542f47fbf0f25a5cd46bad6fc0741f86b2c0b6c315eeb1a05cae454f6ed6c0579e287f4aea695d504af72a514fe0726fdd5ba341e73c3d9e4a55292924e40edb117aebfc0e6c8d17a805484f8d582cb53ccb81f87ffdd5b2053f410fc3bb2e66443e10937db50d2f8490a6bb70550d1c6c96407f4787343b7dd9ce83707c4cc0baa22ba1713bc87aac3fd9633574412d145b86a88b9c3ff2b7df1a14acd12e55ff74b1ff3966a11c64fb98cb30fb0446b5ac53dd6cd70aba9728e397df824f229da5785653ec85048cc8d8fa73e3991ef4c7458dcb56ba8c2d3dccd3a05d77c63cfc79d3d60c902e0cfecec79c0b20319d2aa01f34ad8f6b40e32c28758993721c4bde9221314d0329a00707375074c6866d0a5887d0aef210c43f75014599400bcc38b8f28b710489bb81bdacf3afacf7b2bc3d44d5e0bb10b6f97ad17d1b3359a896b86bb7a70bf8167b326ce1fcc50a34d6999242b61b7bc22db6a55f7c86b1d037635934bc10e656ce8bef5adf51b6d3a66de19a9aca38f671810f4d72a98967a51734bfe715544d60c80f7b1eede86b1e2cae248aca13c72a93b55f190f0d750a33b1604b1956467d629e61eb49fdddee4a66d27c3c2e04e5794986b51b244863e01d3b893cccd1deb0d50f70fb3a7af892c8253bdd2fd74e6a85fc1357ec9b8816edaa4d6d288b96e5547f9687d817576e779fad2e919a6c7fd18e05a7b3d706431972e200e24d27dc45de47d88919084a98910a117b88878ec577921911cfa458bac7646be8caef1703cc8253a031577e25765451ca3b3e48431d7c8e9a2eae0f370d6d6613a40b3831e7c6719a81aede90a8b9317832a6aed8278be92b02befdec87bd005a4096cdd9f3c3c3ab07925d28365b5508930bd47230852ea4029be9b7f1a706";
+const CIRCUIT_40: &str = "01641a0012da995b02ba6c34e858979cf99812947c50627eb6b9d285fdf95b9f20ac45b5071929c5fcfbff962e7a4bb6c9986bb1ab162185b91201f6c0115dd55cc675cda2c6b3b70a346803c36d8401473f27a86d935c1b965579b3e95373873facccd5aff5805f90c59951e8b895d6193acbc32da33e0845c3859f7426efc0455097954cfecdb24e6b9da94c45819800458cb4c7dabd9d878366bd20277ef95db2e28278b98e9fb96b1c3fefb676ccf45905cd6163aaa2f1b1c9b48fcf9eb12a9ed4eb8ca8dd0ec1740c0f7240fab3787123fa663d97c6d988aeec49fda64f4c80dfcdb17c9d9417d97feffe4ea9c03acbb128f3ec42f52108ae0094b4fb177bce53b4b41c0f3ebb880919e43c134dacfaa6a4fbc9f4d132a9b199fd0c311377bc7957d50b154ee455740f6a0e0e7cf29bcf94dca9b5d4610680ffe687d55215bc373f1cdf0cf4edb57caf52b8b14ad837543d8aa8114af394c7bbe3e0e59a7adbc5d6d728e6329de1e91ef6ef7de06235d447aaff6bccf08a18b56263c474049d995cdbfe8d35c584233946bd518d23797f1ec7938f96220ed54960b9f516096135c1b005e0e7a64db87493fc7aa1c86f06d09588d58d4f98649b9633715c047a27f5a07ec8c237ee1b2e21ce898a366854164004fc171bb88604b3841dbd4a128785b77f7f4c518cafc3428b94e0bfd4c044b7162adfe87b82f43cdcef4f598a284171550a668c7ebbb73f6cd44504e0402a63b336ddffb4c0c174d31b8a5d56572b06e30ff247e5f3dc21b9943ed661d7758325d9b527cab56ade95035a0f364f87e5c55970032dbc689d55b66f7cfbebc5cc4eb62199828ed18d6f97351fb41ae98cc030b0c1afab0658242ebc86afcaafa04654940ea605b26abab4e41202bd45a84e99e7dac8a7b71c8f19b41fdc7a1dec44b47026873fb6a28bea6b3cac20d674a3c4da4475f3310e3f3891df0ba723948639b227a95c59408c593f1c0cea1a1e3056fad4b5843a70e182b3f32ff599f11f20bdbe5c89cf3641d066554c9376e87691f6aab7b80cb48dfdc6fb9ac61998c38a3f3e53756951443936648864ca2063bbd2a4cbdd8fe8d554fc1d1825c6895f3e50273a774f915a85740512fee42f5795be7d1ae1d77d0456e380caee20aa68d68211ae019fb0071a0a5dcead029f635dbf1aae9400da3d6878b41db5d1e881c09cb86675600400fc4e1658a9594f546b7e35c2b6c5beefebb1cae550335339030e014e3df516e1fcaa13c5a64dd61b7905daf57a24679e5d109048b7f54aedeeb683fc6cb4decd5e1006db7133bb25ffd0a8e937adb40acb44ab058b0078d058de59c8f7566468edac0c";
+const RANGE_4X64: &str = "aa4f00469d670c350cbeafec6790973b3da957b64f9f17af8e324f914798bc587ee1895350e0b021b3d3186d296b384c8c35187da4fffc5be1d2be9fef684d5ffa5981796166a23995028b0e65b381a11dbee1b96d7dd98606a9b06f248a9417767e916c782ca1e562271bfcb7bfaa784cef5c98a9fd5235e9cb5569b533e920ca7cd8c6ff81e3e231b01ebb112aad59f4ce201c11df3d96b356d30d9700740a90132f146ff4af3761062136ff4ad12b82d77fba3ceaacdae43b6f1ab883700c38d2ca82def0f9301f71bf52336d074e5820f4875bbf6708034af089409b410b4a0a7a0debd7b13b206c9a17aa8a67f3a02033caac4345736624e73ee9272a6a16c52254427cc0cbb4fdd5f58adfdc487cb05a4a470d97640ec4a9207523ce450e1b48d7bdfc4a25c8306e98a744dba10f72c22acbe18e077d25dd6586fbc73b48359bfd0c9b35d9751bd6b4093d4f29cb5d7d89bc29d38924966afbd47afc210c3e3eae110ad882689da674a500c8d302ba420a04e0a732404ef6245a084a575276a0c5a99ccbeaaf942c31d20edede08a66f7db03e342243b71d04171b5f193a51473556c9ea6b7b7ce5359f23a8fe2fb19edc998646d424391d729620717c14dd4fde866ca5c3ce92ebd0897ee8d51777d31ae40513e2e41f44562211332f5246c40f7e7ca6b33d50757ebd46cf7d3049995096c617a5baea652be9c8e44de258087846a9abc7a49c566a98af4cdf306a56eaed863ee6a4bee05ea2f20e474a3540dbab2b7706075dbd8f7102760ede0acb1f5dae6066fec040c4ba9d4c21329f4d1f68c01d6ce48ed22a92d8c6296c78e6b1caac0ad4deb4891b2fe4333336268385ec7e04025338bdc4745dfea0e8437f09f06b5060b5e4b1ae29d27026b6568cf92d8fb9c67695421c0f4a1fefd3217696425ab7a91fab1db9f44c1e36722bcaea5874b927613a835e29e6554c4ad07922b7b982c78b1834e428c5c02962776b3dfa803b18e8fe2e3f8afc234a159c0f143b5b7adac29220c03b01d6111a5bfd9551c91e59cb93ed8ece02d015a1f0cfc2dc1a41f58659ba0ea69b800d89fc747d751149e29e026791d4045808a6b2670ef655843effa2c18eeac6940e";
+
+#[test]
+fn golden_circuit_proofs() {
+    for (k, expected) in [(7, CIRCUIT_7), (40, CIRCUIT_40)] {
+        let (bytes, ok) = circuit_proof(k);
+        assert!(ok, "k = {k}: proof does not verify");
+        println!("CIRCUIT_{k} {}", hex(&bytes));
+        assert_eq!(hex(&bytes), expected, "k = {k}: proof bytes changed");
+    }
+}
+
+#[test]
+fn golden_range_proof() {
+    let bytes = range_proof_bytes();
+    println!("RANGE_4X64 {}", hex(&bytes));
+    assert_eq!(hex(&bytes), RANGE_4X64, "range proof bytes changed");
+}

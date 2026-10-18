@@ -3,6 +3,7 @@
 #[cfg_attr(feature = "docs", doc(include = "../../docs/cs-proof.md"))]
 mod notes {}
 
+mod compact;
 mod constraint_system;
 mod linear_combination;
 mod metrics;

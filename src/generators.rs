@@ -82,6 +82,35 @@ impl GeneratorsChain {
     }
 }
 
+impl GeneratorsChain {
+    /// Append the next `n` generators to `v`. The XOF is read sequentially; with the
+    /// `parallel` feature the hash-to-group maps run on all threads.
+    fn extend_vec(mut self, v: &mut Vec<RistrettoPoint>, n: usize) {
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            const BATCH: usize = 1 << 14;
+            let mut left = n;
+            while left > 0 {
+                let k = left.min(BATCH);
+                let bytes: Vec<[u8; 64]> = (0..k)
+                    .map(|_| {
+                        let mut b = [0u8; 64];
+                        self.reader.read(&mut b);
+                        b
+                    })
+                    .collect();
+                let mut points = Vec::with_capacity(k);
+                bytes.par_iter().map(RistrettoPoint::from_uniform_bytes).collect_into_vec(&mut points);
+                v.extend(points);
+                left -= k;
+            }
+        }
+        #[cfg(not(feature = "parallel"))]
+        v.extend(self.take(n));
+    }
+}
+
 impl Default for GeneratorsChain {
     fn default() -> Self {
         Self::new(&[])
@@ -183,22 +212,17 @@ impl BulletproofGens {
             return;
         }
 
+        let extra = new_capacity - self.gens_capacity;
         for i in 0..self.party_capacity {
             let party_index = i as u32;
             let mut label = [b'G', 0, 0, 0, 0];
             LittleEndian::write_u32(&mut label[1..5], party_index);
-            self.G_vec[i].extend(
-                &mut GeneratorsChain::new(&label)
-                    .fast_forward(self.gens_capacity)
-                    .take(new_capacity - self.gens_capacity),
-            );
+            let chain = GeneratorsChain::new(&label).fast_forward(self.gens_capacity);
+            chain.extend_vec(&mut self.G_vec[i], extra);
 
             label[0] = b'H';
-            self.H_vec[i].extend(
-                &mut GeneratorsChain::new(&label)
-                    .fast_forward(self.gens_capacity)
-                    .take(new_capacity - self.gens_capacity),
-            );
+            let chain = GeneratorsChain::new(&label).fast_forward(self.gens_capacity);
+            chain.extend_vec(&mut self.H_vec[i], extra);
         }
         self.gens_capacity = new_capacity;
     }
@@ -283,6 +307,11 @@ impl<'a> BulletproofGensShare<'a> {
     /// Return an iterator over this party's H generators with given size `n`.
     pub(crate) fn H(&self, n: usize) -> impl Iterator<Item = &'a RistrettoPoint> {
         self.gens.H_vec[self.share].iter().take(n)
+    }
+
+    /// The first `n` G and H generators of this party as slices.
+    pub(crate) fn G_H_slices(&self, n: usize) -> (&'a [RistrettoPoint], &'a [RistrettoPoint]) {
+        (&self.gens.G_vec[self.share][..n], &self.gens.H_vec[self.share][..n])
     }
 }
 

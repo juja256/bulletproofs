@@ -9,19 +9,87 @@ use clear_on_drop::clear::Clear;
 use curve25519_dalek::scalar::Scalar;
 
 use crate::inner_product_proof::inner_product;
+use core::borrow::Borrow;
+use curve25519_dalek::ristretto::RistrettoPoint;
+use curve25519_dalek::traits::{Identity, MultiscalarMul, VartimeMultiscalarMul};
+
+/// Chunk size for constant-time multiscalar multiplication: Straus keeps a lookup table of
+/// 8 points (1.3 KB) per input point, so chunking bounds the memory to a few MB. The 256
+/// doublings are amortised over the chunk, so chunking costs (almost) nothing.
+pub const MSM_CHUNK_CT: usize = 1 << 12;
+/// Chunk size for variable-time multiscalar multiplication (Pippenger, 224 B per point;
+/// the window is capped at 8 bits, so larger batches are barely faster).
+pub const MSM_CHUNK_VT: usize = 1 << 14;
+
+/// $\sum_i s_i P_i$ computed in chunks of `chunk` terms, so that the multiscalar
+/// multiplication buffers stay small. `vartime` must only be used for public scalars or
+/// scalars whose timing leakage is acceptable.
+pub fn chunked_msm<I, J>(scalars: I, points: J, chunk: usize, vartime: bool) -> RistrettoPoint
+where
+    I: IntoIterator,
+    I::Item: Borrow<Scalar>,
+    J: IntoIterator,
+    J::Item: Borrow<RistrettoPoint>,
+{
+    let msm = |s: &[Scalar], p: &[RistrettoPoint]| {
+        if vartime {
+            RistrettoPoint::vartime_multiscalar_mul(s, p)
+        } else {
+            RistrettoPoint::multiscalar_mul(s, p)
+        }
+    };
+    // Number of chunks buffered and processed together (in parallel with `parallel`).
+    #[cfg(feature = "parallel")]
+    let wave = rayon::current_num_threads().max(1);
+    #[cfg(not(feature = "parallel"))]
+    let wave = 1;
+
+    let mut acc = RistrettoPoint::identity();
+    let (mut s, mut p) = (scalars.into_iter(), points.into_iter());
+    let mut bufs: Vec<(Vec<Scalar>, Vec<RistrettoPoint>)> =
+        (0..wave).map(|_| (Vec::with_capacity(chunk), Vec::with_capacity(chunk))).collect();
+    let mut done = false;
+    while !done {
+        let mut filled = 0;
+        for (sbuf, pbuf) in bufs.iter_mut() {
+            sbuf.clear();
+            pbuf.clear();
+            for (x, y) in s.by_ref().zip(p.by_ref()).take(chunk) {
+                sbuf.push(*x.borrow());
+                pbuf.push(*y.borrow());
+            }
+            if !sbuf.is_empty() {
+                filled += 1;
+            }
+            if sbuf.len() < chunk {
+                done = true;
+                break;
+            }
+        }
+        let full = &bufs[..filled];
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            acc += full
+                .par_iter()
+                .map(|(s, p)| msm(s, p))
+                .reduce(RistrettoPoint::identity, |a, b| a + b);
+        }
+        #[cfg(not(feature = "parallel"))]
+        for (s, p) in full {
+            acc += msm(s, p);
+        }
+    }
+    for (sbuf, _) in bufs.iter_mut() {
+        for x in sbuf.iter_mut() {
+            x.clear();
+        }
+    }
+    acc
+}
 
 /// Represents a degree-1 vector polynomial \\(\mathbf{a} + \mathbf{b} \cdot x\\).
 pub struct VecPoly1(pub Vec<Scalar>, pub Vec<Scalar>);
-
-/// Represents a degree-3 vector polynomial
-/// \\(\mathbf{a} + \mathbf{b} \cdot x + \mathbf{c} \cdot x^2 + \mathbf{d} \cdot x^3 \\).
-#[cfg(feature = "yoloproofs")]
-pub struct VecPoly3(
-    pub Vec<Scalar>,
-    pub Vec<Scalar>,
-    pub Vec<Scalar>,
-    pub Vec<Scalar>,
-);
 
 /// Represents a degree-2 scalar polynomial \\(a + b \cdot x + c \cdot x^2\\)
 pub struct Poly2(pub Scalar, pub Scalar, pub Scalar);
@@ -109,51 +177,6 @@ impl VecPoly1 {
     }
 }
 
-#[cfg(feature = "yoloproofs")]
-impl VecPoly3 {
-    pub fn zero(n: usize) -> Self {
-        VecPoly3(
-            vec![Scalar::ZERO; n],
-            vec![Scalar::ZERO; n],
-            vec![Scalar::ZERO; n],
-            vec![Scalar::ZERO; n],
-        )
-    }
-
-    /// Compute an inner product of `lhs`, `rhs` which have the property that:
-    /// - `lhs.0` is zero;
-    /// - `rhs.2` is zero;
-    /// This is the case in the constraint system proof.
-    pub fn special_inner_product(lhs: &Self, rhs: &Self) -> Poly6 {
-        // TODO: make checks that l_poly.0 and r_poly.2 are zero.
-
-        let t1 = inner_product(&lhs.1, &rhs.0);
-        let t2 = inner_product(&lhs.1, &rhs.1) + inner_product(&lhs.2, &rhs.0);
-        let t3 = inner_product(&lhs.2, &rhs.1) + inner_product(&lhs.3, &rhs.0);
-        let t4 = inner_product(&lhs.1, &rhs.3) + inner_product(&lhs.3, &rhs.1);
-        let t5 = inner_product(&lhs.2, &rhs.3);
-        let t6 = inner_product(&lhs.3, &rhs.3);
-
-        Poly6 {
-            t1,
-            t2,
-            t3,
-            t4,
-            t5,
-            t6,
-        }
-    }
-
-    pub fn eval(&self, x: Scalar) -> Vec<Scalar> {
-        let n = self.0.len();
-        let mut out = vec![Scalar::ZERO; n];
-        for i in 0..n {
-            out[i] = self.0[i] + x * (self.1[i] + x * (self.2[i] + x * self.3[i]));
-        }
-        out
-    }
-}
-
 impl Poly2 {
     pub fn eval(&self, x: Scalar) -> Scalar {
         self.0 + x * (self.1 + x * self.2)
@@ -183,24 +206,6 @@ impl Drop for Poly2 {
         self.0.clear();
         self.1.clear();
         self.2.clear();
-    }
-}
-
-#[cfg(feature = "yoloproofs")]
-impl Drop for VecPoly3 {
-    fn drop(&mut self) {
-        for e in self.0.iter_mut() {
-            e.clear();
-        }
-        for e in self.1.iter_mut() {
-            e.clear();
-        }
-        for e in self.2.iter_mut() {
-            e.clear();
-        }
-        for e in self.3.iter_mut() {
-            e.clear();
-        }
     }
 }
 

@@ -14,6 +14,7 @@ use merlin::Transcript;
 
 use crate::errors::ProofError;
 use crate::transcript::TranscriptProtocol;
+use crate::util;
 
 #[derive(Clone, Debug)]
 pub struct InnerProductProof {
@@ -21,6 +22,27 @@ pub struct InnerProductProof {
     pub(crate) R_vec: Vec<CompressedRistretto>,
     pub(crate) a: Scalar,
     pub(crate) b: Scalar,
+}
+
+/// `lo[i] = x * lo[i] + y * hi[i]`.
+fn fold_scalars(lo: &mut [Scalar], hi: &[Scalar], x: Scalar, y: Scalar) {
+    for (l, h) in lo.iter_mut().zip(hi) {
+        *l = *l * x + y * h;
+    }
+}
+
+/// `lo[i] = x * lo[i] + y * hi[i]` (variable time; in parallel with `parallel`).
+fn fold_points(lo: &mut [RistrettoPoint], hi: &[RistrettoPoint], x: Scalar, y: Scalar) {
+    let f = |(l, h): (&mut RistrettoPoint, &RistrettoPoint)| {
+        *l = RistrettoPoint::vartime_multiscalar_mul(&[x, y], &[*l, *h]);
+    };
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        lo.par_iter_mut().zip(hi.par_iter()).for_each(f);
+    }
+    #[cfg(not(feature = "parallel"))]
+    lo.iter_mut().zip(hi.iter()).for_each(f);
 }
 
 impl InnerProductProof {
@@ -40,30 +62,38 @@ impl InnerProductProof {
         Q: &RistrettoPoint,
         G_factors: &[Scalar],
         H_factors: &[Scalar],
-        mut G_vec: Vec<RistrettoPoint>,
-        mut H_vec: Vec<RistrettoPoint>,
+        G_vec: Vec<RistrettoPoint>,
+        H_vec: Vec<RistrettoPoint>,
+        a_vec: Vec<Scalar>,
+        b_vec: Vec<Scalar>,
+    ) -> InnerProductProof {
+        Self::create_from_slices(transcript, Q, G_factors, H_factors, &G_vec, &H_vec, a_vec, b_vec)
+    }
+
+    /// As [`InnerProductProof::create`], but reads the generators from slices: the first
+    /// round writes the folded halves into new vectors, so the caller does not need to
+    /// clone all \(2n\) generators.
+    pub fn create_from_slices(
+        transcript: &mut Transcript,
+        Q: &RistrettoPoint,
+        G_factors: &[Scalar],
+        H_factors: &[Scalar],
+        G_in: &[RistrettoPoint],
+        H_in: &[RistrettoPoint],
         mut a_vec: Vec<Scalar>,
         mut b_vec: Vec<Scalar>,
     ) -> InnerProductProof {
-        // Create slices G, H, a, b backed by their respective
-        // vectors.  This lets us reslice as we compress the lengths
-        // of the vectors in the main loop below.
-        let mut G = &mut G_vec[..];
-        let mut H = &mut H_vec[..];
         let mut a = &mut a_vec[..];
         let mut b = &mut b_vec[..];
 
-        let mut n = G.len();
+        let mut n = G_in.len();
 
-        // All of the input vectors must have the same length.
-        assert_eq!(G.len(), n);
-        assert_eq!(H.len(), n);
+        assert_eq!(H_in.len(), n);
         assert_eq!(a.len(), n);
         assert_eq!(b.len(), n);
         assert_eq!(G_factors.len(), n);
         assert_eq!(H_factors.len(), n);
 
-        // All of the input vectors must have a length that is a power of two.
         assert!(n.is_power_of_two());
 
         transcript.innerproduct_domain_sep(n as u64);
@@ -72,43 +102,40 @@ impl InnerProductProof {
         let mut L_vec = Vec::with_capacity(lg_n);
         let mut R_vec = Vec::with_capacity(lg_n);
 
-        // If it's the first iteration, unroll the Hprime = H*y_inv scalar mults
-        // into multiscalar muls, for performance.
+        let mut G_vec: Vec<RistrettoPoint> = Vec::new();
+        let mut H_vec: Vec<RistrettoPoint> = Vec::new();
+
         if n != 1 {
             n = n / 2;
             let (a_L, a_R) = a.split_at_mut(n);
             let (b_L, b_R) = b.split_at_mut(n);
-            let (G_L, G_R) = G.split_at_mut(n);
-            let (H_L, H_R) = H.split_at_mut(n);
+            let (G_L, G_R) = G_in.split_at(n);
+            let (H_L, H_R) = H_in.split_at(n);
 
             let c_L = inner_product(&a_L, &b_R);
             let c_R = inner_product(&a_R, &b_L);
 
-            let L = RistrettoPoint::vartime_multiscalar_mul(
+            let L = util::chunked_msm(
                 a_L.iter()
-                    .zip(G_factors[n..2 * n].into_iter())
+                    .zip(G_factors[n..2 * n].iter())
                     .map(|(a_L_i, g)| a_L_i * g)
-                    .chain(
-                        b_R.iter()
-                            .zip(H_factors[0..n].into_iter())
-                            .map(|(b_R_i, h)| b_R_i * h),
-                    )
+                    .chain(b_R.iter().zip(H_factors[0..n].iter()).map(|(b_R_i, h)| b_R_i * h))
                     .chain(iter::once(c_L)),
                 G_R.iter().chain(H_L.iter()).chain(iter::once(Q)),
+                util::MSM_CHUNK_VT,
+                true,
             )
             .compress();
 
-            let R = RistrettoPoint::vartime_multiscalar_mul(
+            let R = util::chunked_msm(
                 a_R.iter()
-                    .zip(G_factors[0..n].into_iter())
+                    .zip(G_factors[0..n].iter())
                     .map(|(a_R_i, g)| a_R_i * g)
-                    .chain(
-                        b_L.iter()
-                            .zip(H_factors[n..2 * n].into_iter())
-                            .map(|(b_L_i, h)| b_L_i * h),
-                    )
+                    .chain(b_L.iter().zip(H_factors[n..2 * n].iter()).map(|(b_L_i, h)| b_L_i * h))
                     .chain(iter::once(c_R)),
                 G_L.iter().chain(H_R.iter()).chain(iter::once(Q)),
+                util::MSM_CHUNK_VT,
+                true,
             )
             .compress();
 
@@ -121,24 +148,37 @@ impl InnerProductProof {
             let u = transcript.challenge_scalar(b"u");
             let u_inv = u.invert();
 
-            for i in 0..n {
-                a_L[i] = a_L[i] * u + u_inv * a_R[i];
-                b_L[i] = b_L[i] * u_inv + u * b_R[i];
-                G_L[i] = RistrettoPoint::vartime_multiscalar_mul(
+            fold_scalars(a_L, a_R, u, u_inv);
+            fold_scalars(b_L, b_R, u_inv, u);
+            let fold_G = |i: usize| {
+                RistrettoPoint::vartime_multiscalar_mul(
                     &[u_inv * G_factors[i], u * G_factors[n + i]],
                     &[G_L[i], G_R[i]],
-                );
-                H_L[i] = RistrettoPoint::vartime_multiscalar_mul(
+                )
+            };
+            let fold_H = |i: usize| {
+                RistrettoPoint::vartime_multiscalar_mul(
                     &[u * H_factors[i], u_inv * H_factors[n + i]],
                     &[H_L[i], H_R[i]],
                 )
+            };
+            #[cfg(feature = "parallel")]
+            {
+                use rayon::prelude::*;
+                (0..n).into_par_iter().map(fold_G).collect_into_vec(&mut G_vec);
+                (0..n).into_par_iter().map(fold_H).collect_into_vec(&mut H_vec);
+            }
+            #[cfg(not(feature = "parallel"))]
+            {
+                G_vec = (0..n).map(fold_G).collect();
+                H_vec = (0..n).map(fold_H).collect();
             }
 
             a = a_L;
             b = b_L;
-            G = G_L;
-            H = H_L;
         }
+        let mut G = &mut G_vec[..];
+        let mut H = &mut H_vec[..];
 
         while n != 1 {
             n = n / 2;
@@ -150,15 +190,19 @@ impl InnerProductProof {
             let c_L = inner_product(&a_L, &b_R);
             let c_R = inner_product(&a_R, &b_L);
 
-            let L = RistrettoPoint::vartime_multiscalar_mul(
+            let L = util::chunked_msm(
                 a_L.iter().chain(b_R.iter()).chain(iter::once(&c_L)),
                 G_R.iter().chain(H_L.iter()).chain(iter::once(Q)),
+                util::MSM_CHUNK_VT,
+                true,
             )
             .compress();
 
-            let R = RistrettoPoint::vartime_multiscalar_mul(
+            let R = util::chunked_msm(
                 a_R.iter().chain(b_L.iter()).chain(iter::once(&c_R)),
                 G_L.iter().chain(H_R.iter()).chain(iter::once(Q)),
+                util::MSM_CHUNK_VT,
+                true,
             )
             .compress();
 
@@ -171,12 +215,10 @@ impl InnerProductProof {
             let u = transcript.challenge_scalar(b"u");
             let u_inv = u.invert();
 
-            for i in 0..n {
-                a_L[i] = a_L[i] * u + u_inv * a_R[i];
-                b_L[i] = b_L[i] * u_inv + u * b_R[i];
-                G_L[i] = RistrettoPoint::vartime_multiscalar_mul(&[u_inv, u], &[G_L[i], G_R[i]]);
-                H_L[i] = RistrettoPoint::vartime_multiscalar_mul(&[u, u_inv], &[H_L[i], H_R[i]]);
-            }
+            fold_scalars(a_L, a_R, u, u_inv);
+            fold_scalars(b_L, b_R, u_inv, u);
+            fold_points(G_L, G_R, u_inv, u);
+            fold_points(H_L, H_R, u, u_inv);
 
             a = a_L;
             b = b_L;

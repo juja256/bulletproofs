@@ -3,10 +3,11 @@
 use clear_on_drop::clear::Clear;
 use core::borrow::BorrowMut;
 use core::mem;
-use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
+use curve25519_dalek::ristretto::CompressedRistretto;
 use curve25519_dalek::scalar::Scalar;
-use curve25519_dalek::traits::{Identity, MultiscalarMul};
+use curve25519_dalek::traits::Identity;
 use merlin::Transcript;
+use rand_core::{CryptoRng, RngCore};
 
 use super::{
     ConstraintSystem, LinearCombination, R1CSProof, RandomizableConstraintSystem,
@@ -18,6 +19,8 @@ use crate::generators::{BulletproofGens, PedersenGens};
 use crate::inner_product_proof::InnerProductProof;
 use crate::r1cs::Metrics;
 use crate::transcript::TranscriptProtocol;
+use crate::util;
+use super::compact::{ConstraintStore, Flattened};
 
 /// A [`ConstraintSystem`] implementation for use by the prover.
 ///
@@ -32,7 +35,7 @@ pub struct Prover<'g, T: BorrowMut<Transcript>> {
     transcript: T,
     pc_gens: &'g PedersenGens,
     /// The constraints accumulated so far.
-    constraints: Vec<LinearCombination>,
+    constraints: ConstraintStore,
     /// Secret data
     secrets: Secrets,
 
@@ -184,7 +187,7 @@ impl<'g, T: BorrowMut<Transcript>> ConstraintSystem for Prover<'g, T> {
     fn constrain(&mut self, lc: LinearCombination) {
         // TODO: check that the linear combinations are valid
         // (e.g. that variables are valid, that the linear combination evals to 0 for prover, etc).
-        self.constraints.push(lc);
+        self.constraints.push(&lc);
     }
 }
 
@@ -277,7 +280,7 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
                 a_R: Vec::new(),
                 a_O: Vec::new(),
             },
-            constraints: Vec::new(),
+            constraints: ConstraintStore::default(),
             deferred_constraints: Vec::new(),
             pending_multiplier: None,
         }
@@ -323,43 +326,9 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
     /// (wL, wR, wO, wV)
     /// ```
     /// where `w{L,R,O}` is \\( z \cdot z^Q \cdot W_{L,R,O} \\).
-    fn flattened_constraints(
-        &mut self,
-        z: &Scalar,
-    ) -> (Vec<Scalar>, Vec<Scalar>, Vec<Scalar>, Vec<Scalar>) {
-        let n = self.secrets.a_L.len();
-        let m = self.secrets.v.len();
-
-        let mut wL = vec![Scalar::ZERO; n];
-        let mut wR = vec![Scalar::ZERO; n];
-        let mut wO = vec![Scalar::ZERO; n];
-        let mut wV = vec![Scalar::ZERO; m];
-
-        let mut exp_z = *z;
-        for lc in self.constraints.iter() {
-            for (var, coeff) in &lc.terms {
-                match var {
-                    Variable::MultiplierLeft(i) => {
-                        wL[*i] += exp_z * coeff;
-                    }
-                    Variable::MultiplierRight(i) => {
-                        wR[*i] += exp_z * coeff;
-                    }
-                    Variable::MultiplierOutput(i) => {
-                        wO[*i] += exp_z * coeff;
-                    }
-                    Variable::Committed(i) => {
-                        wV[*i] -= exp_z * coeff;
-                    }
-                    Variable::One() => {
-                        // The prover doesn't need to handle constant terms
-                    }
-                }
-            }
-            exp_z *= z;
-        }
-
-        (wL, wR, wO, wV)
+    fn flattened_constraints(&mut self, z: &Scalar) -> Flattened {
+        let (n, m) = (self.secrets.a_L.len(), self.secrets.v.len());
+        self.constraints.flatten(z, n, m)
     }
 
     /// Returns the secret value of the linear combination.
@@ -410,10 +379,29 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
 
     /// Consume this `ConstraintSystem` to produce a proof. Returns the proof and the transcript passed in `Prover::new`.
     pub fn prove_and_return_transcript(
-        mut self,
+        self,
         bp_gens: &BulletproofGens,
     ) -> Result<(R1CSProof, T), R1CSError> {
-        use crate::util;
+        self.prove_with_rng_and_return_transcript(bp_gens, &mut rand::thread_rng())
+    }
+
+    /// As [`Prover::prove`], with the external randomness mixed into the transcript RNG
+    /// taken from `rng` instead of `thread_rng()`. A fixed `rng` makes the proof
+    /// deterministic, which is useful for test vectors; use a cryptographic RNG otherwise.
+    pub fn prove_with_rng<R: RngCore + CryptoRng>(
+        self,
+        bp_gens: &BulletproofGens,
+        rng: &mut R,
+    ) -> Result<R1CSProof, R1CSError> {
+        self.prove_with_rng_and_return_transcript(bp_gens, rng)
+            .map(|(proof, _transcript)| proof)
+    }
+
+    fn prove_with_rng_and_return_transcript<R: RngCore + CryptoRng>(
+        mut self,
+        bp_gens: &BulletproofGens,
+        external_rng: &mut R,
+    ) -> Result<(R1CSProof, T), R1CSError> {
         use std::iter;
 
         // Commit a length _suffix_ for the number of high-level variables.
@@ -445,8 +433,7 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
                 builder = builder.rekey_with_witness_bytes(b"v_blinding", v_b.as_bytes());
             }
 
-            use rand::thread_rng;
-            builder.finalize(&mut thread_rng())
+            builder.finalize(external_rng)
         };
 
         // Commit to the first-phase low-level witness variables.
@@ -467,31 +454,37 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
         let mut s_R1: Vec<Scalar> = (0..n1).map(|_| Scalar::random(&mut rng)).collect();
 
         // A_I = <a_L, G> + <a_R, H> + i_blinding * B_blinding
-        let A_I1 = RistrettoPoint::multiscalar_mul(
+        let A_I1 = util::chunked_msm(
             iter::once(&i_blinding1)
                 .chain(self.secrets.a_L.iter())
                 .chain(self.secrets.a_R.iter()),
             iter::once(&self.pc_gens.B_blinding)
                 .chain(gens.G(n1))
                 .chain(gens.H(n1)),
+            util::MSM_CHUNK_CT,
+            false,
         )
         .compress();
 
         // A_O = <a_O, G> + o_blinding * B_blinding
-        let A_O1 = RistrettoPoint::multiscalar_mul(
+        let A_O1 = util::chunked_msm(
             iter::once(&o_blinding1).chain(self.secrets.a_O.iter()),
             iter::once(&self.pc_gens.B_blinding).chain(gens.G(n1)),
+            util::MSM_CHUNK_CT,
+            false,
         )
         .compress();
 
         // S = <s_L, G> + <s_R, H> + s_blinding * B_blinding
-        let S1 = RistrettoPoint::multiscalar_mul(
+        let S1 = util::chunked_msm(
             iter::once(&s_blinding1)
                 .chain(s_L1.iter())
                 .chain(s_R1.iter()),
             iter::once(&self.pc_gens.B_blinding)
                 .chain(gens.G(n1))
                 .chain(gens.H(n1)),
+            util::MSM_CHUNK_CT,
+            false,
         )
         .compress();
 
@@ -535,29 +528,35 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
         let (A_I2, A_O2, S2) = if has_2nd_phase_commitments {
             (
                 // A_I = <a_L, G> + <a_R, H> + i_blinding * B_blinding
-                RistrettoPoint::multiscalar_mul(
+                util::chunked_msm(
                     iter::once(&i_blinding2)
                         .chain(self.secrets.a_L.iter().skip(n1))
                         .chain(self.secrets.a_R.iter().skip(n1)),
                     iter::once(&self.pc_gens.B_blinding)
                         .chain(gens.G(n).skip(n1))
                         .chain(gens.H(n).skip(n1)),
+                    util::MSM_CHUNK_CT,
+                    false,
                 )
                 .compress(),
                 // A_O = <a_O, G> + o_blinding * B_blinding
-                RistrettoPoint::multiscalar_mul(
+                util::chunked_msm(
                     iter::once(&o_blinding2).chain(self.secrets.a_O.iter().skip(n1)),
                     iter::once(&self.pc_gens.B_blinding).chain(gens.G(n).skip(n1)),
+                    util::MSM_CHUNK_CT,
+                    false,
                 )
                 .compress(),
                 // S = <s_L, G> + <s_R, H> + s_blinding * B_blinding
-                RistrettoPoint::multiscalar_mul(
+                util::chunked_msm(
                     iter::once(&s_blinding2)
                         .chain(s_L2.iter())
                         .chain(s_R2.iter()),
                     iter::once(&self.pc_gens.B_blinding)
                         .chain(gens.G(n).skip(n1))
                         .chain(gens.H(n).skip(n1)),
+                    util::MSM_CHUNK_CT,
+                    false,
                 )
                 .compress(),
             )
@@ -585,37 +584,40 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
 
         let (wL, wR, wO, wV) = self.flattened_constraints(&z);
 
-        let mut l_poly = util::VecPoly3::zero(n);
-        let mut r_poly = util::VecPoly3::zero(n);
-
-        let mut exp_y = Scalar::ONE; // y^n starting at n=0
+        // t(X) = <l(X), r(X)>, accumulated per index without materialising the vector
+        // polynomials (l_0 = r_2 = 0):
+        //   l_1 = a_L + y^-i w_R,  l_2 = a_O,  l_3 = s_L,
+        //   r_0 = w_O - y^i,  r_1 = y^i a_R + w_L,  r_3 = y^i s_R.
         let y_inv = y.invert();
         let exp_y_inv = util::exp_iter(y_inv).take(padded_n).collect::<Vec<_>>();
-
-        let sLsR = s_L1
-            .iter()
-            .chain(s_L2.iter())
-            .zip(s_R1.iter().chain(s_R2.iter()));
-        for (i, (sl, sr)) in sLsR.enumerate() {
-            // l_poly.0 = 0
-            // l_poly.1 = a_L + y^-n * (z * z^Q * W_R)
-            l_poly.1[i] = self.secrets.a_L[i] + exp_y_inv[i] * wR[i];
-            // l_poly.2 = a_O
-            l_poly.2[i] = self.secrets.a_O[i];
-            // l_poly.3 = s_L
-            l_poly.3[i] = *sl;
-            // r_poly.0 = (z * z^Q * W_O) - y^n
-            r_poly.0[i] = wO[i] - exp_y;
-            // r_poly.1 = y^n * a_R + (z * z^Q * W_L)
-            r_poly.1[i] = exp_y * self.secrets.a_R[i] + wL[i];
-            // r_poly.2 = 0
-            // r_poly.3 = y^n * s_R
-            r_poly.3[i] = exp_y * sr;
-
-            exp_y = exp_y * y; // y^i -> y^(i+1)
+        let s_L = |i: usize| if i < n1 { s_L1[i] } else { s_L2[i - n1] };
+        let s_R = |i: usize| if i < n1 { s_R1[i] } else { s_R2[i - n1] };
+        let secrets = &self.secrets;
+        let coeffs = |i: usize, exp_y: Scalar| {
+            let a = secrets;
+            let l = (a.a_L[i] + exp_y_inv[i] * wR[i], a.a_O[i], s_L(i));
+            let r = (wO[i] - exp_y, exp_y * a.a_R[i] + wL[i], exp_y * s_R(i));
+            (l, r)
+        };
+        let mut t_poly = util::Poly6 {
+            t1: Scalar::ZERO,
+            t2: Scalar::ZERO,
+            t3: Scalar::ZERO,
+            t4: Scalar::ZERO,
+            t5: Scalar::ZERO,
+            t6: Scalar::ZERO,
+        };
+        let mut exp_y = Scalar::ONE; // y^i
+        for i in 0..n {
+            let ((l1, l2, l3), (r0, r1, r3)) = coeffs(i, exp_y);
+            t_poly.t1 += l1 * r0;
+            t_poly.t2 += l1 * r1 + l2 * r0;
+            t_poly.t3 += l2 * r1 + l3 * r0;
+            t_poly.t4 += l1 * r3 + l3 * r1;
+            t_poly.t5 += l2 * r3;
+            t_poly.t6 += l3 * r3;
+            exp_y *= y;
         }
-
-        let t_poly = util::VecPoly3::special_inner_product(&l_poly, &r_poly);
 
         let t_1_blinding = Scalar::random(&mut rng);
         let t_3_blinding = Scalar::random(&mut rng);
@@ -658,15 +660,38 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
 
         let t_x = t_poly.eval(x);
         let t_x_blinding = t_blinding_poly.eval(x);
-        let mut l_vec = l_poly.eval(x);
-        l_vec.append(&mut vec![Scalar::ZERO; pad]);
-
-        let mut r_vec = r_poly.eval(x);
-        r_vec.append(&mut vec![Scalar::ZERO; pad]);
-
+        let mut l_vec = Vec::with_capacity(padded_n);
+        let mut r_vec = Vec::with_capacity(padded_n);
+        let mut exp_y = Scalar::ONE;
+        for i in 0..n {
+            let ((l1, l2, l3), (r0, r1, r3)) = coeffs(i, exp_y);
+            l_vec.push(x * (l1 + x * (l2 + x * l3)));
+            r_vec.push(r0 + x * (r1 + x * x * r3));
+            exp_y *= y;
+        }
+        drop((wL, wR, wO));
+        // The witness vectors are not needed by the inner-product argument: zero and free
+        // them now rather than at the end, to lower the peak memory.
+        for e in self
+            .secrets
+            .a_L
+            .iter_mut()
+            .chain(self.secrets.a_R.iter_mut())
+            .chain(self.secrets.a_O.iter_mut())
+            .chain(s_L1.iter_mut())
+            .chain(s_L2.iter_mut())
+            .chain(s_R1.iter_mut())
+            .chain(s_R2.iter_mut())
+        {
+            e.clear();
+        }
+        for v in [&mut self.secrets.a_L, &mut self.secrets.a_R, &mut self.secrets.a_O, &mut s_L1, &mut s_L2, &mut s_R1, &mut s_R2] {
+            *v = Vec::new();
+        }
         // XXX this should refer to the notes to explain why this is correct
-        for i in n..padded_n {
-            r_vec[i] = -exp_y;
+        for _ in n..padded_n {
+            l_vec.push(Scalar::ZERO);
+            r_vec.push(-exp_y);
             exp_y = exp_y * y; // y^i -> y^(i+1)
         }
 
@@ -694,15 +719,9 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
             .map(|(y, u_or_1)| y * u_or_1)
             .collect::<Vec<_>>();
 
-        let ipp_proof = InnerProductProof::create(
-            transcript,
-            &Q,
-            &G_factors,
-            &H_factors,
-            gens.G(padded_n).cloned().collect(),
-            gens.H(padded_n).cloned().collect(),
-            l_vec,
-            r_vec,
+        let (G_gens, H_gens) = gens.G_H_slices(padded_n);
+        let ipp_proof = InnerProductProof::create_from_slices(
+            transcript, &Q, &G_factors, &H_factors, G_gens, H_gens, l_vec, r_vec,
         );
 
         // We do not yet have a ClearOnDrop wrapper for Vec<Scalar>.

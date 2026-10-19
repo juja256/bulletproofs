@@ -20,10 +20,11 @@ use crate::inner_product_proof::InnerProductProof;
 use crate::r1cs::Metrics;
 use crate::transcript::TranscriptProtocol;
 use crate::util;
+use super::builder::{self, Builder, CircuitBuilder, Cost, Counts, Reciprocal, TableId, Width};
 use super::compact::{ConstraintStore, Flattened};
 use super::proof::{BpProof, ProofKind};
 #[cfg(feature = "bppp")]
-use super::proof::BpppProof;
+use super::proof::{BpppProof, BuilderProof};
 
 /// Index chunk for the polynomial passes of the prover.
 const POLY_CHUNK: usize = 1 << 12;
@@ -44,6 +45,23 @@ fn commit(
         acc += util::msm_slices(y, &H[..y.len()], util::MSM_CHUNK_CT, false);
     }
     acc.compress()
+}
+
+fn eval_with(secrets: &Secrets, lc: &LinearCombination) -> Scalar {
+    lc.terms
+        .iter()
+        .map(|(var, coeff)| {
+            coeff
+                * match var {
+                    Variable::MultiplierLeft(i) => secrets.a_L[*i],
+                    Variable::MultiplierRight(i) => secrets.a_R[*i],
+                    Variable::MultiplierOutput(i) => secrets.a_O[*i],
+                    Variable::Committed(i) => secrets.v[*i],
+                    Variable::Witness(i) => secrets.w[*i],
+                    Variable::One() => Scalar::ONE,
+                }
+        })
+        .sum()
 }
 
 /// A [`ConstraintSystem`] implementation for use by the prover.
@@ -73,6 +91,12 @@ pub struct Prover<'g, T: BorrowMut<Transcript>> {
 
     /// The proof system used by `prove`.
     backend: super::Backend,
+
+    /// The circuit builder's record (spec §7).
+    builder: Builder,
+
+    /// First multiplier of the witness pairs (BP lowering, spec §7.5).
+    witness_base: usize,
 }
 
 /// Separate struct to implement Drop trait for (for zeroing),
@@ -88,6 +112,8 @@ struct Secrets {
     v: Vec<Scalar>,
     /// High-level witness data (blinding openings to V commitments)
     v_blinding: Vec<Scalar>,
+    /// Values of the builder's witnesses (spec §7)
+    w: Vec<Scalar>,
 }
 
 /// Prover in the randomizing phase.
@@ -119,6 +145,9 @@ impl Drop for Secrets {
             e.clear();
         }
         for e in self.a_O.iter_mut() {
+            e.clear();
+        }
+        for e in self.w.iter_mut() {
             e.clear();
         }
         // XXX use ClearOnDrop instead of doing the above
@@ -218,6 +247,44 @@ impl<'g, T: BorrowMut<Transcript>> ConstraintSystem for Prover<'g, T> {
     }
 }
 
+impl<'g, T: BorrowMut<Transcript>> CircuitBuilder for Prover<'g, T> {
+    fn witness(&mut self, v: Option<Scalar>) -> Result<Variable, R1CSError> {
+        let v = v.ok_or(R1CSError::MissingAssignment)?;
+        self.secrets.w.push(v);
+        Ok(self.builder.witness())
+    }
+
+    fn product(&mut self, l: LinearCombination, r: LinearCombination, out: LinearCombination) -> Result<(), R1CSError> {
+        let c = self.counts();
+        self.builder.product(l, r, out, c)
+    }
+
+    fn table(&mut self, rows: Vec<Vec<u64>>, widths: &[Width]) -> Result<TableId, R1CSError> {
+        self.builder.table(rows, widths)
+    }
+
+    fn lookup(&mut self, t: TableId, tuple: &[LinearCombination]) -> Result<(), R1CSError> {
+        let c = self.counts();
+        self.builder.lookup(t, tuple, c)
+    }
+
+    fn lookup_value(&mut self, t: TableId, v: Option<u64>) -> Result<Variable, R1CSError> {
+        self.builder.check_value_table(t)?;
+        let x = CircuitBuilder::witness(self, v.map(Scalar::from))?;
+        self.lookup(t, &[x.into()])?;
+        Ok(x)
+    }
+
+    fn finish_reciprocal(&mut self, r: Reciprocal) -> Result<(), R1CSError> {
+        let c = self.counts();
+        self.builder.finish_reciprocal(r, c)
+    }
+
+    fn cost(&self) -> Cost {
+        self.builder.cost(self.secrets.a_L.len(), self.secrets.v.len())
+    }
+}
+
 impl<'g, T: BorrowMut<Transcript>> RandomizableConstraintSystem for Prover<'g, T> {
     type RandomizedCS = RandomizingProver<'g, T>;
 
@@ -306,6 +373,7 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
                 a_L: Vec::new(),
                 a_R: Vec::new(),
                 a_O: Vec::new(),
+                w: Vec::new(),
             },
             // The prover drops constants: BP does not need them, BP++ recomputes them from
             // the witness (spec §6.2).
@@ -313,6 +381,8 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
             deferred_constraints: Vec::new(),
             pending_multiplier: None,
             backend: super::Backend::default(),
+            builder: Builder::default(),
+            witness_base: 0,
         }
     }
 
@@ -371,24 +441,42 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
     /// where `w{L,R,O}` is \\( z \cdot z^Q \cdot W_{L,R,O} \\).
     fn flattened_constraints(&mut self, z: &Scalar) -> Flattened {
         let (n, m) = (self.secrets.a_L.len(), self.secrets.v.len());
-        self.constraints.flatten(z, n, m)
+        self.constraints.flatten(z, n, m, self.witness_base)
     }
 
     /// Returns the secret value of the linear combination.
     pub fn eval(&self, lc: &LinearCombination) -> Scalar {
-        lc.terms
-            .iter()
-            .map(|(var, coeff)| {
-                coeff
-                    * match var {
-                        Variable::MultiplierLeft(i) => self.secrets.a_L[*i],
-                        Variable::MultiplierRight(i) => self.secrets.a_R[*i],
-                        Variable::MultiplierOutput(i) => self.secrets.a_O[*i],
-                        Variable::Committed(i) => self.secrets.v[*i],
-                        Variable::One() => Scalar::ONE,
-                    }
-            })
-            .sum()
+        eval_with(&self.secrets, lc)
+    }
+
+    fn counts(&self) -> Counts {
+        Counts { n: self.secrets.a_L.len(), k: self.secrets.v.len() }
+    }
+
+    /// The BP lowering of the builder's record (spec §7.4, §7.5): multiplicities, witness
+    /// multipliers, products and one randomized constraint per argument.
+    fn lower_builder_bp(&mut self) -> Result<(), R1CSError> {
+        if !self.builder.active {
+            return Ok(());
+        }
+        let secrets = &self.secrets;
+        let m = self.builder.finalize(Some(&|lc: &LinearCombination| eval_with(secrets, lc)))?;
+        self.secrets.w.extend(m);
+        self.witness_base = self.secrets.a_L.len();
+        for pair in self.secrets.w.chunks(2) {
+            let (l, r) = (pair[0], pair.get(1).copied().unwrap_or(Scalar::ZERO));
+            self.secrets.a_L.push(l);
+            self.secrets.a_R.push(r);
+            self.secrets.a_O.push(l * r);
+        }
+        for (l, r, out) in core::mem::take(&mut self.builder.products) {
+            let (_, _, o) = self.multiply(l, r);
+            self.constrain(o - out);
+        }
+        for arg in core::mem::take(&mut self.builder.args) {
+            self.specify_randomized_constraints(move |cs| builder::logup(cs, arg))?;
+        }
+        Ok(())
     }
 
     /// Calls all remembered callbacks with an API that
@@ -484,6 +572,8 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
             builder.finalize(external_rng)
         };
 
+        self.lower_builder_bp()?;
+
         // Commit to the first-phase low-level witness variables.
         let n1 = self.secrets.a_L.len();
 
@@ -576,6 +666,9 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
 
         let y = transcript.challenge_scalar(b"y");
         let z = transcript.challenge_scalar(b"z");
+        if !self.constraints.vars_exist(self.secrets.a_L.len(), self.secrets.v.len(), self.builder.n_w) {
+            return Err(builder::gadget_error("a constraint uses a variable outside the constraint system"));
+        }
 
         let (wL, wR, wO, wV, _) = self.flattened_constraints(&z);
 
@@ -784,6 +877,68 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
         Ok((proof, self.transcript))
     }
 
+    /// Finalize the builder's record and lower it to a reciprocal form circuit and its
+    /// witness (spec §7.4, §7.6).
+    #[cfg(feature = "bppp")]
+    pub(crate) fn lower_builder_bppp(&mut self) -> Result<(crate::bppp::ReciprocalCircuit, crate::bppp::ReciprocalWitness), R1CSError> {
+        let secrets = &self.secrets;
+        let m = self.builder.finalize(Some(&|lc: &LinearCombination| eval_with(secrets, lc)))?;
+        self.secrets.w.extend(m);
+        let a = &self.secrets;
+        let values = super::backend::Values { a_l: &a.a_L, a_r: &a.a_R, a_o: &a.a_O, v: &a.v, s: &a.v_blinding, w: &a.w };
+        let rec = super::backend::Record {
+            n: a.a_L.len(),
+            k: a.v.len(),
+            n_w: self.builder.n_w,
+            products: &self.builder.products,
+            args: &self.builder.args,
+        };
+        let (c, w) = super::backend::builder_circuit(&self.constraints, &rec, Some(&values))?;
+        Ok((c, w.expect("the prover has values")))
+    }
+
+    /// The BP++ backend for a builder circuit (spec §7.6, §7.7): finalize, lower to a
+    /// reciprocal form circuit and prove it.
+    #[cfg(feature = "bppp")]
+    fn prove_builder<R: RngCore + CryptoRng>(
+        mut self,
+        bp_gens: &BulletproofGens,
+        external_rng: &mut R,
+    ) -> Result<(R1CSProof, T), R1CSError> {
+        use crate::bppp::{reciprocal, BpppGens, BpppTranscript};
+        let (c, mut w) = self.lower_builder_bppp()?;
+        let clear = |w: &mut crate::bppp::ReciprocalWitness| {
+            for s in w.w_d.iter_mut().chain(w.w_l.iter_mut()).chain(w.w_r.iter_mut()).chain(w.w_o.iter_mut()).chain(w.s.iter_mut()) {
+                s.clear();
+            }
+            w.v.iter_mut().flatten().for_each(|s| s.clear());
+        };
+        let a = &self.secrets;
+        let n_mm = c.n_p + c.n_m;
+        let gens = match BpppGens::new(self.pc_gens, bp_gens, c.n_lin, n_mm) {
+            Ok(g) => g,
+            Err(_) => {
+                clear(&mut w);
+                return Err(R1CSError::InvalidGeneratorsLength);
+            }
+        };
+        let V: Vec<CompressedRistretto> =
+            a.v.iter().zip(&a.v_blinding).map(|(v, s)| self.pc_gens.commit(*v, *s).compress()).collect();
+        let mut rng = {
+            let mut builder = self.transcript.borrow().build_rng();
+            for s in &a.v_blinding {
+                builder = builder.rekey_with_witness_bytes(b"v_blinding", s.as_bytes());
+            }
+            builder.finalize(external_rng)
+        };
+        let transcript = self.transcript.borrow_mut();
+        BpppTranscript::domain_sep(transcript, b"bppp-builder v1");
+        let proof = reciprocal::prove(&c, &gens, &V, &w, transcript, &mut rng).map_err(R1CSError::from);
+        clear(&mut w);
+        let n_lin = c.n_lin;
+        Ok((R1CSProof(ProofKind::Builder(BuilderProof { n_mm, n_lin, proof: proof? })), self.transcript))
+    }
+
     /// The BP++ backend (spec §6): translate the constraint system into an arithmetic circuit
     /// and prove it with the protocol of spec §3, which absorbs the circuit digest.
     #[cfg(feature = "bppp")]
@@ -797,6 +952,9 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
             return Err(R1CSError::GadgetError {
                 description: "randomized constraints need the BP backend".into(),
             });
+        }
+        if self.builder.active {
+            return self.prove_builder(bp_gens, external_rng);
         }
         let (n, k) = (self.secrets.a_L.len(), self.secrets.v.len());
         let constants = super::backend::Constants::FromWitness {

@@ -18,7 +18,8 @@ use crate::r1cs::Metrics;
 use crate::transcript::TranscriptProtocol;
 use super::proof::ProofKind;
 #[cfg(feature = "bppp")]
-use super::proof::BpppProof;
+use super::proof::{BpppProof, BuilderProof};
+use super::builder::{self, Builder, CircuitBuilder, Cost, Counts, Reciprocal, TableId, Width};
 use super::compact::{ConstraintStore, Flattened};
 
 /// A [`ConstraintSystem`] implementation for use by the verifier.
@@ -56,6 +57,12 @@ pub struct Verifier<T: BorrowMut<Transcript>> {
 
     /// The proof system used by `verify`.
     backend: super::Backend,
+
+    /// The circuit builder's record (spec §7).
+    builder: Builder,
+
+    /// First multiplier of the witness pairs (BP lowering, spec §7.5).
+    witness_base: usize,
 }
 
 /// Verifier in the randomizing phase.
@@ -144,6 +151,42 @@ impl<T: BorrowMut<Transcript>> ConstraintSystem for Verifier<T> {
         // (e.g. that variables are valid, that the linear combination
         // evals to 0 for prover, etc).
         self.constraints.push(&lc);
+    }
+}
+
+impl<T: BorrowMut<Transcript>> CircuitBuilder for Verifier<T> {
+    fn witness(&mut self, _: Option<Scalar>) -> Result<Variable, R1CSError> {
+        Ok(self.builder.witness())
+    }
+
+    fn product(&mut self, l: LinearCombination, r: LinearCombination, out: LinearCombination) -> Result<(), R1CSError> {
+        let c = self.counts();
+        self.builder.product(l, r, out, c)
+    }
+
+    fn table(&mut self, rows: Vec<Vec<u64>>, widths: &[Width]) -> Result<TableId, R1CSError> {
+        self.builder.table(rows, widths)
+    }
+
+    fn lookup(&mut self, t: TableId, tuple: &[LinearCombination]) -> Result<(), R1CSError> {
+        let c = self.counts();
+        self.builder.lookup(t, tuple, c)
+    }
+
+    fn lookup_value(&mut self, t: TableId, v: Option<u64>) -> Result<Variable, R1CSError> {
+        self.builder.check_value_table(t)?;
+        let x = CircuitBuilder::witness(self, v.map(Scalar::from))?;
+        self.lookup(t, &[x.into()])?;
+        Ok(x)
+    }
+
+    fn finish_reciprocal(&mut self, r: Reciprocal) -> Result<(), R1CSError> {
+        let c = self.counts();
+        self.builder.finish_reciprocal(r, c)
+    }
+
+    fn cost(&self) -> Cost {
+        self.builder.cost(self.num_vars, self.V.len())
     }
 }
 
@@ -242,6 +285,8 @@ impl<T: BorrowMut<Transcript>> Verifier<T> {
             deferred_constraints: Vec::new(),
             pending_multiplier: None,
             backend: super::Backend::default(),
+            builder: Builder::default(),
+            witness_base: 0,
         }
     }
 
@@ -293,7 +338,29 @@ impl<T: BorrowMut<Transcript>> Verifier<T> {
     /// because they're not needed to construct the proof).
     fn flattened_constraints(&mut self, z: &Scalar) -> Flattened {
         let (n, m) = (self.num_vars, self.V.len());
-        self.constraints.flatten(z, n, m)
+        self.constraints.flatten(z, n, m, self.witness_base)
+    }
+
+    fn counts(&self) -> Counts {
+        Counts { n: self.num_vars, k: self.V.len() }
+    }
+
+    /// The BP lowering of the builder's record (spec §7.4, §7.5), as the prover's.
+    fn lower_builder_bp(&mut self) -> Result<(), R1CSError> {
+        if !self.builder.active {
+            return Ok(());
+        }
+        self.builder.finalize(None)?;
+        self.witness_base = self.num_vars;
+        self.num_vars += (self.builder.n_w + 1) / 2;
+        for (l, r, out) in core::mem::take(&mut self.builder.products) {
+            let (_, _, o) = self.multiply(l, r);
+            self.constrain(o - out);
+        }
+        for arg in core::mem::take(&mut self.builder.args) {
+            self.specify_randomized_constraints(move |cs| builder::logup(cs, arg))?;
+        }
+        Ok(())
     }
 
     /// Calls all remembered callbacks with an API that
@@ -334,6 +401,40 @@ impl<T: BorrowMut<Transcript>> Verifier<T> {
         self.verify_and_return_transcript(proof, pc_gens, bp_gens)
             .map(|_| ())
     }
+    /// Finalize the builder's record and lower it (spec §7.4, §7.6).
+    #[cfg(feature = "bppp")]
+    pub(crate) fn lower_builder_bppp(&mut self) -> Result<crate::bppp::ReciprocalCircuit, R1CSError> {
+        self.builder.finalize(None)?;
+        let rec = super::backend::Record {
+            n: self.num_vars,
+            k: self.V.len(),
+            n_w: self.builder.n_w,
+            products: &self.builder.products,
+            args: &self.builder.args,
+        };
+        Ok(super::backend::builder_circuit(&self.constraints, &rec, None)?.0)
+    }
+
+    /// The BP++ backend for a builder circuit (spec §7.6, §7.7): lower the record and verify.
+    #[cfg(feature = "bppp")]
+    fn verify_builder(mut self, p: &BuilderProof, pc_gens: &PedersenGens, bp_gens: &BulletproofGens) -> Result<T, R1CSError> {
+        use crate::bppp::{reciprocal, BpppGens, BpppTranscript};
+        if !self.deferred_constraints.is_empty() {
+            return Err(R1CSError::GadgetError {
+                description: "randomized constraints need the BP backend".into(),
+            });
+        }
+        let c = self.lower_builder_bppp()?;
+        if p.n_mm != c.n_p + c.n_m || p.n_lin != c.n_lin {
+            return Err(R1CSError::VerificationError);
+        }
+        let gens = BpppGens::new(pc_gens, bp_gens, c.n_lin, p.n_mm).map_err(|_| R1CSError::InvalidGeneratorsLength)?;
+        let transcript = self.transcript.borrow_mut();
+        BpppTranscript::domain_sep(transcript, b"bppp-builder v1");
+        reciprocal::verify(&p.proof, &c, &gens, &self.V, transcript).map_err(|_| R1CSError::VerificationError)?;
+        Ok(self.transcript)
+    }
+
     /// The BP++ backend (spec §6): rebuild the translated circuit and verify its proof.
     #[cfg(feature = "bppp")]
     fn verify_bppp(mut self, p: &BpppProof, pc_gens: &PedersenGens, bp_gens: &BulletproofGens) -> Result<T, R1CSError> {
@@ -364,11 +465,14 @@ impl<T: BorrowMut<Transcript>> Verifier<T> {
     ) -> Result<T, R1CSError> {
         #[cfg(feature = "bppp")]
         {
-            if let ProofKind::Bppp(p) = &proof.0 {
-                if self.backend != super::Backend::Bppp {
-                    return Err(R1CSError::VerificationError);
+            match &proof.0 {
+                ProofKind::Bppp(_) | ProofKind::Builder(_) if self.backend != super::Backend::Bppp => {
+                    return Err(R1CSError::VerificationError)
                 }
-                return self.verify_bppp(p, pc_gens, bp_gens);
+                ProofKind::Bppp(p) if !self.builder.active => return self.verify_bppp(p, pc_gens, bp_gens),
+                ProofKind::Builder(p) if self.builder.active => return self.verify_builder(p, pc_gens, bp_gens),
+                ProofKind::Bppp(_) | ProofKind::Builder(_) => return Err(R1CSError::VerificationError),
+                _ => {}
             }
             if self.backend == super::Backend::Bppp {
                 return Err(R1CSError::VerificationError);
@@ -386,6 +490,8 @@ impl<T: BorrowMut<Transcript>> Verifier<T> {
         let transcript = self.transcript.borrow_mut();
         transcript.append_u64(b"m", self.V.len() as u64);
 
+        self.lower_builder_bp()?;
+        let transcript = self.transcript.borrow_mut();
         let n1 = self.num_vars;
         transcript.validate_and_append_point(b"A_I1", &proof.A_I1)?;
         transcript.validate_and_append_point(b"A_O1", &proof.A_O1)?;
@@ -416,6 +522,9 @@ impl<T: BorrowMut<Transcript>> Verifier<T> {
 
         let y = transcript.challenge_scalar(b"y");
         let z = transcript.challenge_scalar(b"z");
+        if !self.constraints.vars_exist(self.num_vars, self.V.len(), self.builder.n_w) {
+            return Err(builder::gadget_error("a constraint uses a variable outside the constraint system"));
+        }
 
         transcript.validate_and_append_point(b"T_1", &proof.T_1)?;
         transcript.validate_and_append_point(b"T_3", &proof.T_3)?;

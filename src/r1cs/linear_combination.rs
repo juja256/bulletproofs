@@ -16,6 +16,9 @@ pub enum Variable {
     MultiplierRight(usize),
     /// Represents the output of a multiplication gate.
     MultiplierOutput(usize),
+    /// A witness of the circuit builder (spec §7): half a multiplier in BP, a slot of `w_O`
+    /// in BP++.
+    Witness(usize),
     /// Represents the constant 1.
     One(),
 }

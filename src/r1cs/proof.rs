@@ -42,6 +42,21 @@ pub(super) enum ProofKind {
     /// A Bulletproofs++ proof of the translated circuit (spec §6).
     #[cfg(feature = "bppp")]
     Bppp(BpppProof),
+    /// A Bulletproofs++ proof of a circuit built with `CircuitBuilder` (spec §7.6).
+    #[cfg(feature = "bppp")]
+    Builder(BuilderProof),
+}
+
+/// A Bulletproofs++ proof of a builder circuit: the dimensions of the reciprocal form circuit
+/// and its proof.
+#[cfg(feature = "bppp")]
+#[derive(Clone, Debug)]
+pub(super) struct BuilderProof {
+    /// `N_p + N_m`.
+    pub(super) n_mm: usize,
+    /// Length of the linear part.
+    pub(super) n_lin: usize,
+    pub(super) proof: crate::bppp::CircuitProof,
 }
 
 /// A Bulletproofs++ proof of an R1CS: the dimensions of the translated circuit and the circuit
@@ -60,6 +75,10 @@ pub(super) struct BpppProof {
 #[cfg(feature = "bppp")]
 const BPPP_V1: u8 = 2;
 
+/// Version tag of a BP++ proof of a builder circuit.
+#[cfg(feature = "bppp")]
+const BPPP_BUILDER_V1: u8 = 3;
+
 impl R1CSProof {
     /// Serializes the proof. A BP proof keeps the upstream encoding (see the BP layout below);
     /// a BP++ proof is the byte 2, `n_m` and `k` as `u64` little-endian, then the circuit proof.
@@ -74,6 +93,14 @@ impl R1CSProof {
                 out.extend(p.proof.to_bytes());
                 out
             }
+            #[cfg(feature = "bppp")]
+            ProofKind::Builder(p) => {
+                let mut out = alloc::vec![BPPP_BUILDER_V1];
+                out.extend_from_slice(&(p.n_mm as u64).to_le_bytes());
+                out.extend_from_slice(&(p.n_lin as u64).to_le_bytes());
+                out.extend(p.proof.to_bytes());
+                out
+            }
         }
     }
 
@@ -82,7 +109,7 @@ impl R1CSProof {
         match &self.0 {
             ProofKind::Bp(p) => p.serialized_size(),
             #[cfg(feature = "bppp")]
-            ProofKind::Bppp(_) => self.to_bytes().len(),
+            ProofKind::Bppp(_) | ProofKind::Builder(_) => self.to_bytes().len(),
         }
     }
 
@@ -90,15 +117,20 @@ impl R1CSProof {
     pub fn from_bytes(slice: &[u8]) -> Result<R1CSProof, R1CSError> {
         #[cfg(feature = "bppp")]
         {
-            if slice.first() == Some(&BPPP_V1) {
+            let tag = slice.first().copied();
+            if tag == Some(BPPP_V1) || tag == Some(BPPP_BUILDER_V1) {
                 if slice.len() < 17 {
                     return Err(R1CSError::FormatError);
                 }
                 use core::convert::{TryFrom, TryInto};
                 let u = |b: &[u8]| usize::try_from(u64::from_le_bytes(b.try_into().unwrap())).map_err(|_| R1CSError::FormatError);
-                let (n_m, k) = (u(&slice[1..9])?, u(&slice[9..17])?);
-                let proof = super::backend::proof_from_bytes(&slice[17..], n_m, k)?;
-                return Ok(R1CSProof(ProofKind::Bppp(BpppProof { n_m, k, proof })));
+                let (a, b) = (u(&slice[1..9])?, u(&slice[9..17])?);
+                let proof = super::backend::proof_from_bytes_shape(&slice[17..], a, b)?;
+                return Ok(R1CSProof(if tag == Some(BPPP_V1) {
+                    ProofKind::Bppp(BpppProof { n_m: a, k: b, proof })
+                } else {
+                    ProofKind::Builder(BuilderProof { n_mm: a, n_lin: b, proof })
+                }));
             }
         }
         BpProof::from_bytes(slice).map(|p| R1CSProof(ProofKind::Bp(p)))

@@ -22,6 +22,7 @@ const TAG_RIGHT: u32 = 1;
 const TAG_OUTPUT: u32 = 2;
 const TAG_COMMITTED: u32 = 3;
 const TAG_ONE: u32 = 4;
+const TAG_WITNESS: u32 = 5;
 /// Indices of the pre-seeded coefficients.
 const COEFF_ONE: u32 = 0;
 const COEFF_MINUS_ONE: u32 = 1;
@@ -57,6 +58,7 @@ impl ConstraintStore {
                 Variable::MultiplierRight(i) => pack(TAG_RIGHT, i),
                 Variable::MultiplierOutput(i) => pack(TAG_OUTPUT, i),
                 Variable::Committed(i) => pack(TAG_COMMITTED, i),
+                Variable::Witness(i) => pack(TAG_WITNESS, i),
                 Variable::One() if self.keep_constants => pack(TAG_ONE, 0),
                 Variable::One() => continue,
             };
@@ -81,11 +83,13 @@ impl ConstraintStore {
 
     /// $w_X[i] = \sum_q z^{q+1} W_X[q][i]$ for the multiplier columns, $-\ldots$ for the
     /// committed column and the constant (zero if constants are not kept); frees the storage.
+    /// `Witness(i)` is the left (`i` even) or right input of multiplier `witness_base + i / 2`
+    /// (spec §7.5).
     ///
     /// With `parallel`, every thread owns a range of variable indices and scans all terms,
     /// recomputing the powers of `z` itself: no extra memory, and each sum is accumulated in
     /// the same order as in the serial code.
-    pub(super) fn flatten(&mut self, z: &Scalar, n: usize, m: usize) -> Flattened {
+    pub(super) fn flatten(&mut self, z: &Scalar, n: usize, m: usize, witness_base: usize) -> Flattened {
         let mut wL = vec![Scalar::ZERO; n];
         let mut wR = vec![Scalar::ZERO; n];
         let mut wO = vec![Scalar::ZERO; n];
@@ -98,7 +102,11 @@ impl ConstraintStore {
             let mut start = 0;
             for &end in &self.ends {
                 for &(packed, c) in &self.terms[start..end] {
-                    let (tag, i) = (packed >> TAG_SHIFT, (packed & INDEX_MASK) as usize);
+                    let (mut tag, mut i) = (packed >> TAG_SHIFT, (packed & INDEX_MASK) as usize);
+                    if tag == TAG_WITNESS {
+                        tag = if i % 2 == 0 { TAG_LEFT } else { TAG_RIGHT };
+                        i = witness_base + i / 2;
+                    }
                     if !wanted(tag, i) {
                         continue;
                     }
@@ -171,6 +179,20 @@ impl ConstraintStore {
 }
 
 impl ConstraintStore {
+    /// Whether every variable exists: multipliers `< n`, committed inputs `< m`, witnesses
+    /// `< n_w`.
+    pub(super) fn vars_exist(&self, n: usize, m: usize, n_w: usize) -> bool {
+        self.terms.iter().all(|&(packed, _)| {
+            let i = (packed & INDEX_MASK) as usize;
+            match packed >> TAG_SHIFT {
+                TAG_LEFT | TAG_RIGHT | TAG_OUTPUT => i < n,
+                TAG_COMMITTED => i < m,
+                TAG_WITNESS => i < n_w,
+                _ => true,
+            }
+        })
+    }
+
     /// The terms of constraint `q`, decoded (constants appear only if they are kept).
     #[cfg(feature = "bppp")]
     pub(super) fn row(&self, q: usize) -> impl Iterator<Item = (Variable, Scalar)> + '_ {
@@ -182,6 +204,7 @@ impl ConstraintStore {
                 TAG_RIGHT => Variable::MultiplierRight(i),
                 TAG_OUTPUT => Variable::MultiplierOutput(i),
                 TAG_COMMITTED => Variable::Committed(i),
+                TAG_WITNESS => Variable::Witness(i),
                 _ => Variable::One(),
             };
             (var, self.coeffs[c as usize])

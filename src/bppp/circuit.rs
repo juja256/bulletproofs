@@ -155,6 +155,10 @@ impl ArithmeticCircuit {
         if (self.f_l && self.n_l() < kv) || (self.f_m && self.n_m < kv) {
             return bad;
         }
+        // Inputs that enter no constraint would not be checked at all.
+        if self.k > 0 && !self.f_l && !self.f_m {
+            return bad;
+        }
         if self.partition.len() != self.n_o {
             return bad;
         }
@@ -322,12 +326,22 @@ fn commit(gens: &BpppGens, r: &[Scalar; 8], l: &[Scalar], n: &[Scalar]) -> Ristr
         + util::msm_slices(n, gens.n, util::MSM_CHUNK_CT, false)
 }
 
-fn absorb_statement<T: BpppTranscript>(t: &mut T, c: &ArithmeticCircuit, V: &[CompressedRistretto], bind: bool) {
+fn absorb_statement<T: BpppTranscript>(
+    t: &mut T,
+    c: &ArithmeticCircuit,
+    gens: &BpppGens,
+    V: &[CompressedRistretto],
+    bind: bool,
+) {
     t.domain_sep(b"bppp-circuit v1");
     let labels: [&'static [u8]; 8] = [b"N_m", b"N_O", b"N_v", b"N_lin", b"k", b"N_l", b"f_l", b"f_m"];
     for (label, x) in labels.iter().zip(c.dims()) {
         t.append_u64(label, x);
     }
+    // The value and blinding generators may be application-specific (asset generators), so
+    // they are part of the statement; the others are the fixed setup.
+    t.append_point(b"G", &gens.g.compress());
+    t.append_point(b"H_0", &gens.h[0].compress());
     if bind {
         t.append_message(b"circuit", &c.digest());
     }
@@ -397,7 +411,7 @@ fn prove_impl<T: BpppTranscript, R: RngCore + CryptoRng>(
     let C_R = commit(gens, &r_r, &l_r, &w.w_r).compress();
     let C_O = commit(gens, &r_o, &l_o, &n_o).compress();
 
-    absorb_statement(transcript, c, V, bind);
+    absorb_statement(transcript, c, gens, V, bind);
     transcript.append_point(b"C_L", &C_L);
     transcript.append_point(b"C_R", &C_R);
     transcript.append_point(b"C_O", &C_O);
@@ -493,7 +507,7 @@ impl CircuitProof {
         if V.len() != c.k {
             return Err(ProofError::VerificationError);
         }
-        absorb_statement(transcript, c, V, bind);
+        absorb_statement(transcript, c, gens, V, bind);
         transcript.append_point(b"C_L", &self.C_L);
         transcript.append_point(b"C_R", &self.C_R);
         transcript.append_point(b"C_O", &self.C_O);
@@ -647,6 +661,8 @@ mod tests {
         let mut out = Vec::new();
         for &(f_l, f_m) in &[(false, false), (true, false), (false, true), (true, true)] {
             for &k in &[1, 3] {
+                // inputs need a flag that puts them into constraints
+                let k = if f_l || f_m { k } else { 0 };
                 for &n_v in &[1, 4] {
                     for &spread in &[false, true] {
                         out.push(Shape {
@@ -894,6 +910,8 @@ mod tests {
             (b"N_l", u(5)),
             (b"f_l", u(1)),
             (b"f_m", u(1)),
+            (b"G", g.g.compress().as_bytes().to_vec()),
+            (b"H_0", g.h[0].compress().as_bytes().to_vec()),
             (b"circuit", c.digest().to_vec()),
             (b"V", V[0].as_bytes().to_vec()),
             (b"V", V[1].as_bytes().to_vec()),
@@ -942,6 +960,67 @@ mod tests {
         for v in variants {
             assert_ne!(v.digest(), d);
         }
+    }
+
+    /// The value generator is part of the statement: a prover who picks `G` after seeing the
+    /// challenges (solving the verification equation for it) must fail. Found in review.
+    #[test]
+    fn forged_value_generator_is_rejected() {
+        let mut rng = ChaCha20Rng::seed_from_u64(79);
+        let s = Shape { n_m: 4, n_o: 2, n_v: 1, n_lin: 2, k: 1, n_l: 3, f_l: true, f_m: false, spread: false };
+        let (mut c, w) = instance(&mut rng, &s);
+        c.a_l[1] += Scalar::ONE;
+        assert!(!c.is_satisfied(&w));
+        let (pc, bp) = gens_for(&c);
+        let g = BpppGens::new(&pc, &bp, c.n_lin, c.n_m).unwrap();
+        let V = commitments(&g, &w);
+        let proof = prove(&c, &g, &V, &w, &mut Transcript::new(b"t"), &mut rng).unwrap();
+        assert!(proof.verify(&c, &g, &V, &mut Transcript::new(b"t")).is_err());
+        // Replay the verifier: A is the coefficient of G in the check, B the rest; G := -B/A.
+        let mut t = Transcript::new(b"t");
+        absorb_statement(&mut t, &c, &g, &V, true);
+        t.append_point(b"C_L", &proof.C_L);
+        t.append_point(b"C_R", &proof.C_R);
+        t.append_point(b"C_O", &proof.C_O);
+        let (rho, lambda) = (t.challenge(b"rho"), t.challenge(b"lambda"));
+        let (beta, delta) = (t.challenge(b"beta"), t.challenge(b"delta"));
+        let wt = Weights::new(&c, rho, lambda);
+        let delta_inv = delta.invert();
+        t.append_point(b"C_S", &proof.C_S);
+        let tau = t.challenge(b"tau");
+        let (tau_inv, tau3) = (tau.invert(), tau * tau * tau);
+        let p_n = wt.p_n(delta_inv).eval(tau, tau_inv, c.n_m);
+        let p_s = p_n.iter().zip(&wt.mu_vec).map(|(a, m)| a * a * m).sum::<Scalar>() + tau3 * wt.affine;
+        let cvec: Vec<Scalar> = c_r(beta, tau, tau_inv).chain(wt.c_l(delta_inv).eval(tau, tau_inv, c.n_lin)).collect();
+        let sc = proof.wnla.verification_scalars(&cvec, rho, c.n_m, &mut t).unwrap();
+        let d = |p: &CompressedRistretto| p.decompress().unwrap();
+        let mut B = -(d(&proof.C_S) * tau_inv) - d(&proof.C_O) * delta - d(&proof.C_L) * tau - d(&proof.C_R) * (tau * tau);
+        for (nu, v) in wt.nu.iter().zip(&V) {
+            B -= d(v) * (tau3 * nu);
+        }
+        for (gm, (x, r)) in sc.gammas.iter().zip(proof.wnla.X.iter().zip(&proof.wnla.R)) {
+            B -= d(x) * gm + d(r) * (gm * gm - Scalar::ONE);
+        }
+        for (s_, h) in sc.h.iter().zip(&g.h) {
+            B += h * s_;
+        }
+        for ((s_, p), n) in sc.n.iter().zip(&p_n).zip(g.n.iter()) {
+            B += n * (s_ - p);
+        }
+        let forged = BpppGens { g: -(B * (sc.g - p_s).invert()), h: g.h.clone(), n: g.n };
+        assert!(proof.verify(&c, &forged, &V, &mut Transcript::new(b"t")).is_err());
+    }
+
+    /// Inputs that enter no constraint (`k > 0` with neither flag) would be accepted
+    /// unchecked; such circuits are rejected. Found in review.
+    #[test]
+    fn unused_inputs_are_rejected() {
+        let mut rng = ChaCha20Rng::seed_from_u64(16);
+        let s = Shape { n_m: 4, n_o: 2, n_v: 1, n_lin: 1, k: 1, n_l: 2, f_l: false, f_m: false, spread: false };
+        let (c, _) = instance(&mut rng, &s);
+        assert!(c.check().is_err());
+        let s0 = Shape { k: 0, ..s };
+        assert!(instance(&mut rng, &s0).0.check().is_ok());
     }
 
     #[test]

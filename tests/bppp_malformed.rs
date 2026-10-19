@@ -124,7 +124,7 @@ fn r1cs_proofs_of_every_kind() {
         }
     }
     // huge dimensions in the BP++ headers
-    for tag in [2u8, 3] {
+    for tag in [2u8, 3, 4] {
         for (a, b) in [(u64::MAX, 1), (1 << 62, 0), (0, 0), (1, u64::MAX), (1 << 40, 1 << 40)] {
             let mut x = vec![tag];
             x.extend(a.to_le_bytes());

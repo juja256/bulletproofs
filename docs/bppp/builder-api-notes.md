@@ -32,7 +32,7 @@ for this discussion.
 ### 1.3 Builder mode and the proof tag 3 (`BuilderProof`) — superseded by option B
 
 (Option B, phase 7c: every constraint system is lowered by §7.6 and proven with §4 under
-`"bppp-r1cs v2"`; one encoding, tag 2 with `(N'_m, N_lin)`; no builder mode. The text below is
+`"bppp-r1cs v2"`; one encoding, tag 4 with `(N'_m, N_lin)`; no builder mode. The text below is
 the phase-6 design.)
 
 

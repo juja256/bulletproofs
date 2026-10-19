@@ -648,9 +648,11 @@ verifier return a `GadgetError`. A challenge between the commitments would have 
 $C_L, C_O$ and before $C_R$ (the reciprocal form's slot), where variables on the right wire are
 not yet bound.
 
-Encoding: the byte 2 (BP proofs start with 0 or 1), $N'_m = N_p + N_m$ and $N_{lin}$ as `u64`
-little-endian, then the proof (§4.6). Any other first byte is a format error (3 was the builder
-encoding before option B). The verifier rejects a proof whose dimensions differ from its own
+Encoding: the byte 4 (BP proofs start with 0 or 1), $N'_m = N_p + N_m$ and $N_{lin}$ as `u64`
+little-endian, then the proof (§4.6). Any other first byte is a format error: 2 and 3 were the
+BP++ encodings before option B, and a tag-2 proof of a plain R1CS had the same header and body
+layout, so the tag changed to make such proofs format errors instead of proofs that only fail
+verification. The verifier rejects a proof whose dimensions differ from its own
 lowering, and a proof of the other backend.
 
 ## 7. The circuit builder (both backends)

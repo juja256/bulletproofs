@@ -203,6 +203,33 @@ RUSTFLAGS="-C target_cpu=skylake-avx512" cargo bench --features "avx2_backend"
 This prevents spills in the AVX2 parallel field multiplication code, but causes
 worse code generation elsewhere ¯\\\_(ツ)\_/¯
 
+## Bulletproofs++ (experimental)
+
+The `bppp` feature adds Bulletproofs++ (Eagen, Kanjalkar, Ruffing, Nick, ePrint 2022/510) on
+ristretto255. **Not audited; the API and the proof format will change.** The protocol as
+implemented is pinned in [`docs/bppp/spec.md`](docs/bppp/spec.md). `ref/bppp_ref.py` is a
+spec-level Python reference (symbolic group elements, a naive recursive verifier) that
+generates the test vectors in `tests/vectors/bppp/`; it has the same author as the Rust code,
+so it checks the algebra and the verifier's shortcuts, not the reading of the paper.
+
+Status: the weighted norm linear argument (`bppp::wnla`) is done. It binds its statement
+(`C`, `rho`, `c`) but is not zero-knowledge: it is a building block of the circuit protocol,
+not a proof system to use on its own. Arithmetic circuits, reciprocal-form circuits, range
+proofs, MACT and a BP++ backend for the R1CS front end follow.
+
+```sh
+cargo test --release --features bppp --lib bppp
+python3 ref/gen_vectors.py            # regenerate the vectors (deterministic)
+cargo bench --features bppp --bench bppp
+```
+
+| WNLA, $\lvert l\rvert = 16$ | prove | verify |
+|---|---|---|
+| $\lvert n\rvert = 2^{10}$ | 38 ms | 2.6 ms |
+| $\lvert n\rvert = 2^{14}$ | 591 ms | 30.5 ms |
+
+Apple M4 Pro, single-threaded, `rustc 1.99.1`, release profile.
+
 ## About
 
 This is a research project sponsored by [Interstellar][interstellar],

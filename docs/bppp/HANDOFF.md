@@ -24,7 +24,7 @@ then the zkVM `bpvm` (github.com/juja256/bpvm, a separate repository) on BP++.
 | 5 | R1CS front end on BP++ | `src/r1cs/backend.rs`, `proof.rs`, `prover.rs`, `verifier.rs`, spec §6 | branch `bppp-r1cs` (this one) |
 | 6 | `CircuitBuilder` | `src/r1cs/builder.rs`, `backend.rs`, `prover.rs`, `verifier.rs`, `compact.rs`, spec §7 | branch `claude/beautiful-goodall-m369g7` (local commits, not pushed) |
 | 7 | performance and hardening | `wnla.rs`, `batch.rs`, `oblivious.rs`, spec §2.6, §3.11 | branch `bppp-perf` (pushed); format changes held |
-| 7b | tuple poles (option F): lookups of tuples without the bound rule | `reciprocal.rs`, `builder.rs`, `backend.rs`, spec §4.1–4.7, §7.2–7.6 | branch `bppp-tuples` (local), in progress |
+| 7b | tuple poles (option F): lookups of tuples without the bound rule | `reciprocal.rs`, `builder.rs`, `backend.rs`, spec §4.1–4.7, §7.2–7.6 | branch `bppp-tuples` (pushed); review pending |
 | 8 | bpvm on BP++ | other repository | open |
 
 The branches are stacked: `main` ⊂ `bppp-circuit` ⊂ `bppp-reciprocal` ⊂ `bppp-range` ⊂
@@ -259,3 +259,17 @@ DESIGN (milestone M6). bpvm depends on this fork by git revision.
   `reciprocal(m)`), §7.6 tuple poles for $m \ge 2$ with copies of components that read $w_L$,
   $w_R$. The challenge is called $\eta$ (label `"eta"`): $\gamma$ is taken by the WNLA rounds.
   Errata remark "Lookups of tuples" updated.
+- 2026-10-19 — phase 7b, implementation. Owner's answers to the API notes: A (keep the builder
+  on `Prover`/`Verifier`), B by our choice (one BP++ encoding, after F), not C. Rust: `Pole`
+  (polynomial in $\eta$), `TuplePole`/`Component`, `uses_eta`, protocol v2 in
+  `reciprocal.rs` (`commit_ol` split into `commit_o`/`commit_l`, same randomness order);
+  builder `table(rows)`, `reciprocal(m)`, tuple poles for $m \ge 2$ with copies of components on
+  $w_L$/$w_R$; bound rule, widths and the 512-bit bound arithmetic removed. Tests: tuple cheats
+  (packed collisions with unbounded components, swapped tuples, component order), rules for tuple
+  poles, v2 digest and transcript order, v2 in a batch, bpvm-style `xor32` with fresh nibbles
+  (8 gates). Independent reference (separate agent, spec and `ref/` only): 10 new reciprocal
+  cases and 12 new builder cases, digests v1/v2 for every case, all 13 one-column builder cases
+  unchanged; Rust matched on the first run. One spec ambiguity found (§7.6 vs §4.1 for an
+  $m \ge 2$ argument with only empty public coefficients): §7.6 now defers to §4.1. Everything
+  green: 145 tests (bppp parallel yoloproofs, also bppp-vartime), 70 (yoloproofs), 34 (default);
+  pins and range/MACT/circuit/WNLA vectors unchanged; xcheck 13/13. Next: mutants, review, then B.

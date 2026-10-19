@@ -224,10 +224,60 @@ fn range_bench(c: &mut Criterion) {
     });
 }
 
+/// `n` 32-bit range checks of committed values through a byte table (spec §7), on both
+/// backends of the circuit builder.
+#[cfg(feature = "yoloproofs")]
+fn builder_bench(c: &mut Criterion) {
+    use bulletproofs::r1cs::{Backend, CircuitBuilder, ConstraintSystem, LinearCombination, Prover, R1CSError, Variable, Verifier};
+    fn gadget<CS: CircuitBuilder>(cs: &mut CS, vars: &[Variable], vals: Option<&[u64]>) -> Result<(), R1CSError> {
+        let byte = cs.table((0..256u64).map(|x| vec![x]).collect(), &[8])?;
+        for (i, x) in vars.iter().enumerate() {
+            let mut sum = LinearCombination::default();
+            for j in 0..4 {
+                let b = cs.lookup_value(byte, vals.map(|v| (v[i] >> (8 * j)) & 255))?;
+                sum = sum + b * Scalar::from(1u64 << (8 * j));
+            }
+            cs.constrain(*x - sum);
+        }
+        Ok(())
+    }
+    let pc = bulletproofs::PedersenGens::default();
+    let bp = bulletproofs::BulletproofGens::new(1 << 13, 1);
+    for &n in &[64usize, 1024] {
+        let vals: Vec<u64> = (0..n as u64).map(|i| i.wrapping_mul(0x9e37_79b9) & 0xffff_ffff).collect();
+        for backend in [Backend::Bp, Backend::Bppp] {
+            let prove = || {
+                let mut t = Transcript::new(b"bench");
+                let mut prover = Prover::new(&pc, &mut t);
+                prover.set_backend(backend);
+                let (V, vars): (Vec<_>, Vec<_>) = vals.iter().map(|v| prover.commit(Scalar::from(*v), Scalar::from(7u64))).unzip();
+                gadget(&mut prover, &vars, Some(&vals)).unwrap();
+                (prover.prove(&bp).unwrap(), V)
+            };
+            let (proof, V) = prove();
+            println!("builder {:?}, {} x range32: proof {} bytes", backend, n, proof.serialized_size());
+            c.bench_function(&format!("builder {}x range32 {:?} prove", n, backend), |b| b.iter(prove));
+            c.bench_function(&format!("builder {}x range32 {:?} verify", n, backend), |b| {
+                b.iter(|| {
+                    let mut t = Transcript::new(b"bench");
+                    let mut verifier = Verifier::new(&mut t);
+                    verifier.set_backend(backend);
+                    let vars: Vec<Variable> = V.iter().map(|v| verifier.commit(*v)).collect();
+                    gadget(&mut verifier, &vars, None).unwrap();
+                    verifier.verify(&proof, &pc, &bp).unwrap()
+                })
+            });
+        }
+    }
+}
+
+#[cfg(not(feature = "yoloproofs"))]
+fn builder_bench(_: &mut Criterion) {}
+
 criterion_group! {
     name = bppp;
     config = Criterion::default().sample_size(10);
-    targets = wnla_bench, circuit_bench, range_bench,
+    targets = wnla_bench, circuit_bench, range_bench, builder_bench,
 }
 
 criterion_main!(bppp);

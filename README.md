@@ -251,6 +251,15 @@ example a 64-bit proof in base 256 is 704 B.
   constraint system is translated into an arithmetic circuit; randomized constraints are not
   supported on BP++ (they return a `GadgetError`).
 
+- `r1cs::CircuitBuilder` (spec §7): free witnesses, products, public tables with lookups and
+  general reciprocal (logUp-style) arguments on top of `ConstraintSystem`, implemented by
+  `Prover` and `Verifier` for both backends. A gadget is written once: BP lowers it to
+  randomized constraints (one second-phase multiplier per lookup, `|T|/2` multipliers per
+  table), BP++ to a reciprocal form circuit (one gate per lookup, witnesses and multiplicities
+  in free slots). Multi-column tuples are packed with a public base, so their components must
+  be bounded by one-column lookups first; the builder checks this on both backends.
+  `cost()` reports the multipliers, gates and generator capacity of either backend.
+
 `cargo bench --features bppp --bench bppp -- "range|mact"`:
 
 | | proof | prove | verify |
@@ -283,6 +292,18 @@ constraints with three terms each (`cargo bench --features "bppp yoloproofs" --b
 
 The BP++ prover is not optimised yet (phase 7 of the plan); verification is about a third
 faster and proofs about a fifth smaller.
+
+The circuit builder, $n$ committed values range-checked to 32 bits through a byte table (four
+lookups each; `cargo bench --features "bppp yoloproofs" --bench bppp -- builder`; this machine,
+4 cores, measured single-threaded):
+
+| $n$ | proof BP++ / BP | prove BP++ / BP | verify BP++ / BP |
+|---|---|---|---|
+| 64 | 753 / 1089 B | 109 / 97 ms | 11.7 / 9.4 ms |
+| 1024 | 945 / 1345 B | 1.13 / 1.26 s | 75 / 119 ms |
+
+At small $n$ BP++ pays for its linear slots: witnesses and multiplicities beyond the
+$N_p + N_m$ norm slots lengthen $H$ (phase 7).
 
 Apple M4 Pro, single-threaded, `rustc 1.99.1`, release profile.
 

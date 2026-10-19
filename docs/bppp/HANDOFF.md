@@ -22,12 +22,12 @@ then the zkVM `bpvm` (github.com/juja256/bpvm, a separate repository) on BP++.
 | 3 | reciprocal form circuits (§6.2–6.3) | `src/bppp/reciprocal.rs`, spec §4 | branch `bppp-reciprocal` |
 | 4 | range proofs, MACT (§6.4–6.5) | `src/bppp/range.rs`, `mact.rs`, spec §5 | branch `bppp-range` |
 | 5 | R1CS front end on BP++ | `src/r1cs/backend.rs`, `proof.rs`, `prover.rs`, `verifier.rs`, spec §6 | branch `bppp-r1cs` (this one) |
-| 6 | `CircuitBuilder` | — | next |
+| 6 | `CircuitBuilder` | `src/r1cs/builder.rs`, `backend.rs`, `prover.rs`, `verifier.rs`, `compact.rs`, spec §7 | branch `claude/beautiful-goodall-m369g7` (local commits, not pushed) |
 | 7 | performance and hardening | — | open |
 | 8 | bpvm on BP++ | other repository | open |
 
 The branches are stacked: `main` ⊂ `bppp-circuit` ⊂ `bppp-reciprocal` ⊂ `bppp-range` ⊂
-`bppp-r1cs`. None of 2–5 is merged into `main` yet; ask the owner before merging.
+`bppp-r1cs` ⊂ `claude/beautiful-goodall-m369g7` (phase 6). None of 2–5 is merged into `main` yet; ask the owner before merging.
 
 Numbers (Apple M4 Pro, one thread): a 64-bit range proof is 416 B (paper's figure) against 672 B
 for the BP `RangeProof`, proving in 2.55 vs 4.39 ms, verifying in 0.48 vs 0.61 ms; a circuit of
@@ -98,46 +98,49 @@ cargo bench --features "bppp yoloproofs" --bench bppp
   only `ProofError::{InvalidGeneratorsLength, FormatError, VerificationError}`
   (`From<ProofError> for R1CSError` panics on the others).
 
-## Next: phase 6 — `CircuitBuilder`
+## Done: phase 6 — `CircuitBuilder` (spec §7)
 
-An additive trait (`ConstraintSystem` stays as is) implemented by both backends: BP emulates
-the gadgets with logUp over its two-phase randomized constraints, BP++ builds a reciprocal form
-circuit natively. A gadget is written once.
+What exists:
 
-```rust
-pub trait CircuitBuilder: ConstraintSystem {
-    fn witness(&mut self, v: Option<Scalar>) -> Variable;                 // BP: allocate (half a gate); BP++: a slot in n_O, free
-    fn product(&mut self, l: LinearCombination, r: LinearCombination, out: LinearCombination); // a row of W_m
-    fn table(&mut self, rows: impl IntoIterator<Item = Vec<u64>>, widths: &[Width]) -> TableId;
-    fn lookup(&mut self, t: TableId, tuple: &[LinearCombination]);        // BP: one phase-2 multiplier; BP++: one gate
-    fn lookup_value(&mut self, t: TableId, v: Option<u64>) -> Variable;
-    fn reciprocal(&mut self, widths: &[Width]) -> Reciprocal;             // add / sub / add_public
-    fn finish_reciprocal(&mut self, r: Reciprocal) -> Result<(), R1CSError>;
-}
-pub trait VectorInputs { fn commit_vec(&mut self, v: &[Scalar], r: Scalar) -> (CompressedRistretto, Vec<Variable>); } // BP++ only
-```
+- `CircuitBuilder: ConstraintSystem` (object safe), implemented by `Prover` and `Verifier`:
+  `witness`, `product`, `table(rows: Vec<Vec<u64>>, widths)`, `lookup`, `lookup_value`,
+  `reciprocal` → `Reciprocal { add, sub, add_weighted, add_public }`, `finish_reciprocal`, and
+  `cost() -> Cost { bp_phase1, bp_phase2, bppp_gates, bppp_lin }` with
+  `Cost::gens_capacity(backend)`. New `Variable::Witness(i)`.
+- The builder only records; at prove/verify it is finalized (multiplicity witnesses, counted in
+  constant time) and lowered to BP (logUp over randomized constraints, port of bpvm's `LogUp`,
+  §7.5) or to a BP++ reciprocal form circuit (§7.6, proof tag 3). Same gadget code, any time
+  `set_backend`. Gadgets that use only `ConstraintSystem` keep the §6 translation (tag 2).
+- Tuples are packed with a public base; components of multi-column tuples need bounds recorded
+  by one-column table lookups (§7.3), enforced on both backends so that gadgets are portable.
+  The phase plan's "every variable carries its phase" became: builder operations exist only in
+  phase 1 and their variables must exist at the call; numerators and coefficients that read
+  `MultiplierRight` are copied into initial columns (§7.6).
+- `reciprocal::prove_two_phase` (callback `(alpha, w_P) -> LateWitness`), spec §4.3; the builder
+  itself needs only the one-phase prover (it exposes no reciprocals).
+- Tests: `tests/builder.rs` (range32 via a byte table, nibble XOR table, memory permutation,
+  MACT balance on both backends, costs and proof sizes pinned, copies, no gates, object safety,
+  mode switching, missing variables, malformed proofs); `src/r1cs/vectors.rs` (41 reference
+  cases); `src/r1cs/soundness.rs` (cheating provers via test-only hooks `builder::cheat`).
+- Numbers (one gadget statement of `tests/builder.rs`): BP 282 + 41 multipliers (padded 512),
+  BP++ 42 gates but `N_lin = 526` (witnesses and multiplicities beyond the norm slots).
 
-- Tuples are packed into one pole with a public base, so components must be range-bounded
-  (sum of widths < 252 bits); a `Bounded<N>` type can enforce it.
-- BP side ("6a", independent of BP++): port bpvm's `LogUp` gadget (`crates/bpvm-zk/src/logup.rs`
-  in bpvm) into the fork as the BP implementation.
-- Requirements from the phase-3 review:
-  - a **two-phase prover** (typestate): `commit_initial(c, InitialWitness) -> (Pending, alpha)`
-    then `Pending::finish(LateWitness { w_r, w_o_lr })`, or a closure
-    `FnOnce(alpha, &w_P) -> LateWitness`, because ordinary rows that read reciprocals make `w_R`
-    and the `LinR` slot depend on alpha (the current `reciprocal::prove` takes them up front);
-  - every builder variable carries its phase; late variables are rejected in numerators,
-    poles and randomized constraints at construction time;
-  - dalek-style randomized constraints (shuffle etc.) must not be mapped to a challenge between
-    `C_O` and `C_R`: a right-wire variable from `allocate()` is unbound there.
-- Cost model (estimates to replace with measurements, against the fork's BP + logUp):
-  range32 6 → 4 gates (byte table) or 2 (16-bit table); XOR32 24.5 → ≈5 with an (a, b, a⊕b)
-  table of 2^16; memory/bus 1 → 1 per tuple; a bpvm CPU row 35.5 → ≈22 (byte tables) or ≈17.
-- Tests: the same gadgets (range32 via a byte table, XOR via a table, a memory permutation, a
-  MACT balance) proven on both backends; pin gate counts; a component wider than declared is
-  an error.
+Deferred from phase 6 (with the review's grading):
 
-## Then: phase 7 — performance and hardening
+- The bound rule costs one extra lookup per unbounded component on BP as well (parity, A2);
+  consider a BP-only relaxation or document amortization (bounds persist per variable).
+- Multiplicity counting is `O(|T| |Q|)` (constant time); an oblivious sort would give
+  `O((|T| + |Q|) log)`. Matters for 2^16-row tables (phase 7).
+- Recorded LCs are `Vec<(Variable, Scalar)>` per lookup (≈150 B each); compact them (phase 7).
+- Public rows are `u64` only (no field-element tables); `VectorInputs::commit_vec` of the
+  sketch is not implemented (not needed by the gadgets so far).
+- The prover does not refuse violated linear constraints (both backends, as upstream BP): it
+  produces a proof that does not verify (M1).
+- `prove_two_phase` takes a full witness with placeholder late entries rather than a typed
+  `InitialWitness` (M3, documented).
+- Errors are string `GadgetError`s.
+
+## Next: phase 7 — performance and hardening
 
 - WNLA prover: deferred folding of the generators (as `DEFERRED_ROUNDS` in
   `src/inner_product_proof.rs`), no copies in `split`; consider variable-time MSMs inside the
@@ -152,6 +155,10 @@ pub trait VectorInputs { fn commit_vec(&mut self, v: &[Scalar], r: Scalar) -> (C
 - Golden vectors for BP++ proofs (fixed RNG) once the format is frozen; fuzzing of
   `from_bytes`; a test where the verifier sees a zero challenge with a proof crafted for it.
 - Memory and time on 2^20 / 2^24 gates; a table BP vs BP++ (size, prove, verify, RSS).
+- Builder: oblivious-sort multiplicities, compact recorded LCs, `N_lin` growth (witnesses beyond
+  the norm slots enlarge `H` and the verifier's MSM: consider putting witnesses into spare
+  gates, or `LinL`), measured costs replacing the estimates of the old phase-6 plan
+  (XOR32 ≈ 5 gates ignored both BP's `|T|/2` multiplicity multipliers and BP++'s `N_lin`).
 
 ## Then: phase 8 — bpvm on BP++ (repository github.com/juja256/bpvm)
 
@@ -162,6 +169,7 @@ DESIGN (milestone M6). bpvm depends on this fork by git revision.
 ## Deferred findings (from the reviews)
 
 - Verifier-side test with a zero challenge needs a proof crafted for it.
+- `ConstraintStore::push` still asserts (panics) beyond `2^29` variables.
 - Witness zeroization (prover intermediates) — crate-wide policy.
 - `is_satisfied` (test/diagnostic helper) is not constant time; document if exposed further.
 - Performance nits: batch inversions in `reciprocal::compile`/`reciprocals`, the verifier
@@ -170,3 +178,37 @@ DESIGN (milestone M6). bpvm depends on this fork by git revision.
 ## Progress log
 
 - 2026-10-19 — phases 1–5 done and reviewed (0 Critical in every review); errata 1–18.
+- 2026-10-19 — phase 6 started. Checked green: 100 tests (bppp parallel yoloproofs), 52 BP-only,
+  vectors regenerate unchanged, xcheck 13/13. Spec §7 (circuit builder) written: the builder
+  records operations backend-independently (new `Variable::Witness`), finalizes tables into
+  reciprocal arguments, and lowers to BP (logUp port, §7.5) or to a reciprocal form circuit
+  (§7.6). Tuples are packed with a public base; components of multi-column tuples must have a
+  bound recorded by a one-column table lookup (§7.3, checked on both backends). §4.3 gains the
+  two-phase prover (callback for late values); the builder itself needs only the one-phase one.
+  Independent Python reference for §7 started (agent, spec/errata/paper/ref only). The paper PDF
+  is not reachable from the container (eprint blocked); the owner uploaded it, text extracted to
+  the session scratchpad (not committed).
+- 2026-10-19 — phase 6 implementation: two-phase reciprocal prover (`reciprocal::prove_two_phase`,
+  `LateWitness`); `CircuitBuilder` (`src/r1cs/builder.rs`) with the BP lowering (6a, logUp port)
+  and the BP++ lowering (`backend::builder_circuit`, proof tag 3); gadget tests on both backends
+  in `tests/builder.rs` (range32 via a byte table, nibble XOR table, memory permutation, MACT
+  balance; costs pinned: BP 282 + 41 multipliers, BP++ 42 gates). Independent reference: 41
+  cases in `builder.json` (13 proven, 3 unsatisfied, 2 prover errors, 23 construction errors);
+  `src/r1cs/vectors.rs` reproduces all of them (circuit, witness, costs, commitments, real proofs
+  on both backends) on the first run. The reference's 13 ambiguity notes are pinned in §7; its
+  interpretations matched the Rust code in every case.
+- 2026-10-19 — phase 6 hardening: cheating-prover tests (`src/r1cs/soundness.rs`, test-only
+  hooks in `builder::cheat`: forged multiplicities, a tuple colliding without BP's compression
+  challenge, forged denominator and numerator); errata remark on lookups of tuples; benchmark
+  `builder_bench`. Mutation probes: 32 mutants of builder, lowering, flatten, two-phase prover;
+  28 killed by the first run, the 4 survivors got tests (2 were the cheats above, written after
+  the snapshot; 2 new tests). Review on the most capable model started.
+- 2026-10-19 — phase 6 review (most capable model): 0 Critical, 2 Important, 6 Minor, 3 API notes.
+  Fixed with failing tests first: I1 multiplicities counted in constant time; I2 constraints on
+  missing variables are a `GadgetError` in BP too (it panicked serially and silently dropped the
+  term with `parallel`); M2 builder mode only after a successful operation; M5 zeroization on
+  the error path; A1 `Cost::bppp_lin`, `Cost::gens_capacity`; A3 object-safe trait. Deferred:
+  see "Deferred from phase 6". Re-run mutants: all 32 killed. Benchmark `builder` (README):
+  1024 × range32, BP++ 945 B / 1.13 s / 75 ms vs BP 1345 B / 1.26 s / 119 ms. Everything
+  green: 124 tests (bppp parallel yoloproofs), 67 (yoloproofs, golden unchanged), 34 (default);
+  vectors regenerate unchanged; xcheck 5/5, 13/13. Not pushed.

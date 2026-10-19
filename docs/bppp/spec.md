@@ -802,8 +802,11 @@ is a reciprocal row without poles.
 **Witness.** $w_{D,i}$ = the value of $x_0$ for a pole of an argument with $m = 1$, and 0 (ignored,
 §4.3) for a tuple pole; $w_L$, $w_R$, $w_O$ as above; inputs $v_j$ with blindings $s_j$.
 
-The circuit uses $\eta$ (protocol v2, §4.3) exactly when $\mathcal A$ has an argument with $m \ge 2$;
-otherwise it is the circuit of phase 6, byte for byte.
+The protocol (v1 or v2) follows from the lowered circuit by §4.1: it uses $\eta$ when $\mathcal A$ has an
+argument with $m \ge 2$ and a private term (a tuple pole) or a public term whose coefficient
+lowers to at least one term or constant (a pole polynomial of length $m$). An argument with
+$m \ge 2$ whose terms are all public with empty coefficients lowers to an empty reciprocal row and
+leaves the circuit v1. A circuit of one-column arguments is the circuit of phase 6, byte for byte.
 
 Every rule of §4.1 holds by construction: numerators and pole terms read $w_L$, $w_D$ or $w_O$
 (never slot $l_R$); pole-free terms read $w_P$; components of tuple poles read $w_O$ (slots

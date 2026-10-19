@@ -281,3 +281,91 @@ index (`u64`); for $W_l$ then $W_m$: per row the number of terms (`u64`) and per
 ### 3.10 Encoding
 
 $C_L \| C_R \| C_O \| C_S \|$ norm argument for $|l| = 7 + N_{lin}$, $|n| = N_m$ (§2.5).
+
+## 4. Reciprocal form circuits (paper §6.2–6.3)
+
+A reciprocal form circuit adds to an arithmetic circuit $N_p$ *poles*: private denominators
+$w_{D,i}$ and reciprocals $w_{P,i} = \mathrm{num}_i / (\alpha + w_{D,i})$ computed after a challenge
+$\alpha$, together with linear *reciprocal rows* that sum reciprocals and public poles
+$m/(\alpha + t)$. For a fixed $\alpha$ it compiles to an arithmetic circuit (§3) with
+$N'_m = N_p + N_m$ multiplications, which is then proven with the inner protocol of §3 (from the
+challenge $\rho$ on). Soundness of the reciprocal argument (paper Lemma 1) needs every numerator
+and multiplicity committed before $\alpha$; the rules below enforce it.
+
+### 4.1 Witness and circuit
+
+Witness: poles $w_D \in \mathbb F^{N_p}$, $w_L, w_R \in \mathbb F^{N_m}$, $w_O \in \mathbb F^{N_O}$,
+inputs as in §3. The prover computes $w_P \in \mathbb F^{N_p}$ (§4.3). The full witness is
+
+$$w' = w'_L \| w'_R \| w_O, \qquad w'_L = w_D \| w_L, \qquad w'_R = w_P \| w_R,$$
+
+with $N'_w = 2N'_m + N_O$ columns; all matrices below index $w'$. The **initial columns** are
+those committed before $\alpha$: all of $w'_L$, and the elements of $w_O$ whose partition slot is
+not $l_R$ (that slot is committed in $C_R$, after $\alpha$).
+
+A reciprocal form circuit consists of
+
+- $W_n \in \mathbb F^{N_p \times N'_w}$, $a_n \in \mathbb F^{N_p}$ (numerators): only initial columns;
+- $W_m \in \mathbb F^{N_m \times N'_w}$, $a_m \in \mathbb F^{N_m}$ (ordinary multiplicative rows);
+- $W_l \in \mathbb F^{N_l \times N'_w}$, $a_l \in \mathbb F^{N_l}$ (ordinary linear rows, any columns);
+- $N_r$ reciprocal rows; row $q$ is a list of terms $(\text{column}, c, t)$ meaning
+  $c\, w'_{\text{column}}/(X + t)$, or $c\, w'_{\text{column}}$ when $t$ is absent, and a list of
+  constants $(c, t)$ meaning $c/(X + t)$ or $c$. A term with a pole $t$ must use an initial column;
+  a term without a pole must use an initial column or a reciprocal column $w_{P,i}$ (the first
+  $N_p$ columns of $w'_R$);
+- the flags $f_l$, $f_m$ and the partition of $w_O$ as in §3, with $N_{lin}$, $N_v$, $k$.
+
+It is satisfied if, for every $i < N_p$, $(X + w_{D,i})\, w_{P,i}(X) = (W_n w' + f_m w_V + a_n)_i$
+defines the reciprocals, every reciprocal row vanishes **as a rational function of $X$**, and the
+ordinary rows hold:
+$w_L \circ w_R = (W_m w' + f_m \tilde w_V + a_m)$ and $W_l w' + f_l w_V + a_l = 0$, where
+$\tilde w_V$ is the part of the zero-padded $w_V$ that falls on rows $N_p..N'_m - 1$ (see §4.2).
+
+### 4.2 Compilation for a challenge $\alpha$
+
+The compiled circuit (§3) has $N'_m = N_p + N_m$, $N_O$, $N_v$, $N_{lin}$, $k$, the same flags and
+partition, and
+
+- multiplicative rows: for $i < N_p$, row $i$ of $W_n$ with $-\alpha$ added at the column of
+  $w_{P,i}$ (that is, $w_{D,i}\, w_{P,i} = (W_n w')_i - \alpha\, w_{P,i} + f_m w_{V,i} + a_{n,i}$), then
+  the rows of $W_m$; $a'_m = a_n \| a_m$;
+- linear rows: the rows of $W_l$, then each reciprocal row evaluated at $X = \alpha$ (a term with
+  pole $t$ gets the coefficient $c/(\alpha + t)$, constants are summed into the affine term);
+  $a'_l = a_l \| a_r(\alpha)$.
+
+So $f_m w_V$ meets the first $kN_v$ compiled multiplicative rows (numerators first) and $f_l w_V$
+the first $kN_v$ rows of $W_l$; the requirements of §3.1 apply to the compiled dimensions.
+
+### 4.3 Protocol
+
+1. Commit the initial witness: $C_L$ for $(r_L, l_L, w'_L)$ and $C_O$ for $(r_O, l_O, n_O)$ as in
+   §3.3 (randomness $r'_O$, then $r'_L$).
+2. Absorb (§4.5) and take the challenge $\alpha$.
+3. Compute $w_{P,i} = (W_n w' + f_m w_V + a_n)_i \cdot (\alpha + w_{D,i})^{-1}$; the prover fails if
+   $\alpha + w_{D,i} = 0$ for some $i$. Commit $C_R$ for $(r_R, l_R, w'_R)$ (randomness $r'_R$).
+4. Absorb $C_R$ and run the inner protocol of §3 on the compiled circuit from the challenges
+   $\rho, \lambda, \beta, \delta$ on (§3.4–3.7). The prover refuses if the compiled circuit is not
+   satisfied (its value term is non-zero).
+
+The verifier compiles the circuit for $\alpha$ and runs the §3 verification on $C_L, C_R, C_O, C_S$.
+Randomness is drawn in the order of §3.3 ($r'_O$, $r'_L$, $r'_R$, then $l_S$, $n_S$).
+
+### 4.4 Digest
+
+SHA3-256 over: the bytes `bppp-reciprocal-digest v1`; the dimensions of §4.5 as `u64`
+little-endian; the partition as in §3.9; the rows of $W_n$, $W_m$, $W_l$ as in §3.9; $a_n$, $a_m$,
+$a_l$ (32 bytes each); then per reciprocal row: the number of terms (`u64`), per term the column
+(`u64`), $c$ (32 bytes) and the pole (one byte 0, or one byte 1 and $t$, 32 bytes); the number of
+constants (`u64`) and per constant $c$ and the pole likewise.
+
+### 4.5 Transcript
+
+`domain_sep("bppp-reciprocal v1")`; `u64` `"N_p"`, `"N_m"`, `"N_O"`, `"N_v"`, `"N_lin"`, `"k"`,
+`"N_l"`, `"N_r"`, `"f_l"`, `"f_m"`; points `"G"`, `"H_0"`; message `"circuit"` = the digest
+(§4.4); point `"V"` per input; points `"C_L"`, `"C_O"`; challenge `"alpha"`; point `"C_R"`; then
+the challenges and messages of §3.8 from `"rho"` on (the §3 statement — dimensions, generators,
+digest, inputs — is not absorbed again: the reciprocal statement above covers it).
+
+### 4.6 Encoding
+
+As §3.10, for the compiled dimensions ($|n| = N_p + N_m$).

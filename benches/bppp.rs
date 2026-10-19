@@ -164,10 +164,86 @@ fn r1cs_bench(
     });
 }
 
+/// A 64-bit reciprocal range proof (paper §6.4) with base 16 and shared multiplicities, as a
+/// reciprocal form circuit: 16 digit poles, numerators 1, one reciprocal row, one linear row.
+fn range_circuit(value: u64) -> (bppp::ReciprocalCircuit, bppp::ReciprocalWitness) {
+    let (b, n) = (16usize, 16usize);
+    let n_w = 2 * n + b;
+    let mut w_l = bppp::SparseMatrix::new(n_w);
+    w_l.push_row((0..n).map(|j| (j, -Scalar::from(1u64 << (4 * j as u32)))));
+    let mut w_n = bppp::SparseMatrix::new(n_w);
+    for _ in 0..n {
+        w_n.push_row(vec![]);
+    }
+    let terms = (0..n)
+        .map(|j| (n + j, Scalar::ONE, None))
+        .chain((0..b).map(|s| (2 * n + s, -Scalar::ONE, Some(Scalar::from(s as u64)))))
+        .collect();
+    let c = bppp::ReciprocalCircuit {
+        n_p: n,
+        n_m: 0,
+        n_o: b,
+        n_v: 1,
+        n_lin: b,
+        k: 1,
+        w_n,
+        a_n: vec![Scalar::ONE; n],
+        w_m: bppp::SparseMatrix::new(n_w),
+        a_m: vec![],
+        w_l,
+        a_l: vec![Scalar::ZERO],
+        recip: vec![bppp::ReciprocalRow { terms, consts: vec![] }],
+        f_l: true,
+        f_m: false,
+        partition: (0..b).map(|s| (bppp::Slot::LinL, s)).collect(),
+    };
+    let digits: Vec<u64> = (0..n).map(|j| (value >> (4 * j)) & 15).collect();
+    let mut m = vec![0u64; b];
+    digits.iter().for_each(|&d| m[d as usize] += 1);
+    let w = bppp::ReciprocalWitness {
+        w_d: digits.iter().map(|&d| Scalar::from(d)).collect(),
+        w_l: vec![],
+        w_r: vec![],
+        w_o: m.iter().map(|&x| Scalar::from(x)).collect(),
+        v: vec![vec![Scalar::from(value)]],
+        s: vec![Scalar::from(12345u64)],
+    };
+    (c, w)
+}
+
+/// 64-bit range proof: BP++ reciprocal form against the BP `RangeProof`.
+fn range_bench(c: &mut Criterion) {
+    let pc = bulletproofs::PedersenGens::default();
+    let bp = bulletproofs::BulletproofGens::new(64, 1);
+    let value = 0x0123_4567_89ab_cdefu64;
+    let (circ, w) = range_circuit(value);
+    let gens = bppp::BpppGens::new(&pc, &bp, 16, 16).unwrap();
+    let V = vec![gens.commit_input(&w.v[0], w.s[0]).compress()];
+    let mut rng = rand::thread_rng();
+    let proof = bppp::reciprocal::prove(&circ, &gens, &V, &w, &mut Transcript::new(b"bench"), &mut rng).unwrap();
+    println!("BP++ 64-bit range proof: {} bytes", proof.to_bytes().len());
+    c.bench_function("range 64-bit BP++ prove", |b| {
+        b.iter(|| bppp::reciprocal::prove(&circ, &gens, &V, &w, &mut Transcript::new(b"bench"), &mut rng).unwrap())
+    });
+    c.bench_function("range 64-bit BP++ verify", |b| {
+        b.iter(|| bppp::reciprocal::verify(&proof, &circ, &gens, &V, &mut Transcript::new(b"bench")).unwrap())
+    });
+    let blinding = Scalar::from(12345u64);
+    let (bp_proof, bp_V) =
+        bulletproofs::RangeProof::prove_single(&bp, &pc, &mut Transcript::new(b"bench"), value, &blinding, 64).unwrap();
+    println!("BP 64-bit range proof: {} bytes", bp_proof.to_bytes().len());
+    c.bench_function("range 64-bit BP prove", |b| {
+        b.iter(|| bulletproofs::RangeProof::prove_single(&bp, &pc, &mut Transcript::new(b"bench"), value, &blinding, 64).unwrap())
+    });
+    c.bench_function("range 64-bit BP verify", |b| {
+        b.iter(|| bp_proof.verify_single(&bp, &pc, &mut Transcript::new(b"bench"), &bp_V, 64).unwrap())
+    });
+}
+
 criterion_group! {
     name = bppp;
     config = Criterion::default().sample_size(10);
-    targets = wnla_bench, circuit_bench,
+    targets = wnla_bench, circuit_bench, range_bench,
 }
 
 criterion_main!(bppp);

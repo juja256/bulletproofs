@@ -404,13 +404,47 @@ fn prove_impl<T: BpppTranscript, R: RngCore + CryptoRng>(
     if V.len() != c.k {
         return Err(ProofError::FormatError);
     }
-    let (n_m, n_lin) = (c.n_m, c.n_lin);
-    let zero = Scalar::ZERO;
+    let ol = commit_ol(gens, c.n_lin, &c.partition, &w.w_l, &w.w_o, rng);
+    let r = commit_r(gens, &ol, &w.w_r, rng);
+    absorb_statement(transcript, c, gens, V, bind);
+    transcript.append_point(b"C_L", &ol.C_L);
+    transcript.append_point(b"C_R", &r.C_R);
+    transcript.append_point(b"C_O", &ol.C_O);
+    prove_inner(c, gens, w, &ol, &r, transcript, rng, require_satisfied)
+}
 
-    // Commitments (spec §3.3).
-    let mut n_o = vec![zero; n_m];
+/// The prover's commitments to the initial witness (spec §3.3, CommitOL): `w_L` and the
+/// `LinL` slots in `C_L`, the `NormO` and `LinO` slots in `C_O`.
+pub(crate) struct CommittedOL {
+    n_o: Vec<Scalar>,
+    l_o: Vec<Scalar>,
+    l_l: Vec<Scalar>,
+    l_r: Vec<Scalar>,
+    r_o: [Scalar; 8],
+    r_l: [Scalar; 8],
+    pub C_L: CompressedRistretto,
+    pub C_O: CompressedRistretto,
+}
+
+/// The commitment to `w_R` and the `LinR` slots (spec §3.3, CommitR).
+pub(crate) struct CommittedR {
+    r_r: [Scalar; 8],
+    pub C_R: CompressedRistretto,
+}
+
+/// CommitOL: draws `r'_O`, `r'_L` and commits. `w_l` has length `n_m`.
+pub(crate) fn commit_ol<R: RngCore + CryptoRng>(
+    gens: &BpppGens,
+    n_lin: usize,
+    partition: &[(Slot, usize)],
+    w_l: &[Scalar],
+    w_o: &[Scalar],
+    rng: &mut R,
+) -> CommittedOL {
+    let zero = Scalar::ZERO;
+    let mut n_o = vec![zero; w_l.len()];
     let (mut l_o, mut l_l, mut l_r) = (vec![zero; n_lin], vec![zero; n_lin], vec![zero; n_lin]);
-    for (x, &(slot, t)) in w.w_o.iter().zip(&c.partition) {
+    for (x, &(slot, t)) in w_o.iter().zip(partition) {
         match slot {
             Slot::NormO => n_o[t] = *x,
             Slot::LinO => l_o[t] = *x,
@@ -418,18 +452,43 @@ fn prove_impl<T: BpppTranscript, R: RngCore + CryptoRng>(
             Slot::LinR => l_r[t] = *x,
         }
     }
-    let (ro, rl, rr) = (draw(rng, 6), draw(rng, 5), draw(rng, 4));
+    let (ro, rl) = (draw(rng, 6), draw(rng, 5));
     let r_o = [ro[0], ro[1], ro[2], ro[3], zero, ro[4], ro[5], zero];
     let r_l = [rl[0], rl[1], rl[2], zero, rl[3], rl[4], zero, zero];
-    let r_r = [rr[0], rr[1], zero, rr[2], rr[3], zero, zero, zero];
-    let C_L = commit(gens, &r_l, &l_l, &w.w_l).compress();
-    let C_R = commit(gens, &r_r, &l_r, &w.w_r).compress();
+    let C_L = commit(gens, &r_l, &l_l, w_l).compress();
     let C_O = commit(gens, &r_o, &l_o, &n_o).compress();
+    CommittedOL { n_o, l_o, l_l, l_r, r_o, r_l, C_L, C_O }
+}
 
-    absorb_statement(transcript, c, gens, V, bind);
-    transcript.append_point(b"C_L", &C_L);
-    transcript.append_point(b"C_R", &C_R);
-    transcript.append_point(b"C_O", &C_O);
+/// CommitR: draws `r'_R` and commits `w_r` with the `LinR` slots.
+pub(crate) fn commit_r<R: RngCore + CryptoRng>(
+    gens: &BpppGens,
+    ol: &CommittedOL,
+    w_r: &[Scalar],
+    rng: &mut R,
+) -> CommittedR {
+    let zero = Scalar::ZERO;
+    let rr = draw(rng, 4);
+    let r_r = [rr[0], rr[1], zero, rr[2], rr[3], zero, zero, zero];
+    let C_R = commit(gens, &r_r, &ol.l_r, w_r).compress();
+    CommittedR { r_r, C_R }
+}
+
+/// The inner protocol (spec §3.4–3.7), from the challenge `rho` on; the caller has absorbed
+/// the statement and `C_L`, `C_R`, `C_O`. The witness and circuit must be checked.
+pub(crate) fn prove_inner<T: BpppTranscript, R: RngCore + CryptoRng>(
+    c: &ArithmeticCircuit,
+    gens: &BpppGens,
+    w: &CircuitWitness,
+    ol: &CommittedOL,
+    cr: &CommittedR,
+    transcript: &mut T,
+    rng: &mut R,
+    require_satisfied: bool,
+) -> Result<CircuitProof, ProofError> {
+    let (n_m, n_lin) = (c.n_m, c.n_lin);
+    let zero = Scalar::ZERO;
+    let (r_o, r_l, r_r) = (ol.r_o, ol.r_l, cr.r_r);
     let rho = nonzero(transcript, b"rho")?;
     let lambda = transcript.challenge(b"lambda");
     let beta = nonzero(transcript, b"beta")?;
@@ -452,12 +511,18 @@ fn prove_impl<T: BpppTranscript, R: RngCore + CryptoRng>(
     let p_n = wt.p_n(delta_inv);
     let n_t = VecPoly(vec![
         (-1, n_s.clone()),
-        (0, scaled(&n_o, delta)),
+        (0, scaled(&ol.n_o, delta)),
         (1, added(&w.w_l, &wt.c_nr)),
         (2, added(&w.w_r, &wt.c_nl)),
         (3, scaled(&wt.c_no, delta_inv)),
     ]);
-    let l_hat = VecPoly(vec![(-1, l_s.clone()), (0, scaled(&l_o, delta)), (1, l_l), (2, l_r), (3, l_v)]);
+    let l_hat = VecPoly(vec![
+        (-1, l_s.clone()),
+        (0, scaled(&ol.l_o, delta)),
+        (1, ol.l_l.clone()),
+        (2, ol.l_r.clone()),
+        (3, l_v),
+    ]);
     let c_l = wt.c_l(delta_inv);
     let mut f = p_n.inner(&p_n, Some(&wt.mu_vec));
     f.add(3, wt.affine + v_hat);
@@ -497,7 +562,7 @@ fn prove_impl<T: BpppTranscript, R: RngCore + CryptoRng>(
     let cvec: Vec<Scalar> = c_r(beta, tau, tau_inv).chain(c_l.eval(tau, tau_inv, n_lin)).collect();
     let st = WnlaStatement { g: &gens.g, h_vec: &gens.h, n_vec: gens.n, c: &cvec, rho };
     let wnla = wnla::prove_unbound(&st, transcript, l, n)?;
-    Ok(CircuitProof { C_L, C_R, C_O, C_S, wnla })
+    Ok(CircuitProof { C_L: ol.C_L, C_R: cr.C_R, C_O: ol.C_O, C_S, wnla })
 }
 
 impl CircuitProof {
@@ -530,6 +595,18 @@ impl CircuitProof {
         transcript.append_point(b"C_L", &self.C_L);
         transcript.append_point(b"C_R", &self.C_R);
         transcript.append_point(b"C_O", &self.C_O);
+        self.verify_inner(c, gens, V, transcript)
+    }
+
+    /// The inner verification (spec §3.7), from the challenge `rho` on; the caller has checked
+    /// the shapes and absorbed the statement and `C_L`, `C_R`, `C_O`.
+    pub(crate) fn verify_inner<T: BpppTranscript>(
+        &self,
+        c: &ArithmeticCircuit,
+        gens: &BpppGens,
+        V: &[CompressedRistretto],
+        transcript: &mut T,
+    ) -> Result<(), ProofError> {
         let rho = nonzero(transcript, b"rho")?;
         let lambda = transcript.challenge(b"lambda");
         let beta = nonzero(transcript, b"beta")?;

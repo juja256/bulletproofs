@@ -369,4 +369,24 @@ Inside the circuit protocol the norm argument's commitment $C(\tau)$ need not be
 a function of values already in the transcript, and computing it would cost a full
 multiscalar multiplication.
 
+
+\paragraph{Lookups of tuples.} The lookup argument of \S3.2.2 is stated for single values. A
+reciprocal form circuit has one challenge $\alpha$, after the poles are committed, so a tuple
+$(x_0, \dots, x_{m-1})$ cannot be compressed with a second challenge as in logUp without another
+commitment round. Packing it with a public base, $\sum_j 2^{o_j} x_j$, is sound only if every
+component is already known to be in range (otherwise $(x_0 + 2^{w_0}, x_1 - 1)$ collides with
+$(x_0, x_1)$, and even with all but one component in range the remaining one can absorb the
+difference); in particular a lookup into a multi-column table does \emph{not} by itself bound its
+components, unlike logUp with a random compression. Our circuit builder records bounds only
+from lookups into one-column tables and requires them for every component of a packed tuple
+(\texttt{docs/bppp/spec.md} \S7.3).
+
+\paragraph{Denominators defined by ordinary rows.} Eq.~(65) defines the poles by $W_d w_I$, a
+function of the initial witness only. It suffices that the pole column $w_D$ itself is committed
+before $\alpha$: an ordinary linear row may then tie $w_D$ to an expression that also reads $w_R$
+(committed after $\alpha$), as our circuit builder does for tuples with a right-wire component
+(\texttt{docs/bppp/spec.md} \S7.6). The extractor of Lemma~1 runs on $w_D$ and the numerators,
+which are fixed before $\alpha$, and no ordinary row reads $w_P$, so the tied components are fixed
+too. A generalisation, not an error.
+
 \end{document}

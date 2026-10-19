@@ -1,7 +1,8 @@
 # Bulletproofs++ in this crate: specification
 
-Status: §1–6 pinned: the weighted norm linear argument, arithmetic circuits, reciprocal form
-circuits, range proofs and multi-asset transactions, and the R1CS front end on BP++.
+Status: §1–7 pinned: the weighted norm linear argument, arithmetic circuits, reciprocal form
+circuits, range proofs and multi-asset transactions, the R1CS front end on BP++, and the
+circuit builder shared by both backends.
 
 Source: Eagen, Kanjalkar, Ruffing, Nick, *Bulletproofs++*, ePrint 2022/510 (version
 2023-07-17). Where the paper is ambiguous this document decides; the reference
@@ -319,8 +320,8 @@ A reciprocal form circuit consists of
 
 Ordinary rows that read $w_P$ or $w_R$ hold at the challenge $\alpha$ only (they are part of the
 compiled circuit); $w_R$ and the elements of $w_O$ in slot $l_R$ may therefore be computed
-after $\alpha$. (The Rust prover currently takes them up front, which suffices whenever they do
-not depend on $\alpha$; a callback for late witness values comes with the circuit builder.)
+after $\alpha$: the two-phase prover (§4.3) takes them from a callback that receives $\alpha$ and
+$w_P$.
 
 It is satisfied if, for every $i < N_p$, $(X + w_{D,i})\, w_{P,i}(X) = (W_n w' + f_m w_V + a_n)_i$
 defines the reciprocals, every reciprocal row vanishes **as a rational function of $X$**, and the
@@ -357,6 +358,14 @@ the first $kN_v$ rows of $W_l$; the requirements of §3.1 apply to the compiled 
 
 The verifier compiles the circuit for $\alpha$ and runs the §3 verification on $C_L, C_R, C_O, C_S$.
 Randomness is drawn in the order of §3.3 ($r'_O$, $r'_L$, $r'_R$, then $l_S$, $n_S$).
+
+**Two-phase prover.** The *late* values — $w_R$ and the elements of $w_O$ in slot $l_R$ — may
+depend on $\alpha$ and $w_P$. The prover takes the initial witness ($w_D$, $w_L$, the other
+elements of $w_O$, the inputs; in Rust a full witness whose late entries are placeholders,
+length-checked and ignored) and a callback $(\alpha, w_P) \mapsto (w_R, (w_{O,i})_{i \in l_R})$
+(the $l_R$ elements in $w_O$ order), called once between steps 3 and 4 (after $w_P$ is computed,
+before $C_R$). Transcript, randomness and proof are those of the one-phase prover, which is the
+special case of a callback that returns values fixed in advance.
 
 ### 4.4 Digest
 
@@ -515,3 +524,208 @@ not yet bound.
 Encoding: the byte 2 (BP proofs start with 0 or 1), $N_m$ and $k$ as `u64` little-endian, then
 the circuit proof (§3.10). The verifier rejects a proof whose dimensions differ from its own
 constraint system, and a proof of the other backend.
+
+## 7. The circuit builder (both backends)
+
+`CircuitBuilder` extends `ConstraintSystem` (which is unchanged) with free witnesses, products,
+lookups into public tables and general reciprocal arguments. It is implemented by `Prover` and
+`Verifier`; a gadget is written once and proven with either backend. The builder only *records*
+its operations; at `prove`/`verify` the record is finalized (§7.4) and lowered either to an R1CS
+for Bulletproofs (§7.5) or to a reciprocal form circuit for BP++ (§7.6). Prover and verifier run
+the same gadget code and therefore record the same operations.
+
+### 7.1 Variables and linear combinations
+
+Variables are those of the R1CS front end — `Committed(j)` ($j < k$), `MultiplierLeft(i)`,
+`MultiplierRight(i)`, `MultiplierOutput(i)` ($i < n$, the R1CS multipliers of `multiply`,
+`allocate`, `allocate_multiplier`) and `One` — plus `Witness(i)` for the builder's witnesses
+($i < n_w$). A linear combination (LC) is a list of terms $(x, c)$, kept in the order given;
+its *constant* is the sum of the coefficients of its `One` terms.
+
+Every variable in an LC passed to a builder operation must exist when the operation is called
+($j < k$, $i < n$, $i < n_w$ at that moment), otherwise the operation fails with
+`GadgetError`. Builder operations exist only in the first phase (the randomizing constraint
+systems do not implement `CircuitBuilder`), so every value the builder sees is committed in the
+first phase of BP and before $\alpha$ in BP++.
+
+The R1CS operations record what §6 needs: `multiply(l, r)` creates multiplier $i$ and appends the
+constraints $l - a_{L,i}$ and $r - a_{R,i}$ (the terms of $l$, then $(a_{L,i}, -1)$; likewise for
+$r$); `allocate` fills the left, then the right input of a pending multiplier (whose right
+input and output are 0 until then; `multiply` and `allocate_multiplier` neither use nor clear
+it, and it counts in $n$); `constrain` appends its LC. The variables of R1CS constraints are not
+checked at the call: both lowerings check them against the final counts (multiplicity witnesses
+included; for BP also the second-phase multipliers) and fail with `GadgetError`, as §6.1 does.
+
+Values are read when they are needed, at finalization and lowering (so with the final values of
+the multipliers). LCs are lowered as given: terms are neither merged nor dropped (zero
+coefficients and repeated variables stay).
+
+### 7.2 Operations
+
+Widths are numbers of bits. A *width list* $(w_0, \dots, w_{m-1})$ is valid if $m \ge 1$, every
+$w_j \ge 1$ and $\sum_j w_j \le 252$. Offsets: $o_0 = 0$, $o_{j+1} = o_j + w_j$; the *packing* of a
+tuple is $\mathrm{pack}(x) = \sum_j 2^{o_j} x_j$ ($< 2^{252} < \ell$ for components in range).
+
+- `witness(v)` → `Witness(n_w)`, $n_w \mathrel{+}= 1$. The prover must supply $v$
+  (`MissingAssignment` otherwise).
+- `product(l, r, out)` records the constraint $l \cdot r = out$.
+- `table(rows, widths)` → a table id ($0, 1, \dots$ in call order). Fails unless the width list is
+  valid, there is at least one row, every row has $m$ entries (`u64`) and every entry of column
+  $j$ is $< 2^{w_j}$.
+- `lookup(t, tuple)` records that the tuple of $m$ LCs is a row of table $t$. Fails if $t$ does not
+  exist, the length differs from $m$, or (for $m \ge 2$) a component breaks the bound rule
+  (§7.3). For $m = 1$ and a tuple whose LC is exactly one term $(x, 1)$ with $x \ne$ `One`, it
+  records the bound $b_x \gets \min(b_x, w_0)$.
+- `lookup_value(t, v)`: fails unless $t$ has one column; then $x$ = `witness(v)` and
+  `lookup(t, [x])`; returns $x$ (with the bound $w_0$).
+- `reciprocal(widths)` → an argument with that (valid) width list. Its methods record terms:
+  `add_weighted(num, tuple)` the private term $num / (X + \mathrm{pack}(tuple))$, `add(tuple)`
+  and `sub(tuple)` the same with $num = \pm 1$, and `add_public(coeff, row)` the public term
+  $coeff / (X + \mathrm{pack}(row))$ for a row of $m$ `u64` entries. The argument asserts that the
+  sum of its terms vanishes as a rational function of $X$.
+- `finish_reciprocal(r)` validates and records the argument (in call order): every tuple and
+  row has $m$ entries, every row entry of column $j$ is $< 2^{w_j}$, every variable exists, and
+  for $m \ge 2$ every tuple component obeys the bound rule. An argument without terms is
+  dropped.
+
+Errors are `GadgetError`; a failed operation records nothing. The first successful builder
+operation (other than `reciprocal`, which records nothing) puts the constraint system in
+*builder mode*, which selects §7.6 instead of §6 for BP++ (§6 is used
+when only `ConstraintSystem` methods were called).
+
+### 7.3 The bound rule
+
+The packing is injective only on components in range, so a component of a tuple with $m \ge 2$
+must be provably below $2^{w_j}$. Bounds $b_x$ are recorded only by lookups into one-column
+tables (§7.2): such a lookup proves that $x$ equals a table entry, hence $x < 2^{w_0}$ as an
+integer. For an LC, merge its terms per variable (sum the coefficients in $\mathbb F$) and let
+$c_0$ be its constant. Its bound is defined if $c_0$ and every non-zero merged coefficient $c_x$
+are integers below $2^{64}$ (as canonical scalars) and every $x$ with $c_x \ne 0$ has a recorded
+bound; then
+
+$$\mathrm{bound} = c_0 + \sum_x c_x \left(2^{b_x} - 1\right).$$
+
+(A constant LC has the bound $c_0$, the empty LC 0; $c_0$ is the sum mod $\ell$ of the `One`
+coefficients, so $5 + (-3)$ counts as 2.) Component $j$ obeys the rule iff its bound is defined
+and $< 2^{w_j}$. Then its value is an integer
+in $[0, 2^{w_j})$ (the sum has no wrap-around since $2^{252} < \ell$), and equal packings mean equal
+tuples. The rule is checked when the lookup or `finish_reciprocal` is called, against the bounds
+recorded so far; both backends apply it, so that a gadget accepted by BP is accepted by BP++
+(BP itself compresses tuples with challenges and would not need it). One-component tuples need no
+bound: their pole is the component itself (e.g. an asset type in $\mathbb F$).
+
+### 7.4 Finalization
+
+At `prove`/`verify`, before anything is committed:
+
+1. For every table with at least one lookup, in id order: append $|T|$ *multiplicity* witnesses
+   `Witness(n_w)`, … (one per row, in row order). The prover sets $m_r$ to the number of lookups
+   whose evaluated tuple equals row $r$ (component by component, entries as scalars), counting each lookup for the first
+   equal row only, in constant time (every lookup is compared with every row); a lookup equal to no row is a `GadgetError` (prover only).
+2. The arguments $\mathcal A$ are the recorded reciprocal arguments in call order, followed by one
+   argument per table with lookups, in id order: the private terms $+1 / (X + \mathrm{pack}(q))$ for
+   the lookups $q$ in call order, then the public terms $(-m_r) / (X + \mathrm{pack}(row_r))$ in row
+   order (coefficient: the LC $[(m_r, -1)]$).
+
+Let $n_w$ now include the multiplicities, $n_{prod}$ be the number of products and $N_p$ the
+number of private terms of all arguments.
+
+### 7.5 Lowering to Bulletproofs (port of bpvm's LogUp)
+
+After finalization, still in the first phase:
+
+1. Witness multipliers: for $q < \lceil n_w / 2 \rceil$, multiplier $n + q$ has left input
+   `Witness(2q)`, right input `Witness(2q + 1)` (0 if absent) and their product as output; no
+   constraint. Wherever `Witness(i)` appears it denotes that wire.
+2. For each product in order: $(a, b, o)$ = `multiply(l, r)`, then `constrain(o - out)`.
+3. For each argument in $\mathcal A$, a randomized constraint (in order): challenges `"logup alpha"`
+   (only if $m > 1$; else $\alpha = 1$) and `"logup c"`; $d(x) = c + \sum_j \alpha^j x_j$. For each
+   private term $(num, x)$: $(r, d', o)$ = `allocate_multiplier`$(num/d(x), d(x))$,
+   `constrain`$(d' - d(x))$, `constrain`$(o - num)$; the prover fails if $d(x) = 0$. Finally
+   `constrain`$(\sum r + \sum_{\text{public}} coeff \cdot d(row)^{-1}) = 0$ (both sides fail if
+   $d(row) = 0$).
+
+Cost in multipliers: $n + \lceil n_w/2 \rceil + n_{prod}$ in the first phase and $N_p$ in the second
+(before BP's padding to a power of two). A public term is free.
+
+### 7.6 Lowering to BP++ (reciprocal form, §4)
+
+Dimensions: $n_r = n$, except $n_r = 1$ (one zero multiplier, as in §6) when $n = n_{prod} = N_p = 0$;
+$N_m = n_r + n_{prod}$, $N'_m = N_p + N_m$; $N_v = 1$, $k$ inputs, $f_l = [k > 0]$, $f_m = 0$.
+
+**Columns.** $w' = w_D \| w_L \| w_P \| w_R \| w_O$ (§4.1). Pole $i$ is the $i$-th private term in the
+order of $\mathcal A$ (argument by argument, terms in order). Gate $i < n_r$ is R1CS multiplier $i$
+($w_{L,i} = a_{L,i}$, $w_{R,i} = a_{R,i}$), gate $n_r + g$ is product $g$ ($w_L$, $w_R$ = the values of
+$l$ and $r$). $w_O$ is $a_O$ ($n_r$ entries), then the input copies $c_j$ ($k$), then the witnesses
+($n_w$, multiplicities included), then the *copies* below, $N_O$ elements in all. Element $e$ of
+$w_O$ goes to slot $(n_O, e)$ if $e < N'_m$, else $(l_O, e - N'_m)$; $N_{lin} = \max(0, N_O - N'_m)$.
+A variable maps to a column: `MultiplierLeft(i)` → $w_{L,i}$, `MultiplierRight(i)` → $w_{R,i}$,
+`MultiplierOutput(i)` → $w_{O,i}$, `Committed(j)` → $w_{O, n_r + j}$, `Witness(i)` →
+$w_{O, n_r + k + i}$. Lowering an LC maps each non-`One` term $(x, c)$, in order, to
+(column of $x$, $c$); its constant goes to the affine term.
+
+**Copies.** A numerator or a public coefficient must read initial columns only (§4.1), and $w_R$
+is committed after $\alpha$. So, for each argument in $\mathcal A$, for its private terms in order,
+then its public terms in order: if the numerator (coefficient) has a `MultiplierRight` term (any, whatever its
+coefficient), it
+is replaced by a new copy $y$ (the next element of $w_O$; the prover sets $y$ to the LC's value),
+and the LC $[(y, 1)]$ is used instead.
+
+**Numerators** (row $i$ of $W_n$, $a_{n,i}$): the lowered numerator of pole $i$.
+
+**Multiplicative rows**: gate $i < n_r$: $[(w_{O,i}, 1)]$, $a_m = 0$; gate $n_r + g$: the lowered
+$out$ of product $g$ (its constant in $a_m$).
+
+**Linear rows**, in this order:
+1. for $j < k$: $[(c_j, -1)]$, $a_l = 0$ (so $v_j - c_j = 0$ through $f_l$);
+2. the R1CS constraints in order, lowered (the prover recomputes their constants as in §6.2);
+3. for each product $g$: $[(w_{L, n_r + g}, 1)] \| (-l)$ and then $[(w_{R, n_r + g}, 1)] \| (-r)$, where
+   $-l$ is the lowered $l$ with negated coefficients and the affine term is $-$(constant of $l$);
+4. for each pole $i$ with tuple $x$: $[(w_{D,i}, 1)]$ followed, for $j = 0..m-1$, by the lowered
+   $x_j$ with coefficients multiplied by $-2^{o_j}$; affine term $-\sum_j 2^{o_j}$ (constant of $x_j$);
+5. for each copy $y$ of an LC $u$: $[(y, 1)] \| (-u)$, affine term $-$(constant of $u$).
+
+**Reciprocal rows**, one per argument of $\mathcal A$ in order: the terms $(w_{P,i}, 1, \text{none})$ for
+its poles in order; then for each public term $(coeff, row)$ in order, the lowered $coeff$ with
+pole $t = \mathrm{pack}(row)$ (each term as $(\text{column}, c, t)$, and, if $coeff$ has a `One`
+term, the constant $(\text{constant}, t)$, even if it is 0). An argument with public terms only
+is a reciprocal row without poles.
+
+**Witness.** $w_{D,i} = \mathrm{pack}$ of the evaluated tuple; $w_L$, $w_R$, $w_O$ as above; inputs
+$v_j$ with blindings $s_j$.
+
+Every rule of §4.1 holds by construction: numerators and pole terms read $w_L$, $w_D$ or $w_O$
+(never slot $l_R$); pole-free terms read $w_P$. A pole row (linear rows, step 4) may read $w_R$
+(a `MultiplierRight` component): it is an ordinary row, which §4.1 allows, unlike the paper's
+eq. (65), where the denominators $W_d w_I$ read the initial witness only. It is sound: the pole
+$w_{D,i}$ itself is initial, fixed before $\alpha$, and no ordinary row reads $w_P$, so the row ties
+the component to values fixed before $\alpha$. When $n = 0$ but there are products or poles,
+$n_r = 0$ (a circuit of lookups only has $N_m = 0$). Nothing depends on $\alpha$, so the one-phase
+prover suffices (a builder operation that exposed reciprocals would need the two-phase prover of
+§4.3). Randomized constraints are refused (`GadgetError`), as in §6: mapping a challenge to the slot
+between $C_O$ and $C_R$ would leave `MultiplierRight` values of `allocate` unbound there.
+
+Cost in gates: $N'_m = N_p + n_r + n_{prod}$. Witnesses, multiplicities and copies cost no gate (a
+slot in $n_O$ while $N_O \le N'_m$, then a linear slot), nor do public terms.
+
+### 7.7 Protocol and encoding
+
+BP: the R1CS of §7.5 is proven as usual (unchanged encoding).
+
+BP++: after the transcript of the constraint system (the R1CS domain separator and the `V`
+absorbed by `commit`), `domain_sep("bppp-builder v1")`, then the reciprocal form protocol §4.5
+(whose digest binds the lowered circuit) with generators §3.2 for $N_{lin}$ and $N'_m$ (capacity at
+least $\max(N'_m, N_{lin} + 6)$). Prover randomness as in §6.2. Encoding: the byte 3, $N'_m$ and
+$N_{lin}$ as `u64` little-endian, then the proof (§4.6). The verifier rejects a proof whose
+dimensions differ from its own lowering, and proofs of §6 or BP.
+
+### 7.8 Cost summary
+
+| operation | BP multipliers | BP++ gates |
+|---|---|---|
+| `witness` | 1/2 | 0 |
+| `product` | 1 | 1 |
+| `lookup`, private reciprocal term | 1 (second phase) | 1 |
+| `lookup_value` | 1/2 + 1 | 1 |
+| table with lookups ($\lvert T\rvert$ rows) | $\lvert T\rvert/2$ | 0 |
+| public reciprocal term | 0 | 0 |

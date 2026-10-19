@@ -13,6 +13,8 @@ pub mod reciprocal;
 mod sparse;
 #[cfg(test)]
 pub(crate) mod testutil;
+#[cfg(test)]
+mod tuple_tests;
 mod transcript;
 pub mod wnla;
 

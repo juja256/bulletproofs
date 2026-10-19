@@ -242,7 +242,8 @@ BP `RangeProof` (`cargo bench --features bppp --bench bppp -- range`):
 | BP++ | 480 B | 3.27 ms | 0.41 ms |
 | BP | 672 B | 4.34 ms | 0.59 ms |
 
-The paper's shared-multiplicity proof also drops `C_O` (32 B), which the range-proof front end
+With inline multiplicities (in the norm part) the same proof is 416 B, the paper's figure; the
+shared variant also drops the empty `C_O` in the paper (32 B), which the range-proof front end
 will do. The inaccuracies found in the paper are collected in
 [`docs/bppp/bppp-paper-errors.tex`](docs/bppp/bppp-paper-errors.tex).
 

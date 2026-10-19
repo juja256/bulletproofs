@@ -214,10 +214,18 @@ so it checks the algebra and the verifier's shortcuts. The norm argument in the 
 also reproduces secp256k1-zkp's norm-argument test vectors byte for byte
 (`python3 ref/xcheck_secp256k1_zkp.py`), which pins its algebra to the authors' implementation.
 
-Status: the weighted norm linear argument (`bppp::wnla`) is done. It binds its statement
-(`C`, `rho`, `c`) but is not zero-knowledge: it is a building block of the circuit protocol,
-not a proof system to use on its own. Arithmetic circuits, reciprocal-form circuits, range
-proofs, MACT and a BP++ backend for the R1CS front end follow.
+Status:
+
+- `bppp::wnla`, the weighted norm linear argument. It binds its statement (`C`, `rho`, `c`) but
+  is not zero-knowledge: a building block, not a proof system to use on its own.
+- `bppp::circuit`, arithmetic circuits (paper §5, spec §3): `w_L ∘ w_R = W_m w + f_m w_V + a_m`,
+  `W_l w + f_l w_V + a_l = 0` with sparse matrices, a partition of `w_O` and committed input
+  vectors (`BpppGens::commit_input`; a single value is an ordinary `PedersenGens` commitment).
+  The generators come from the same `PedersenGens` and `BulletproofGens` as the BP backend.
+  The Rust prover reproduces an independently written Python reference
+  (`tests/vectors/bppp/circuit.json`) commitment for commitment.
+
+Reciprocal-form circuits, range proofs, MACT and a BP++ backend for the R1CS front end follow.
 
 ```sh
 cargo test --release --features bppp --lib bppp
@@ -229,6 +237,17 @@ cargo bench --features bppp --bench bppp
 |---|---|---|
 | $\lvert n\rvert = 2^{10}$ | 38 ms | 2.6 ms |
 | $\lvert n\rvert = 2^{14}$ | 591 ms | 30.5 ms |
+
+The same circuit in both backends: $n$ multiplications $w_L w_R = w_O$ and $n$ random linear
+constraints with three terms each (`cargo bench --features "bppp yoloproofs" --bench bppp -- circuit`):
+
+| $n$ | proof BP++ / BP | prove BP++ / BP | verify BP++ / BP |
+|---|---|---|---|
+| $2^{10}$ | 800 / 1057 B | 69 / 66 ms | 3.9 / 5.9 ms |
+| $2^{14}$ | 1056 / 1313 B | 1.10 / 0.99 s | 52 / 77 ms |
+
+The BP++ prover is not optimised yet (phase 7 of the plan); verification is about a third
+faster and proofs about a fifth smaller.
 
 Apple M4 Pro, single-threaded, `rustc 1.99.1`, release profile.
 

@@ -47,3 +47,6 @@ pub mod range_proof_mpc {
 #[cfg(feature = "yoloproofs")]
 #[cfg(feature = "std")]
 pub mod r1cs;
+
+#[cfg(feature = "bppp")]
+pub mod bppp;

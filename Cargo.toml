@@ -43,6 +43,9 @@ curve25519-dalek = { version = "4.1.3", features = ["digest", "group", "legacy_c
 [features]
 default = ["std"]
 yoloproofs = []
+# Bulletproofs++ (ePrint 2022/510): norm linear argument, arithmetic circuits, reciprocal
+# arguments. Experimental, not audited.
+bppp = []
 # Multi-threaded proving and verification (rayon): multiscalar multiplications, the
 # inner-product folding and generator derivation. Results are identical to the serial code.
 parallel = ["std", "rayon"]

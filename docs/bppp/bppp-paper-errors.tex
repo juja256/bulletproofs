@@ -1,0 +1,320 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+
+\newcommand{\F}{\mathbb{F}}
+\newcommand{\G}{\mathbb{G}}
+\newcommand{\bmu}{\boldsymbol{\mu}}
+\newcommand{\blam}{\boldsymbol{\lambda}}
+\newcommand{\status}[1]{\par\noindent\textbf{Status.} #1}
+\newcommand{\loc}[1]{\par\noindent\textbf{Location.} #1}
+
+\title{Errata and underspecified points in \emph{Bulletproofs++}\\[2pt]
+\large (Eagen, Kanjalkar, Ruffing, Nick; ePrint 2022/510, version 2023-07-17)}
+\author{Collected while implementing BP++ in the \texttt{bppp} module\\
+of \texttt{zero-art-rs/bulletproofs}}
+\date{Living document, started 2026-10-19}
+
+\begin{document}
+\maketitle
+
+\section*{Scope and method}
+
+This note records every inaccuracy we found in the paper while implementing it, with a
+proposed fix and the evidence behind it. Equation and section numbers refer to the ePrint
+version of 2023-07-17. The implementation follows its own specification
+(\texttt{docs/bppp/spec.md}), which adopts the fixes below. Each entry is graded:
+
+\begin{description}[leftmargin=2em,style=nextline]
+  \item[Verified] Checked numerically and by an independent implementation: a Python reference
+    written from the specification and the paper only (\texttt{ref/bppp\_ref.py}), whose vectors
+    the Rust code reproduces commitment for commitment; for the norm argument also byte for byte
+    against Blockstream's \texttt{secp256k1-zkp}.
+  \item[Observed] Found in review or by a probe; the claim is precise but has not been checked by
+    a second implementation.
+  \item[Noted] An inconsistency in the text of a part we have not implemented yet (reciprocal
+    form, range proofs); to be confirmed when we do.
+\end{description}
+
+The convention for signs: the paper's protocol structure is kept exactly (the commitments
+$C_L, C_R, C_O, C_S$, the combination
+$C(T) = P(T) + T^{-1}C_S + \delta C_O + T C_L + T^2 C_R + T^3 \hat V$, the polynomials
+$\hat l(T)$, $\hat n(T)$ and
+$\hat f(T) = p_s(T) + \hat v T^3 - \langle \hat c_l(T), \hat l(T)\rangle - |n(T)|^2_\mu$ of
+eq.~(49)). Only the constraint vectors, the affine terms and the input scalings change.
+
+\begin{center}
+\begin{tabular}{@{}llll@{}}
+\toprule
+\# & Location & Kind & Status\\
+\midrule
+1 & \S5.2.2--5.3, eqs.\ (42), (43) & sign / weight of the constraint vectors & Verified\\
+2 & \S5.2.3, eq.\ (46) & affine terms: factor 2 and sign & Verified\\
+3 & \S5.2.2, eq.\ (44); \S5.3 & input scaling $\hat V$, $\hat v$, $r_V$ & Verified\\
+4 & \S5.2.3, eq.\ (48) & input constraint vector: extra factor $\mu$ & Verified\\
+5 & \S5.2.2, eq.\ (40) & cross-term correction of $\blam$ & Verified\\
+6 & \S5.3, $s_r$ & hand-expanded blinding vector & replaced\\
+7 & \S5.2.1, \S5.3 & lengths $N_v$ vs.\ $N_v - 1$ & Verified\\
+8 & \S5, after eq.\ (28) & column ranges of $W_{l,L}$ & typo\\
+9 & \S5, eq.\ (32), Thm.\ 2 & input relation stronger than proven & Observed\\
+10 & \S5, eq.\ (32), Thm.\ 2 & inputs with $f_l = f_m = 0$ & Observed\\
+11 & \S4.2, \S4.3 & stop rule & inconsistency\\
+12 & \S4.3, eqs.\ (24)--(26) & unequal and non-power-of-two lengths & underspecified\\
+13 & \S4 (before \S4.1) & ``not the case that $x' \ne y'$'' & typo\\
+14 & \S6.2--6.3, eq.\ (70) & dimensions of $W_p(X)$, $a_d$, $W'_l$ & Noted\\
+15 & \S6.3, steps 6--7 & $W_p(\alpha)w$, $w_R = w'_L$ & Noted\\
+16 & \S6.4.1, Case 1 & missing parentheses in $b_{n-1}$ & Noted\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Arithmetic circuit protocol (\S5)}
+
+Throughout, $\bmu = \mu\, e_{N_m}(\mu) = (\mu, \mu^2, \dots, \mu^{N_m})$ and $\blam$ is the
+vector of linear weights. The target identity is that the $T^3$ coefficient of $\hat f(T)$ is
+\[
+  \hat f_3 = -2E, \qquad
+  E = \blam^\top (W_l w + f_l w_V + a_l) + \langle w_L, w_R\rangle_\mu
+      - \bmu^\top (W_m w + f_m w_V + a_m),
+\]
+the random combination of eq.~(34). Every witness-linear contribution to $\hat f_3$ arises as a
+cross term of $|n(T)|^2_\mu$ or $\langle \hat c_l(T), \hat l(T)\rangle$ and therefore carries the
+factor $2$ and the sign of those terms; the fixes below make all contributions consistent with
+the product term $-2\langle w_L, w_R\rangle_\mu$.
+
+\subsection*{1. Constraint vectors, eqs.\ (42) and (43)}
+\loc{\S5.2.2 and step 3 of the inner protocol in \S5.3.}
+
+\noindent\textbf{Paper.}
+$c_{n,X} = (\blam^\top M_{l,n,X} + \bmu^\top M_{m,n,X})\,\mathrm{diag}(\mu)^{-1}$ and
+$c_{l,X} = \blam^\top M_{l,l,X} + \bmu^\top M_{m,l,X}$.
+
+\noindent\textbf{Problem.} In eq.~(34) the multiplicative constraints enter with the opposite
+sign to the linear ones ($-\bmu^\top(W_m w + \dots)$), so the two parts of the constraint vectors
+must have opposite signs. Moreover, $\langle n, c_{n}\rangle_\mu = \sum_t n_t c_{n,t} \mu^{t+1}$,
+so the rescaling must divide by $\mu^{t+1}$, i.e.\ by $\mathrm{diag}(\bmu)$; the printed
+$\mathrm{diag}(\mu)$ (non-bold $\mu$) denotes the powers $\mu^0, \mu^1, \dots$ by the
+convention of \S2.
+
+\noindent\textbf{Fix.}
+\[
+  c_{n,X} = \left(\blam^\top M_{l,n,X} - \bmu^\top M_{m,n,X}\right)\mathrm{diag}(\bmu)^{-1},
+  \qquad
+  c_{l,X} = \blam^\top M_{l,l,X} - \bmu^\top M_{m,l,X}.
+\]
+\status{Verified: with the paper's versions the identity $\hat f_3 = -2E$ fails on random
+instances; with the fixed ones it holds for satisfied and unsatisfied witnesses alike.}
+
+\subsection*{2. Affine terms, eq.\ (46)}
+\loc{\S5.2.3, definition of $p_s(T)$; \S5.3 step 3.}
+
+\noindent\textbf{Paper.} $p_s(T) = |p_n(T)|^2_\mu + \langle \blam, a_l\rangle T^3
++ \langle \bmu, a_m\rangle T^3$.
+
+\noindent\textbf{Problem.} The witness-dependent parts of $E$ reach $\hat f_3$ with factor
+$-2$ (they are cross terms), the affine parts through $p_s$ with factor $+1$; and the two affine
+terms need opposite signs (item~1).
+
+\noindent\textbf{Fix.}
+$p_s(T) = |p_n(T)|^2_\mu + 2T^3\left(\langle \bmu, a_m\rangle - \langle \blam, a_l\rangle\right)$.
+\status{Verified.}
+
+\subsection*{3. Input scaling, eq.\ (44) and \S5.3}
+\loc{\S5.2.2 eq.~(44); \S5.3 steps 3--4 ($\hat V$, $\hat v$, $r_V$, the $T^3$ term of
+$\hat l(T)$).}
+
+\noindent\textbf{Paper.} $\hat V = 2\sum_{i<k}(f_l \lambda^{N_v i} + f_m \mu^{N_v i + 1}) V_i$,
+and the same coefficients in $\hat v$, $r_V$ and $\hat l(T)$.
+
+\noindent\textbf{Problem.} Input element $t = N_v i + j$ sits in linear row $t$ (weight
+$\lambda_t$, sign $+$ in $E$) and in multiplicative row $t$ (weight $\mu^{t+1}$, sign $-$), so the
+two flags must enter with opposite signs.
+
+\noindent\textbf{Fix.} With $\nu_i = 2\left(f_m \mu^{N_v i + 1} - f_l \lambda^{N_v i}\right)$:
+$\hat V = \sum_i \nu_i V_i$, $\hat v = \sum_i \nu_i v_{i,0}$,
+$r_V = (0, \sum_i \nu_i s_{V,i}, 0, \dots, 0)$, and the $T^3$ term of $\hat l(T)$ is
+$\sum_i \nu_i v_{i,1:}$.
+\status{Verified.}
+
+\subsection*{4. Input constraint vector, eq.\ (48)}
+\loc{\S5.2.3 eq.~(48); \S5.3 step 4 ($\hat c_l(T)$).}
+
+\noindent\textbf{Paper.} $\hat c_l(T) = 2(\delta^{-1}T^3 c_{l,O} + T^2 c_{l,L} + T c_{l,R})
++ f_m\, \mu\, e_{N_v}(\mu)_{1:} + f_l\, e_{N_v}(\lambda)_{1:}$.
+
+\noindent\textbf{Problem.} Component $j-1$ of the input part multiplies $v_{i,j}$, whose
+$\hat V$ coefficient already contains $\mu^{N_v i + 1}$; the remaining factor must be $\mu^j$,
+but $\mu\, e_{N_v}(\mu)_{1:}$ gives $\mu^{j+1}$. The sign must also match item~3 (the term
+enters $\hat f$ with a minus sign).
+
+\noindent\textbf{Fix.} $\hat c_l(T) = 2(\delta^{-1}T^3 c_{l,O} + T^2 c_{l,L} + T c_{l,R})
+- f_m\, e_{N_v}(\mu)_{1:} - f_l\, e_{N_v}(\lambda)_{1:}$.
+\status{Verified.}
+
+\subsection*{5. Cross-term correction, eq.\ (40)}
+\loc{\S5.2.2 eq.~(40).}
+
+\noindent\textbf{Paper.} $\blam = e_{N_l}(\lambda) - f_l f_m\left(\mu\, e_{N_v}(\lambda)
+\otimes e_k(\mu^{N_v}) + e_{N_v}(\mu) \otimes e_k(\lambda^{N_v})\right)$, a correction for every
+input row $t = N_v i + j$, $0 \le j < N_v$.
+
+\noindent\textbf{Problem.} With items~3 and~4 in place, the input element $v_{i,j}$ receives the
+coefficient $\nu_i$ for $j = 0$ (exactly what $E$ requires, no correction needed) and
+$(f_m\mu^j + f_l\lambda^j)\,\nu_i$ for $j \ge 1$, whose cross terms
+$2\lambda^j\mu^{N_v i+1} - 2\mu^j\lambda^{N_v i}$ (when $f_l = f_m = 1$) must be absorbed by the
+weight of linear row $t$. The paper corrects $j = 0$ as well and uses the opposite signs.
+
+\noindent\textbf{Fix.} $\lambda_t = \lambda^t$, except when $f_l = f_m = 1$ and
+$t = N_v i + j$ with $i < k$, $1 \le j < N_v$:
+\[
+  \lambda_t = \lambda^t + \mu^j \lambda^{N_v i} - \lambda^j \mu^{N_v i + 1}.
+\]
+The rows stay bound: the $\mu$-free part of $\lambda_t$ is $\lambda^t$ (for $i = 0$,
+$\lambda_j = (1-\mu)\lambda^j + \mu^j$), and the multiplicative terms of $E$ contribute only
+monomials with $\mu^{\ge 1}$, so $E \equiv 0$ in $\F[\lambda, \mu]$ only if every residual is zero.
+\status{Verified, including $k = 3$, $N_v = 4$.}
+
+\subsection*{6. The blinding vector $s_r$}
+\loc{\S5.3 step 4.}
+
+\noindent\textbf{Paper.} An explicit, hand-expanded $s_r \in \F^8$ and
+$r_S = (\hat f_0 \,\|\, \beta^{-1}\hat f_{1:}) - s_r$.
+
+\noindent\textbf{Remark.} We did not check this expression in isolation: it is written against
+the conventions above, which are wrong. We recommend not hand-expanding it at all. With
+$(e_1, \dots, e_7) = (-1, 1, 2, 3, 5, 6, 7)$ the exponents of
+$c_r(T) = \beta(T^{-1}, T, T^2, T^3, T^5, T^6, T^7)$ and
+\[
+  g(T) = \sum_{(X,\sigma)} \Big(\sum_{j=1}^{7} \beta T^{e_j} \sigma\, r_{X,j}
+  - \sigma\, r_{X,0}\Big),\quad
+  (X,\sigma) \in \{(O,\delta), (L,T), (R,T^2), (V,T^3)\},
+\]
+set $d(T) = \hat f(T) - g(T)$, $r_{S,0} = -d_{-1}$ and $r_{S,j} = \beta^{-1} d_{e_j - 1}$. This
+cancels every coefficient except $d_3 = \hat f_3$, which is how \texttt{secp256k1-zkp}'s range
+proof (PR \#207) computes its blinding as well.
+\status{Replaced; the replacement is verified.}
+
+\subsection*{7. Lengths $N_v$ versus $N_v - 1$}
+\loc{\S5.2.1 eq.~(36), \S5.3 (CommitOL, CommitR, $\hat l(T)$, $\hat c_l(T)$).}
+
+\noindent\textbf{Problem.} The linear parts $l_X$ have length $N_v$ and $H \in \G^{N_v+7}$, but
+the input part $v_{i,1:}$ and $e_{N_v}(\cdot)_{1:}$ have length $N_v - 1$. The linear part is in
+fact independent of the input length: it also holds the elements of $w_O$ mapped to $l_O$, $l_L$,
+$l_R$.
+
+\noindent\textbf{Fix.} A separate length $N_{lin} \ge N_v - 1$ for the linear part,
+$H \in \G^{7 + N_{lin}}$, input commitments
+$V_i = v_{i,0} G + s_{V,i} H_0 + \sum_{j \ge 1} v_{i,j} H_{6+j}$.
+\status{Verified.}
+
+\subsection*{8. Column ranges of $W_{l,L}$}
+\loc{\S5, the paragraph after eq.~(28).}
+
+\noindent\textbf{Paper.} ``the matrix $W_{l,L}$ consists of the first $N_m - 1$ columns of
+$W_l$'', followed by ``$W_{l,R}$ consists of columns $[N_m, 2N_m)$''.
+
+\noindent\textbf{Fix.} The first $N_m$ columns, $[0, N_m)$.
+
+\subsection*{9. The input relation is stronger than what is proven}
+\loc{\S5 eq.~(32) ($V_i = \mathrm{Com}(v_i; s_{V,i})$), Theorem~2.}
+
+\noindent\textbf{Problem.} The verification only involves $\hat V = \sum_i \nu_i V_i$ through its
+$G$-coordinate and the $H_{7..}$-coordinates that meet $\hat c_l$. A commitment
+$V_i' = V_i + Z$ with $Z$ in the span of $H_1, \dots, H_6$, of unused linear slots, or of norm
+generators orthogonal to the norm slots in use, is accepted with a satisfying witness: the
+prover folds $Z$ into its blinding. The values $v_i$ are still bound, but the extractor cannot
+output an opening of the strict form of eq.~(32).
+
+\noindent\textbf{Fix.} Either state the relation with $V_i \in v_{i,0} G + \sum_j v_{i,j}
+H_{6+j} + \langle H_0, \dots, H_6, \dots\rangle$ (values bound, the rest a blinding), or make
+applications that need the strict form check it by other means (for confidential transactions
+the balance equation with a signature over $H_0$ does).
+\status{Observed (review probe: junk components on $H_1..H_3$, unused slots and $N$ accepted;
+an unsatisfied witness with the same junk rejected).}
+
+\subsection*{10. Inputs that enter no constraint}
+\loc{\S5 eq.~(32), Theorem~2.}
+
+\noindent\textbf{Problem.} With $k > 0$ and $f_l = f_m = 0$ all input coefficients vanish
+($\nu_i = 0$), the $V_i$ never enter the verification, and nothing about their openings is
+proven, although the relation (32) asserts $V_i = \mathrm{Com}(v_i; s_{V,i})$.
+
+\noindent\textbf{Fix.} Require $f_l = 1$ or $f_m = 1$ whenever $k > 0$ (our implementation
+rejects such circuits).
+\status{Observed.}
+
+\section{Weighted norm linear argument (\S4)}
+
+\subsection*{11. Stop rule}
+\loc{\S4.2 (text) versus \S4.3 (protocol box).}
+
+\noindent\textbf{Paper.} The text says recursion stops ``when $\mathrm{len}(l) + \mathrm{len}(n)
+\le 6$'', the protocol box recurses while $\mathrm{len}(l) + \mathrm{len}(n) \ge 6$.
+
+\noindent\textbf{Fix.} A round costs two group elements and removes
+$\lfloor a/2\rfloor + \lfloor b/2\rfloor$ scalars, so the size-optimal rule (ties stop) is: fold
+while $\lfloor a/2\rfloor + \lfloor b/2\rfloor \ge 3$. This is the layout of
+\texttt{secp256k1-zkp} PR \#352; it differs from the box only on ties.
+
+\subsection*{12. Unequal and non-power-of-two lengths}
+\loc{\S4.3, eqs.~(24)--(26).}
+
+\noindent\textbf{Problem.} The closed-form verifier with
+$\gamma_n = \bigotimes_i (\rho^{2^i}, \gamma_i)$ and the final weight $\mu^{2^k}$ assumes that $n$
+is folded in every round. The paper does not say what happens when one vector reaches length 1
+before the other, or for odd lengths.
+
+\noindent\textbf{Fix} (as in \texttt{secp256k1-zkp}). An odd vector is folded as if padded with a
+zero (and the identity). A norm vector of length 1 is not folded, and $\rho$, $\mu$ do not
+advance in that round. In the verifier, the factor for such a round is $1$ instead of
+$\rho^{2^r}$, and the final weight is $\rho^{2^{k_n+1}}$ with $k_n$ the number of rounds that fold
+$n$.
+\status{Verified: our reference reproduces all \texttt{secp256k1-zkp} norm-argument prove
+vectors byte for byte, including $|n| = 2$, $|l| = 4$.}
+
+\subsection*{13. Typo}
+\loc{\S4, the paragraph before \S4.1.}
+``This means that even if $x = y$ it is not the case that $x' \ne y'$'' should read
+``\dots it is not the case that $x' = y'$''.
+
+\section{Reciprocal form and range proofs (\S6) --- noted, not yet implemented}
+
+\subsection*{14. Dimensions in \S6.2--6.3}
+\begin{itemize}
+  \item Eq.~(70) has $W_p(X) \in \F(X)^{N_p \times N'_w}$ and $a_d \in \F^{N_d}$; the common input
+    of the protocol in \S6.3 has $W_p(X) \in \F(X)^{N_d \times N'_w}$ and
+    $a_d \in \F(X)^{N_d}$.
+  \item Step 6 declares $W'_l \in \F^{(2N_d + N_l) \times N'_w}$, but
+    $W'_l w' = (W_d w_I) \| (W_p(\alpha) w) \| (W_l w)$ and
+    $a'_l = a_d \| a_p(\alpha) \| a_l \in \F^{N_d + N_p + N_l}$, which give $N_d + N_p + N_l$
+    rows if $W_p$ has $N_p$ rows.
+\end{itemize}
+
+\subsection*{15. Witness names in \S6.3}
+\begin{itemize}
+  \item Step 6: $W_p(\alpha)$ acts on the full witness $w(X) = w_D \| w_L \| w_P(X) \| w_R \| w_O$
+    of eq.~(66), i.e.\ on $w'$, not on $w = w_L \| w_R \| w_O$.
+  \item Step 7: ``$w_R = w'_L$'' should be $w_R = w'_R$.
+\end{itemize}
+
+\subsection*{16. Arbitrary ranges, Case 1}
+\loc{\S6.4.1, Case 1.} The final base is printed as $b_{n-1} = B - b^{n-1}/b - 1$. For digits in
+$[0, b)$ with bases $1, b, \dots, b^{n-2}$ the requirement
+$(b-1)\, b_{n-1} + b^{n-1} - 1 = B - 1$ gives $b_{n-1} = (B - b^{n-1})/(b - 1)$, which for $b = 2$
+is the usual $B - 2^{n-1}$; the printed formula is presumably missing parentheses.
+
+\section*{Remarks for implementers (not errors in the paper)}
+
+The paper describes interactive protocols; a Fiat--Shamir implementation must also bind:
+the circuit itself (we absorb a hash of $W_l, W_m, a_l, a_m$, the flags and the partition);
+the value and blinding generators $G$ and $H_0$, which may be application-specific (asset
+generators) --- a prover who chooses $G$ after the challenges can solve the verification
+equation for it; and, in the reciprocal form, the initial witness $C_L, C_O$ before $\alpha$.
+Inside the circuit protocol the norm argument's commitment $C(\tau)$ need not be absorbed: it is
+a function of values already in the transcript, and computing it would cost a full
+multiscalar multiplication.
+
+\end{document}

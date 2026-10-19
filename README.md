@@ -209,21 +209,22 @@ The `bppp` feature adds Bulletproofs++ (Eagen, Kanjalkar, Ruffing, Nick, ePrint 
 ristretto255. **Not audited; the API and the proof format will change.** The protocol as
 implemented is pinned in [`docs/bppp/spec.md`](docs/bppp/spec.md). `ref/bppp_ref.py` is a
 spec-level Python reference (symbolic group elements, a naive recursive verifier) that
-generates the test vectors in `tests/vectors/bppp/`; it has the same author as the Rust code,
-so it checks the algebra and the verifier's shortcuts. The norm argument in the reference
-also reproduces secp256k1-zkp's norm-argument test vectors byte for byte
+generates the test vectors in `tests/vectors/bppp/`. Its norm-argument part has the same author
+as the Rust code; its arithmetic-circuit part was written independently from the spec and the
+paper. The norm argument in the reference also reproduces secp256k1-zkp's norm-argument test vectors byte for byte
 (`python3 ref/xcheck_secp256k1_zkp.py`), which pins its algebra to the authors' implementation.
 
 Status:
 
-- `bppp::wnla`, the weighted norm linear argument. It binds its statement (`C`, `rho`, `c`) but
+- `bppp::wnla`, the weighted norm linear argument. It binds its statement (`G`, `C`, `rho`, `c`) but
   is not zero-knowledge: a building block, not a proof system to use on its own.
 - `bppp::circuit`, arithmetic circuits (paper §5, spec §3): `w_L ∘ w_R = W_m w + f_m w_V + a_m`,
   `W_l w + f_l w_V + a_l = 0` with sparse matrices, a partition of `w_O` and committed input
   vectors (`BpppGens::commit_input`; a single value is an ordinary `PedersenGens` commitment).
   The generators come from the same `PedersenGens` and `BulletproofGens` as the BP backend.
-  The Rust prover reproduces an independently written Python reference
-  (`tests/vectors/bppp/circuit.json`) commitment for commitment.
+  The transcript binds the dimensions, the generators `G` and `H_0`, a SHA3 digest of the
+  circuit and the inputs. The Rust prover reproduces the independently written circuit part of
+  the Python reference (`tests/vectors/bppp/circuit.json`) commitment for commitment.
 
 Reciprocal-form circuits, range proofs, MACT and a BP++ backend for the R1CS front end follow.
 

@@ -29,14 +29,22 @@ pub fn layout(range: u128, base: u64) -> Vec<(u128, u64)> {
         p *= b;
     }
     let mut r = range - 1 - s;
-    if r >= b - 1 {
-        let g = r / (b - 1);
-        out.push((g, base));
-        s += (b - 1) * g;
-        r -= (b - 1) * g;
+    if r == 0 {
+        return out;
     }
-    if r > 0 {
-        out.push(if r <= s + 1 { (r, 2) } else { (1, r as u64 + 1) });
+    if r % (b - 1) == 0 && r / (b - 1) <= s + 1 {
+        out.push((r / (b - 1), base)); // Case 1
+    } else if r <= s + 1 {
+        out.push((r, 2)); // Case 2
+    } else if r >= b - 1 {
+        let g = r / (b - 1); // Case 3
+        out.push((g, base));
+        r -= (b - 1) * g;
+        if r > 0 {
+            out.push((r, 2));
+        }
+    } else {
+        out.push((1, r as u64 + 1)); // B < b
     }
     out
 }
@@ -320,6 +328,10 @@ mod tests {
         }
         assert_eq!(layout(1 << 64, 16), (0..16).map(|j| (1u128 << (4 * j), 16)).collect::<Vec<_>>());
         assert_eq!(layout(10, 16), vec![(1, 10)]);
+        // the paper's Cases 1-3 with the same digits: b = 3, B = 6 (Case 2); b = 16, B = 32
+        assert_eq!(layout(6, 3), vec![(1, 3), (3, 2)]);
+        assert_eq!(layout(32, 16), vec![(1, 16), (16, 2)]);
+        assert_eq!(layout(1000, 16), vec![(1, 16), (16, 16), (49, 16), (9, 2)]);
     }
 
     #[test]
@@ -427,6 +439,38 @@ mod tests {
         t.append_message(b"dom-sep", b"bppp-range v1");
         let proof = reciprocal::prove_impl(&c, &g, &V, &w, &mut t, &mut rng, false).unwrap();
         assert!(RangeProof(proof).verify(&st, &pc, &bp, &V, &mut Transcript::new(b"r")).is_err());
+    }
+
+    fn same_witness(a: &ReciprocalWitness, b: &ReciprocalWitness) -> bool {
+        a.w_d == b.w_d && a.w_l == b.w_l && a.w_r == b.w_r && a.w_o == b.w_o && a.v == b.v && a.s == b.s
+    }
+
+    /// The circuits built from the statements equal the reference's field by field, honest
+    /// witnesses match, and the proofs reproduce `tests/vectors/bppp/range.json`.
+    #[test]
+    fn matches_reference_vectors() {
+        use crate::bppp::testutil::{self, int, scs};
+        let file: serde_json::Value = serde_json::from_str(include_str!("../../tests/vectors/bppp/range.json")).unwrap();
+        for case in file["cases"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let ranges: Vec<(u64, u128)> = case["ranges"].as_array().unwrap().iter().map(|r| (int(&r[0]) as u64, int(&r[1]))).collect();
+            let st = RangeStatement::new(case["base"].as_u64().unwrap(), ranges).unwrap();
+            let (c, info) = st.circuit();
+            assert_eq!(c, testutil::recip_circuit(case), "{}: circuit", name);
+            let w = testutil::recip_witness(case);
+            if case["satisfied"].as_bool().unwrap() {
+                let values: Vec<u64> = case["values"].as_array().unwrap().iter().map(|v| int(v) as u64).collect();
+                let digits: Vec<Vec<u64>> = values
+                    .iter()
+                    .zip(&st.ranges)
+                    .zip(&info.layouts)
+                    .map(|((&v, &(a, _)), l)| decompose((v - a) as u128, l))
+                    .collect();
+                let ours = info.witness(&values, &scs(&case["blindings"]), &digits);
+                assert!(same_witness(&ours, &w), "{}: witness", name);
+            }
+            testutil::run_recip_case(case, &c, &w);
+        }
     }
 
     #[test]

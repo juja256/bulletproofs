@@ -9,8 +9,11 @@ import sys
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from bppp_ref import (L, SLOTS, ReciprocalError, Sym, circuit_prove, circuit_self_check,  # noqa: E402
-                      inv, recip_compile, recip_numerators, recip_prove, recip_self_check,
+from bppp_ref import (L, SLOTS, U64, ReciprocalError, Sym, circuit_prove,  # noqa: E402
+                      circuit_self_check, inv, mact_circuit, mact_witness, range_circuit,
+                      range_circuit_self_check, range_decompose, range_layout, range_layout_self_check,
+                      range_witness,
+                      recip_compile, recip_numerators, recip_prove, recip_self_check,
                       wnla_commit, wnla_prove, wnla_rounds, wnla_verify)
 
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tests", "vectors", "bppp")
@@ -448,6 +451,151 @@ def reciprocal_cases(rng):
     return cases
 
 
+# ---------------------------------------------------------------------------------------------
+# Range proofs and multi-asset transactions (spec section 5)
+
+
+def layout_json(lay):
+    return [[str(g), r] for g, r in lay]
+
+
+def range_vec(rng, name, base, ranges, values, violation=None):
+    """A section-5.2 range proof. violation (a description) marks a value outside its range,
+    decomposed with range_decompose(strict=False) so that the linear row holds and the top
+    digit leaves its radix; such a case is unsatisfied, and its digits are not an honest
+    decomposition ("digits_tampered": an implementation's witness builder refuses it, so the
+    Rust side takes w_D, w_O from the vector)."""
+    rc, info = range_circuit(ranges, base)
+    blindings = [rng.randrange(1, L) for _ in values]
+    in_range = all(A <= v < B for v, (A, B) in zip(values, ranges))
+    assert in_range == (violation is None)
+    wit = range_witness(values, blindings, ranges, base, strict=in_range)
+    wit["chal"] = challenges(rng)
+    entry = recip_run(rng, name, rc, wit, in_range)
+    return {"name": name, "base": base, "ranges": [[str(A), str(B)] for A, B in ranges],
+            "values": [str(v) for v in values], "blindings": [hx(x) for x in blindings],
+            "violation": violation, "digits_tampered": not in_range,
+            "layouts": [layout_json(x) for x in info["layouts"]],
+            "multiplicities": "inline" if info["inline"] else "shared", **entry}
+
+
+def mact_vec(rng, name, base, inputs, outputs, violation=None, digits=None):
+    """A section-5.3 transaction; inputs/outputs = [(amount, asset index)], with random asset
+    types and blindings. Satisfied iff balanced per asset, outputs in [0, 2^64) and the digits
+    honest. An output >= 2^64 is decomposed with strict=False; digits overrides the digits of
+    the outputs (both: "digits_tampered")."""
+    assets = [rng.randrange(1, L) for _ in range(3)]
+    ent = lambda xs: [(a, assets[t], rng.randrange(1, L)) for a, t in xs]  # noqa: E731
+    ins, outs = ent(inputs), ent(outputs)
+    rc, info = mact_circuit(len(ins), len(outs), base)
+    in_range = all(a < U64 for a, _ in outputs)
+    wit = mact_witness(ins, outs, base, strict=in_range, digits=digits)
+    balanced = all(sum(a for a, t in inputs if t == x) == sum(a for a, t in outputs if t == x)
+                   for x in range(3))
+    expect = balanced and in_range and digits is None
+    assert expect == (violation is None)
+    wit["chal"] = challenges(rng)
+    entry = recip_run(rng, name, rc, wit, expect)
+    js = lambda xs: [{"amount": str(a), "asset": hx(t), "blinding": hx(s)}  # noqa: E731
+                     for a, t, s in xs]
+    return {"name": name, "base": base, "n_in": len(ins), "n_out": len(outs),
+            "inputs": js(ins), "outputs": js(outs), "violation": violation,
+            "digits_tampered": not in_range or digits is not None,
+            "layout": layout_json(info["layout"]),
+            "multiplicities": "inline" if info["inline"] else "shared", **entry}
+
+
+def range_cases(rng):
+    u = lambda B: rng.randrange(B)  # noqa: E731
+    A = 1000
+    cases = [
+        # one 64-bit value, base 16: 16 digits, 15 multiplicities inline in n_O
+        range_vec(rng, "u64-b16-v0", 16, [(0, U64)], [0]),
+        range_vec(rng, "u64-b16-vmax", 16, [(0, U64)], [U64 - 1]),
+        range_vec(rng, "u64-b16-rand", 16, [(0, U64)], [u(U64)]),
+        # base 2: 64 binary digits, one multiplicity, inline (N_O = 1 <= N_p = 64)
+        range_vec(rng, "u64-b2-rand", 2, [(0, U64)], [u(U64)]),
+        # base 256: 8 digits, 255 multiplicities, shared (N_O > N_p)
+        range_vec(rng, "u64-b256-rand", 256, [(0, U64)], [u(U64)]),
+        # base 4: 32 digits, inline
+        range_vec(rng, "u64-b4-max", 4, [(0, U64)], [U64 - 1]),
+        # arbitrary ranges [1000, 1000 + B) in base 16, each layout kind
+        range_vec(rng, "b16-powers-B4096", 16, [(A, A + 16**3)], [A + 16**3 - 1]),  # powers only
+        range_vec(rng, "b16-extra-B556", 16, [(A, A + 556)], [A + u(556)]),  # + base-16 digit
+        range_vec(rng, "b16-extra-bin-B1000", 16, [(A, A + 1000)], [A + 999]),  # + both
+        range_vec(rng, "b16-bin-B4097", 16, [(A, A + 4097)], [A + 4096]),  # + binary digit
+        range_vec(rng, "b16-small-B10", 16, [(A, A + 10)], [A + 7]),  # B < b: one radix-10 digit
+        range_vec(rng, "b16-small-B2", 16, [(A, A + 2)], [A]),  # one binary digit
+        # arbitrary ranges in small bases (inline multiplicities, ties in weight)
+        range_vec(rng, "b4-extra-B1000", 4, [(A, A + 1000)], [A + u(1000)]),
+        range_vec(rng, "b3-B100-case2", 3, [(7, 107)], [7 + 10]),  # powers + binary 19
+        range_vec(rng, "b2-B1000", 2, [(A, A + 1000)], [A + u(1000)]),
+        range_vec(rng, "b2-B3-tie", 2, [(5, 8)], [6]),  # x = 1: digits (1, 0) (the later digit is the larger)
+        # ties in weight where the tie rule changes the digits: Case 1 digit 3 = power 3
+        # (x = 4: digits (1, 1, 0)), Case 2 binary digit 16 = power 16 (x = 20: (4, 1, 0))
+        range_vec(rng, "b3-B15-case1-tie", 3, [(0, 15)], [4]),
+        range_vec(rng, "b16-B272-case2-tie", 16, [(A, A + 272)], [A + 20]),
+        # an offset range ending at 2^64 (B - A = 2^64 - 12345)
+        range_vec(rng, "offset-to-2^64-b16", 16, [(12345, U64)], [U64 - 1]),
+        # aggregated, m = 3, different ranges
+        range_vec(rng, "agg3-b16-shared", 16, [(0, U64), (A, A + 1000), (5, 15)],
+                  [u(U64), A + u(1000), 14]),
+        range_vec(rng, "agg3-b16-inline", 16, [(0, U64), (0, 2**32), (A, A + 4097)],
+                  [u(U64), u(2**32), A + 4096]),
+        range_vec(rng, "agg3-b4-mixed", 4, [(0, U64), (A, A + 1000), (3, 5)],
+                  [u(U64), A, 4]),
+        # unsatisfied: a value outside its range (top digit out of its radix)
+        range_vec(rng, "bad-b16-B4097-v-eq-B", 16, [(A, A + 4097)], [A + 4097],
+                  violation="value = B (outside [A, B)): digits (1, 0, 16, 0), digit 2 has value 16 "
+                         "outside radix 16"),
+        range_vec(rng, "bad-u64-b16-v-2^64", 16, [(0, U64)], [U64],
+                  violation="value = 2^64: digit 15 has value 16 outside radix 16"),
+        range_vec(rng, "bad-agg3-b16-second", 16, [(0, U64), (A, A + 1000), (5, 15)],
+                  [u(U64), A + 1000 + 37, 5],
+                  violation="value 2 = B + 37: its weight-49 digit leaves radix 16"),
+        range_vec(rng, "bad-b16-small-B10", 16, [(A, A + 10)], [A + 10],
+                  violation="value = B: the radix-10 digit has value 10"),
+    ]
+    return cases
+
+
+def mact_cases(rng):
+    u = lambda B: rng.randrange(B)  # noqa: E731
+    x, y = u(2**62), u(2**62)
+    a1, a2 = u(2**62), u(2**62)
+    lay16 = range_layout(U64, 16)
+    amt = 0x123456789abcdef0
+    d = range_decompose(amt, lay16)
+    assert d[1] >= 1
+    tampered = list(d)
+    tampered[0] += 16  # digit 0 out of radix 16, the linear row still holds
+    tampered[1] -= 1
+    cases = [
+        mact_vec(rng, "b16-2in-2out-2assets", 16, [(x, 0), (y, 1)], [(y, 1), (x, 0)]),
+        mact_vec(rng, "b16-3in-2out-2assets", 16, [(a1, 0), (y, 1), (a2, 0)],
+                 [(a1 + a2, 0), (y, 1)]),
+        mact_vec(rng, "b16-2in-2out-1asset", 16, [(a1, 0), (a2, 0)], [(a1 + a2 - 777, 0), (777, 0)]),
+        mact_vec(rng, "b16-1in-3out", 16, [(U64 - 1, 0)], [(U64 - 1 - x - y, 0), (x, 0), (y, 0)]),
+        mact_vec(rng, "b4-2in-2out-2assets", 4, [(x, 0), (y, 1)], [(x, 0), (y, 1)]),
+        mact_vec(rng, "b4-2in-3out-3assets", 4, [(x + 5, 0), (y, 1)], [(5, 0), (y, 1), (x, 0)]),
+        mact_vec(rng, "b2-1in-1out", 2, [(x, 2)], [(x, 2)]),
+        mact_vec(rng, "b256-1in-1out-shared", 256, [(x, 0)], [(x, 0)]),
+        mact_vec(rng, "b16-2in-0out-zero", 16, [(0, 0), (0, 1)], []),
+        mact_vec(rng, "b16-0in-1out-zero", 16, [], [(0, 0)]),
+        # unsatisfied
+        mact_vec(rng, "bad-b16-unbalanced", 16, [(x, 0), (y, 1)], [(x + 1, 0), (y, 1)],
+                 violation="output 0 exceeds input 0 (same asset) by one unit"),
+        mact_vec(rng, "bad-b4-unbalanced-asset", 4, [(x, 0), (y, 1)], [(x, 1), (y, 0)],
+                 violation="amounts swapped between the two assets"),
+        mact_vec(rng, "bad-b16-digit-out-of-range", 16, [(amt, 0), (5, 1)], [(amt, 0), (5, 1)],
+                 violation="output 0: digit 0 + 16, digit 1 - 1 (digit 0 outside radix 16, "
+                           "the linear row holds)", digits=[tampered, None]),
+        mact_vec(rng, "bad-b16-output-2^64", 16, [(2**63 + 3, 0), (2**63 + 2, 0)], [(U64 + 5, 0)],
+                 violation="output amount 2^64 + 5 (inputs balance it): digit 15 has value 16"),
+    ]
+    return cases
+
+
 def main():
     rng = random.Random(20261019)
     # (|l|, |n|): odd and unequal lengths, a frozen norm vector (|n| = 1, 2, 3 with long l),
@@ -475,6 +623,15 @@ def main():
         json.dump({"cases": cases}, f, indent=1)
         f.write("\n")
     print(f"reciprocal.json: {len(cases)} cases")
+
+    range_layout_self_check()
+    range_circuit_self_check()
+    for fname, seed, gen in (("range.json", 20261022, range_cases), ("mact.json", 20261023, mact_cases)):
+        cases = gen(random.Random(seed))
+        with open(os.path.join(OUT, fname), "w") as f:
+            json.dump({"cases": cases}, f, indent=1)
+            f.write("\n")
+        print(f"{fname}: {len(cases)} cases")
 
 
 if __name__ == "__main__":

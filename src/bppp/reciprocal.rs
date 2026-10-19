@@ -376,6 +376,11 @@ impl ReciprocalCircuit {
             .collect()
     }
 
+    #[cfg(test)]
+    pub(crate) fn reciprocals_for_test(&self, w: &ReciprocalWitness, alpha: Scalar) -> Vec<Scalar> {
+        self.reciprocals(w, alpha).unwrap()
+    }
+
     fn compiled_witness(&self, w: &ReciprocalWitness, w_p: Vec<Scalar>) -> CircuitWitness {
         CircuitWitness {
             w_l: w.w_d.iter().chain(&w.w_l).copied().collect(),
@@ -588,174 +593,19 @@ mod tests {
         w.v.iter().zip(&w.s).map(|(v, s)| g.commit_input(v, *s).compress()).collect()
     }
 
-    /// Hands out the given scalars to `Scalar::random` (see the circuit tests).
-    struct ScalarRng(alloc::collections::VecDeque<u8>);
-
-    impl ScalarRng {
-        fn new(scalars: &[Scalar]) -> Self {
-            let mut q = alloc::collections::VecDeque::new();
-            for s in scalars {
-                q.extend(s.to_bytes().iter());
-                q.extend([0u8; 32].iter());
-            }
-            ScalarRng(q)
-        }
-    }
-
-    impl rand_core::RngCore for ScalarRng {
-        fn next_u32(&mut self) -> u32 {
-            unimplemented!()
-        }
-        fn next_u64(&mut self) -> u64 {
-            unimplemented!()
-        }
-        fn fill_bytes(&mut self, dest: &mut [u8]) {
-            dest.iter_mut().for_each(|b| *b = self.0.pop_front().expect("more randomness than in the vector"));
-        }
-        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
-            self.fill_bytes(dest);
-            Ok(())
-        }
-    }
-
-    impl rand_core::CryptoRng for ScalarRng {}
-
-    fn sc(v: &serde_json::Value) -> Scalar {
-        use core::convert::TryInto;
-        let b: [u8; 32] = hex::decode(v.as_str().unwrap()).unwrap().try_into().unwrap();
-        Scalar::from_canonical_bytes(b).unwrap()
-    }
-
-    fn scs(v: &serde_json::Value) -> Vec<Scalar> {
-        v.as_array().unwrap().iter().map(sc).collect()
-    }
-
-    fn sparse_from(v: &serde_json::Value, cols: usize) -> SparseMatrix {
-        let mut m = SparseMatrix::new(cols);
-        for row in v.as_array().unwrap() {
-            m.push_row(row.as_array().unwrap().iter().map(|t| (t[0].as_u64().unwrap() as usize, sc(&t[1]))));
-        }
-        m
-    }
-
-    fn pole(v: &serde_json::Value) -> Option<Scalar> {
-        if v.is_null() {
-            None
-        } else {
-            Some(sc(v))
-        }
-    }
-
     /// The prover reproduces the independent Python reference
     /// (`tests/vectors/bppp/reciprocal.json`): reciprocals, commitments, norm argument; the
     /// verifier accepts exactly the satisfied cases.
     #[test]
     fn matches_reference_vectors() {
+        use crate::bppp::testutil;
         let file: serde_json::Value =
             serde_json::from_str(include_str!("../../tests/vectors/bppp/reciprocal.json")).unwrap();
-        let pc = PedersenGens::default();
         for case in file["cases"].as_array().unwrap() {
-            let name = case["name"].as_str().unwrap();
-            let u = |k: &str| case[k].as_u64().unwrap() as usize;
-            let (n_p, n_m, n_o, n_lin) = (u("n_p"), u("n_m"), u("n_o"), u("n_lin"));
-            let n_w = 2 * (n_p + n_m) + n_o;
-            let slot = |s: &str| match s {
-                "nO" => Slot::NormO,
-                "lO" => Slot::LinO,
-                "lL" => Slot::LinL,
-                "lR" => Slot::LinR,
-                _ => panic!("slot {}", s),
-            };
-            let c = ReciprocalCircuit {
-                n_p,
-                n_m,
-                n_o,
-                n_v: u("n_v"),
-                n_lin,
-                k: u("k"),
-                w_n: sparse_from(&case["w_n"], n_w),
-                a_n: scs(&case["a_n"]),
-                w_m: sparse_from(&case["w_m"], n_w),
-                a_m: scs(&case["a_m"]),
-                w_l: sparse_from(&case["w_l"], n_w),
-                a_l: scs(&case["a_l"]),
-                recip: case["recip"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|r| ReciprocalRow {
-                        terms: r["terms"]
-                            .as_array()
-                            .unwrap()
-                            .iter()
-                            .map(|t| (t[0].as_u64().unwrap() as usize, sc(&t[1]), pole(&t[2])))
-                            .collect(),
-                        consts: r["consts"].as_array().unwrap().iter().map(|t| (sc(&t[0]), pole(&t[1]))).collect(),
-                    })
-                    .collect(),
-                f_l: u("f_l") == 1,
-                f_m: u("f_m") == 1,
-                partition: case["partition"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|p| (slot(p[0].as_str().unwrap()), p[1].as_u64().unwrap() as usize))
-                    .collect(),
-            };
-            assert_eq!(c.w_l.n_rows(), u("n_l"), "{}", name);
-            c.check().unwrap_or_else(|e| panic!("{}: {:?}", name, e));
-            let w = ReciprocalWitness {
-                w_d: scs(&case["w_D"]),
-                w_l: scs(&case["w_L"]),
-                w_r: scs(&case["w_R"]),
-                w_o: scs(&case["w_O"]),
-                v: case["v"].as_array().unwrap().iter().map(scs).collect(),
-                s: scs(&case["s"]),
-            };
-            let ch = &case["chal"];
-            let alpha = sc(&ch["alpha"]);
-            let satisfied = case["satisfied"].as_bool().unwrap();
-            assert_eq!(c.is_satisfied(&w, alpha), satisfied, "{}: satisfied", name);
-            assert_eq!(c.reciprocals(&w, alpha).unwrap(), scs(&case["w_P"]), "{}: w_P", name);
-            let bp = BulletproofGens::new((n_p + n_m).max(n_lin + 6), 1);
-            let g = BpppGens::new(&pc, &bp, n_lin, n_p + n_m).unwrap();
-            let point = |p: &serde_json::Value| {
-                use curve25519_dalek::traits::MultiscalarMul;
-                (g.g * sc(&p["g"])
-                    + curve25519_dalek::ristretto::RistrettoPoint::multiscalar_mul(scs(&p["h"]), &g.h)
-                    + curve25519_dalek::ristretto::RistrettoPoint::multiscalar_mul(scs(&p["n"]), g.n))
-                .compress()
-            };
-            let V = inputs(&g, &w);
-            for (i, p) in case["V"].as_array().unwrap().iter().enumerate() {
-                assert_eq!(V[i], point(p), "{}: V_{}", name, i);
-            }
-            let r = &case["rand"];
-            let randomness: Vec<Scalar> = ["r_O", "r_L", "r_R", "l_S", "n_S"].iter().flat_map(|k| scs(&r[*k])).collect();
-            let challenges: Vec<Scalar> = ["alpha", "rho", "lambda", "beta", "delta", "tau"]
-                .iter()
-                .map(|k| sc(&ch[*k]))
-                .chain(scs(&case["gammas"]))
-                .collect();
-            let proof =
-                prove_impl(&c, &g, &V, &w, &mut Replay::new(challenges.clone()), &mut ScalarRng::new(&randomness), false)
-                    .unwrap();
-            let checked = prove(&c, &g, &V, &w, &mut Replay::new(challenges.clone()), &mut ScalarRng::new(&randomness));
-            assert_eq!(checked.is_ok(), satisfied, "{}: prover check", name);
-            assert_eq!(proof.C_L, point(&case["C_L"]), "{}: C_L", name);
-            assert_eq!(proof.C_R, point(&case["C_R"]), "{}: C_R", name);
-            assert_eq!(proof.C_O, point(&case["C_O"]), "{}: C_O", name);
-            assert_eq!(proof.C_S, point(&case["C_S"]), "{}: C_S", name);
-            let rounds = case["rounds"].as_array().unwrap();
-            assert_eq!(proof.wnla.X.len(), rounds.len(), "{}: rounds", name);
-            for (i, round) in rounds.iter().enumerate() {
-                assert_eq!(proof.wnla.X[i], point(&round["X"]), "{}: X_{}", name, i);
-                assert_eq!(proof.wnla.R[i], point(&round["R"]), "{}: R_{}", name, i);
-            }
-            assert_eq!(proof.wnla.l, scs(&case["l_final"]), "{}: l", name);
-            assert_eq!(proof.wnla.n, scs(&case["n_final"]), "{}: n", name);
-            let verdict = verify(&proof, &c, &g, &V, &mut Replay::new(challenges)).is_ok();
-            assert_eq!(verdict, case["verifies"].as_bool().unwrap(), "{}: verdict", name);
+            let c = testutil::recip_circuit(case);
+            assert_eq!(c.w_l.n_rows(), case["n_l"].as_u64().unwrap() as usize);
+            c.check().unwrap();
+            testutil::run_recip_case(case, &c, &testutil::recip_witness(case));
         }
     }
 

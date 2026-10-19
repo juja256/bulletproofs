@@ -115,7 +115,8 @@ def wnla_rounds(a, b, legacy=False):
 
 def wnla_commit(G, H, N, c, mu, l, n):
     v = (ip(c, l) + wip(n, n, mu)) % L
-    return G.scale(v) + msm(l, H) + msm(n, N)
+    zero = G.scale(0)
+    return G.scale(v) + msm(l, H, zero) + msm(n, N, zero)
 
 
 def wnla_prove(G, H, N, c, rho, l, n, challenge, legacy=False):
@@ -152,10 +153,10 @@ def wnla_prove(G, H, N, c, rho, l, n, challenge, legacy=False):
     return rounds, l, n
 
 
-def wnla_verify(G, H, N, c, rho, C, rounds, l, n, gammas):
+def wnla_verify(G, H, N, c, rho, C, rounds, l, n, gammas, legacy=False):
     """Naive recursive verifier (section 4.3): fold everything, check the opening."""
     mu = rho * rho % L
-    k, a, b = wnla_rounds(len(H), len(N))
+    k, a, b = wnla_rounds(len(H), len(N), legacy)
     if len(rounds) != k or len(l) != a or len(n) != b or len(gammas) != k:
         return False
     for (X, R), gamma in zip(rounds, gammas):

@@ -273,7 +273,8 @@ advance in that round. In the verifier, the factor for such a round is $1$ inste
 $\rho^{2^r}$, and the final weight is $\rho^{2^{k_n+1}}$ with $k_n$ the number of rounds that fold
 $n$.
 \status{Verified: our reference reproduces all \texttt{secp256k1-zkp} norm-argument prove
-vectors byte for byte, including $|n| = 2$, $|l| = 4$.}
+vectors byte for byte, including $|n| = 2$, $|l| = 4$, and the verdicts on all 13 of their verify
+vectors; their verify vector 6 fails if $\rho$ advances in a frozen round.}
 
 \subsection*{13. Typo}
 \loc{\S4, the paragraph before \S4.1.}

@@ -66,8 +66,8 @@ pub struct ArithmeticCircuit {
     pub partition: Vec<(Slot, usize)>,
 }
 
-/// A witness for an [`ArithmeticCircuit`].
-#[derive(Clone, Debug)]
+/// A witness for an [`ArithmeticCircuit`]. Its `Debug` shows only the dimensions.
+#[derive(Clone)]
 pub struct CircuitWitness {
     /// Left inputs of the multiplications.
     pub w_l: Vec<Scalar>,
@@ -79,6 +79,18 @@ pub struct CircuitWitness {
     pub v: Vec<Vec<Scalar>>,
     /// Blindings of the input commitments.
     pub s: Vec<Scalar>,
+}
+
+impl core::fmt::Debug for CircuitWitness {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "CircuitWitness {{ n_m: {}, n_o: {}, inputs: {} }}",
+            self.w_l.len(),
+            self.w_o.len(),
+            self.v.len()
+        )
+    }
 }
 
 /// A circuit proof: four commitments and a norm argument.
@@ -193,7 +205,7 @@ impl ArithmeticCircuit {
     }
 
     fn check_gens(&self, gens: &BpppGens) -> Result<(), ProofError> {
-        if gens.h.len() != self.n_lin + 7 || gens.n.len() != self.n_m {
+        if self.n_lin.checked_add(7) != Some(gens.h.len()) || gens.n.len() != self.n_m {
             return Err(ProofError::InvalidGeneratorsLength);
         }
         Ok(())
@@ -361,8 +373,9 @@ fn nonzero<T: BpppTranscript>(t: &mut T, label: &'static [u8]) -> Result<Scalar,
 }
 
 /// Prove that `w` satisfies `c` for the input commitments `V` (`V_i` =
-/// [`BpppGens::commit_input`]`(v_i, s_i)`). Absorbs the dimensions, the circuit digest and
-/// `V` (spec §3.8); an unsatisfied witness gives a proof that does not verify.
+/// [`BpppGens::commit_input`]`(v_i, s_i)`). Absorbs the dimensions, the generators `G` and
+/// `H_0`, the circuit digest and `V` (spec §3.8). Returns `Err(VerificationError)` if the
+/// witness does not satisfy the circuit (the value term of spec §3.5 is non-zero).
 pub fn prove<T: BpppTranscript, R: RngCore + CryptoRng>(
     c: &ArithmeticCircuit,
     gens: &BpppGens,
@@ -371,7 +384,7 @@ pub fn prove<T: BpppTranscript, R: RngCore + CryptoRng>(
     transcript: &mut T,
     rng: &mut R,
 ) -> Result<CircuitProof, ProofError> {
-    prove_impl(c, gens, V, w, transcript, rng, true)
+    prove_impl(c, gens, V, w, transcript, rng, true, true)
 }
 
 fn prove_impl<T: BpppTranscript, R: RngCore + CryptoRng>(
@@ -382,10 +395,12 @@ fn prove_impl<T: BpppTranscript, R: RngCore + CryptoRng>(
     transcript: &mut T,
     rng: &mut R,
     bind: bool,
+    require_satisfied: bool,
 ) -> Result<CircuitProof, ProofError> {
+    // The generators bound the dimensions by memory that exists, so check them first.
+    c.check_gens(gens)?;
     c.check()?;
     c.check_witness(w)?;
-    c.check_gens(gens)?;
     if V.len() != c.k {
         return Err(ProofError::FormatError);
     }
@@ -448,6 +463,10 @@ fn prove_impl<T: BpppTranscript, R: RngCore + CryptoRng>(
     f.add(3, wt.affine + v_hat);
     f.sub_poly(&c_l.inner(&l_hat, None));
     f.sub_poly(&n_t.inner(&n_t, Some(&wt.mu_vec)));
+    // f_3 = -2E vanishes exactly for a satisfying witness (w.h.p. over lambda, mu).
+    if require_satisfied && f.coeff(3) != zero {
+        return Err(ProofError::VerificationError);
+    }
 
     // Blinding commitment (spec §3.6).
     let mut g = Poly::zero();
@@ -502,8 +521,8 @@ impl CircuitProof {
         transcript: &mut T,
         bind: bool,
     ) -> Result<(), ProofError> {
-        c.check().map_err(|_| ProofError::VerificationError)?;
         c.check_gens(gens)?;
+        c.check().map_err(|_| ProofError::VerificationError)?;
         if V.len() != c.k {
             return Err(ProofError::VerificationError);
         }
@@ -693,11 +712,23 @@ mod tests {
         w.v.iter().zip(&w.s).map(|(v, s)| g.commit_input(v, *s).compress()).collect()
     }
 
+    /// The prover without its satisfiability check, to test what the verifier rejects.
+    fn prove_unchecked<T: BpppTranscript, R: RngCore + CryptoRng>(
+        c: &ArithmeticCircuit,
+        g: &BpppGens,
+        V: &[CompressedRistretto],
+        w: &CircuitWitness,
+        t: &mut T,
+        rng: &mut R,
+    ) -> Result<CircuitProof, ProofError> {
+        prove_impl(c, g, V, w, t, rng, true, false)
+    }
+
     fn prove_and_verify(c: &ArithmeticCircuit, w: &CircuitWitness, rng: &mut ChaCha20Rng) -> Result<(), ProofError> {
         let (pc, bp) = gens_for(c);
         let g = BpppGens::new(&pc, &bp, c.n_lin, c.n_m)?;
         let V = commitments(&g, w);
-        let proof = prove(c, &g, &V, w, &mut Transcript::new(b"test"), rng)?;
+        let proof = prove_unchecked(c, &g, &V, w, &mut Transcript::new(b"test"), rng)?;
         let parsed = CircuitProof::from_bytes(&proof.to_bytes(), c)?;
         assert_eq!(parsed, proof);
         proof.verify(c, &g, &V, &mut Transcript::new(b"test"))
@@ -824,8 +855,10 @@ mod tests {
                 .map(|k| sc(&ch[*k]))
                 .chain(scs(&case["gammas"]))
                 .collect();
-            let proof =
-                prove(&c, &g, &V, &w, &mut Replay::new(challenges.clone()), &mut ScalarRng::new(&randomness)).unwrap();
+            let proof = prove_unchecked(&c, &g, &V, &w, &mut Replay::new(challenges.clone()), &mut ScalarRng::new(&randomness))
+                .unwrap();
+            let checked = prove(&c, &g, &V, &w, &mut Replay::new(challenges.clone()), &mut ScalarRng::new(&randomness));
+            assert_eq!(checked.is_ok(), case["satisfied"].as_bool().unwrap(), "{}: prover check", name);
             assert_eq!(proof.C_L, point(&case["C_L"]), "{}: C_L", name);
             assert_eq!(proof.C_R, point(&case["C_R"]), "{}: C_R", name);
             assert_eq!(proof.C_O, point(&case["C_O"]), "{}: C_O", name);
@@ -860,13 +893,15 @@ mod tests {
     fn unsatisfied_witnesses_are_rejected() {
         let mut rng = ChaCha20Rng::seed_from_u64(11);
         for s in shapes().into_iter().filter(|s| s.n_m > 1) {
-            for tamper in 0..4 {
+            for tamper in 0..6 {
                 let (mut c, mut w) = instance(&mut rng, &s);
                 match tamper {
                     0 => c.a_l[0] += Scalar::ONE,
                     1 => *c.a_m.last_mut().unwrap() += Scalar::ONE,
                     2 => w.w_l[0] += Scalar::ONE,
-                    _ if s.f_l || s.f_m => *w.v[s.k - 1].last_mut().unwrap() += Scalar::ONE,
+                    3 => *c.a_l.last_mut().unwrap() += Scalar::ONE,
+                    4 => c.a_m[s.n_m / 2] += Scalar::ONE,
+                    _ if s.k > 0 => *w.v[s.k - 1].last_mut().unwrap() += Scalar::ONE,
                     _ => continue,
                 }
                 if c.is_satisfied(&w) {
@@ -974,7 +1009,7 @@ mod tests {
         let (pc, bp) = gens_for(&c);
         let g = BpppGens::new(&pc, &bp, c.n_lin, c.n_m).unwrap();
         let V = commitments(&g, &w);
-        let proof = prove(&c, &g, &V, &w, &mut Transcript::new(b"t"), &mut rng).unwrap();
+        let proof = prove_unchecked(&c, &g, &V, &w, &mut Transcript::new(b"t"), &mut rng).unwrap();
         assert!(proof.verify(&c, &g, &V, &mut Transcript::new(b"t")).is_err());
         // Replay the verifier: A is the coefficient of G in the check, B the rest; G := -B/A.
         let mut t = Transcript::new(b"t");
@@ -1021,6 +1056,43 @@ mod tests {
         assert!(c.check().is_err());
         let s0 = Shape { k: 0, ..s };
         assert!(instance(&mut rng, &s0).0.check().is_ok());
+    }
+
+    /// The prover checks the value term and refuses an unsatisfied witness instead of
+    /// producing a proof that cannot verify.
+    #[test]
+    fn prover_refuses_unsatisfied_witness() {
+        let mut rng = ChaCha20Rng::seed_from_u64(17);
+        let s = Shape { n_m: 4, n_o: 2, n_v: 2, n_lin: 2, k: 1, n_l: 3, f_l: true, f_m: true, spread: true };
+        let (mut c, w) = instance(&mut rng, &s);
+        let (pc, bp) = gens_for(&c);
+        let g = BpppGens::new(&pc, &bp, c.n_lin, c.n_m).unwrap();
+        let V = commitments(&g, &w);
+        assert!(prove(&c, &g, &V, &w, &mut Transcript::new(b"t"), &mut rng).is_ok());
+        c.a_m[2] += Scalar::ONE;
+        assert!(prove(&c, &g, &V, &w, &mut Transcript::new(b"t"), &mut rng).is_err());
+    }
+
+    /// Absurd dimensions from the caller are errors, not panics or huge allocations.
+    #[test]
+    fn absurd_dimensions_are_errors() {
+        let mut rng = ChaCha20Rng::seed_from_u64(18);
+        let s = Shape { n_m: 4, n_o: 2, n_v: 1, n_lin: 1, k: 1, n_l: 2, f_l: true, f_m: false, spread: false };
+        let (c, w) = instance(&mut rng, &s);
+        let (pc, bp) = gens_for(&c);
+        let g = BpppGens::new(&pc, &bp, c.n_lin, c.n_m).unwrap();
+        let V = commitments(&g, &w);
+        let proof = prove(&c, &g, &V, &w, &mut Transcript::new(b"t"), &mut rng).unwrap();
+        for (n_lin, n_m) in [(usize::MAX / 2, 4), (usize::MAX - 3, 4), (1, usize::MAX / 2)] {
+            let mut big = c.clone();
+            big.n_lin = n_lin;
+            big.n_m = n_m;
+            assert!(proof.verify(&big, &g, &V, &mut Transcript::new(b"t")).is_err());
+            assert!(prove(&big, &g, &V, &w, &mut Transcript::new(b"t"), &mut rng).is_err());
+            assert!(CircuitProof::from_bytes(&proof.to_bytes(), &big).is_err());
+        }
+        assert!(WnlaProof::from_bytes(&[], usize::MAX, 0).is_err());
+        assert!(WnlaProof::from_bytes(&[], usize::MAX, usize::MAX).is_err());
     }
 
     #[test]

@@ -56,21 +56,22 @@ impl VecPoly {
     }
 
     /// `<self(T), other(T)>`, or with weights `w` (`<a, b>_w = sum a_i b_i w_i`). The weights
-    /// are folded into `self`'s terms once (`<a, b>_w = <a w, b>`); for `p.inner(p, _)` only the
-    /// pairs `i <= j` are computed (the product is symmetric); the inner products run in
-    /// parallel with `parallel`. Same values as the direct double sum.
+    /// are folded into each of `self`'s terms once (`<a, b>_w = <a w, b>`, one weighted term
+    /// alive at a time); for `p.inner(p, _)` only the pairs `i <= j` are computed (the product
+    /// is symmetric); the inner products run in parallel with `parallel`. Same values as the
+    /// direct double sum.
     pub fn inner(&self, other: &VecPoly, w: Option<&[Scalar]>) -> Poly {
-        let weighted: Vec<(i32, Vec<Scalar>)>;
-        let left: &[(i32, Vec<Scalar>)] = match w {
-            Some(w) => {
-                weighted = self.0.iter().map(|(d, a)| (*d, a.iter().zip(w).map(|(x, w)| x * w).collect())).collect();
-                &weighted
-            }
-            None => &self.0,
-        };
         let same = core::ptr::eq(self, other);
         let mut p = Poly::zero();
-        for (i, (da, a)) in left.iter().enumerate() {
+        for (i, (da, a)) in self.0.iter().enumerate() {
+            let weighted: Vec<Scalar>;
+            let a: &[Scalar] = match w {
+                Some(w) => {
+                    weighted = a.iter().zip(w).map(|(x, w)| x * w).collect();
+                    &weighted
+                }
+                None => a,
+            };
             for (j, (db, b)) in other.0.iter().enumerate() {
                 if same && j < i {
                     continue;

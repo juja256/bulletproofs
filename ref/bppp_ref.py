@@ -388,6 +388,33 @@ def circuit_input_commit(G, H, v, s):
     return G.scale(v[0]) + H[0].scale(s) + msm(v[1:], H[7:])
 
 
+def circuit_blindings(rnd):
+    """r_O, r_L, r_R of section 3.3 from r'_O (6), r'_L (5), r'_R (4)."""
+    ro, rl, rr = rnd["r_O"], rnd["r_L"], rnd["r_R"]
+    assert len(ro) == 6 and len(rl) == 5 and len(rr) == 4
+    return ([ro[0], ro[1], ro[2], ro[3], 0, ro[4], ro[5], 0],
+            [rl[0], rl[1], rl[2], 0, rl[3], rl[4], 0, 0],
+            [rr[0], rr[1], 0, rr[2], rr[3], 0, 0, 0])
+
+
+def circuit_commit_initial(c, wit, rnd):
+    """(C_L, C_O) of section 3.3. Reads only w_L and the elements of w_O in the slots n_O, l_O,
+    l_L (the reciprocal form commits these before alpha, spec 4.3)."""
+    G, H, N = circuit_gens(c)
+    lay = circuit_layout(c, wit)
+    r_O, r_L, _ = circuit_blindings(rnd)
+    return (circuit_commit(G, H, N, r_L, lay["lL"], wit["w_L"]),
+            circuit_commit(G, H, N, r_O, lay["lO"], lay["nO"]))
+
+
+def circuit_commit_right(c, wit, rnd):
+    """C_R of section 3.3 (w_R and the l_R elements of w_O)."""
+    G, H, N = circuit_gens(c)
+    lay = circuit_layout(c, wit)
+    _, _, r_R = circuit_blindings(rnd)
+    return circuit_commit(G, H, N, r_R, lay["lR"], wit["w_R"])
+
+
 def circuit_prove(c, wit, rnd, chal, gammas):
     """Prover of section 3 with given randomness and challenges (no transcript). Returns a dict
     with everything the prover sends, the norm-argument inputs and the intermediate polynomials
@@ -403,16 +430,11 @@ def circuit_prove(c, wit, rnd, chal, gammas):
     # 3.2, 3.3: input commitments and C_L, C_R, C_O
     V = [circuit_input_commit(G, H, v, s) for v, s in zip(wit["v"], wit["s"])]
     lay = circuit_layout(c, wit)
-    ro, rl, rr = rnd["r_O"], rnd["r_L"], rnd["r_R"]
-    assert len(ro) == 6 and len(rl) == 5 and len(rr) == 4
-    r_O = [ro[0], ro[1], ro[2], ro[3], 0, ro[4], ro[5], 0]
-    r_L = [rl[0], rl[1], rl[2], 0, rl[3], rl[4], 0, 0]
-    r_R = [rr[0], rr[1], 0, rr[2], rr[3], 0, 0, 0]
+    r_O, r_L, r_R = circuit_blindings(rnd)
     n_L, n_R, n_O = wit["w_L"], wit["w_R"], lay["nO"]
     l_O, l_L, l_R = lay["lO"], lay["lL"], lay["lR"]
-    C_L = circuit_commit(G, H, N, r_L, l_L, n_L)
-    C_R = circuit_commit(G, H, N, r_R, l_R, n_R)
-    C_O = circuit_commit(G, H, N, r_O, l_O, n_O)
+    C_L, C_O = circuit_commit_initial(c, wit, rnd)
+    C_R = circuit_commit_right(c, wit, rnd)
 
     # 3.4: weights and inputs
     pub = circuit_public(c, chal)
@@ -577,4 +599,274 @@ def circuit_self_check(c, wit, chal, gammas, proof):
     verifies = circuit_verify(*args)
     assert circuit_verify_msm(*args) == verifies, "the two verifiers disagree"
     assert verifies == satisfied
+    return satisfied, verifies
+
+
+# ---------------------------------------------------------------------------------------------
+# Reciprocal form circuits (spec section 4, paper sections 6.2-6.3)
+#
+# A reciprocal form circuit rc has the keys of a section-3 circuit (n_m = N_m ordinary
+# multiplications, which may be 0, w_m, a_m, w_l, a_l, n_o, n_v, n_lin, k, n_l, f_l, f_m,
+# partition) plus n_p = N_p, w_n, a_n and recip: a list of rows {"terms": [(col, c, t)],
+# "consts": [(c, t)]} with t None for "no pole". Columns index
+# w' = w_D || w_L || w_P || w_R || w_O (N'_m = N_p + N_m). A witness has w_D, w_L, w_R, w_O,
+# v, s; w_P is computed for a challenge alpha.
+
+
+class ReciprocalError(Exception):
+    """The prover fails (alpha + w_D,i = 0) or the circuit cannot be compiled for alpha
+    (alpha + t = 0 for a public pole t)."""
+
+
+def recip_dims(rc):
+    """(N'_m, N'_w)."""
+    nm2 = rc["n_p"] + rc["n_m"]
+    return nm2, 2 * nm2 + rc["n_o"]
+
+
+def recip_initial_cols(rc):
+    """Columns committed before alpha (spec 4.1): all of w'_L = w_D || w_L, and the elements of
+    w_O whose slot is not l_R."""
+    nm2, _ = recip_dims(rc)
+    cols = set(range(nm2))
+    cols |= {2 * nm2 + i for i, (slot, _) in enumerate(rc["partition"]) if slot != "lR"}
+    return cols
+
+
+def recip_check_shape(rc):
+    np_, nm, no, nv, nlin, k, nl = (rc[x] for x in ("n_p", "n_m", "n_o", "n_v", "n_lin", "k", "n_l"))
+    nm2, nw2 = recip_dims(rc)
+    assert np_ >= 0 and nm >= 0 and nm2 >= 1, "N'_m = N_p + N_m >= 1 (spec 3.1 on the compiled circuit)"
+    assert nv >= 1 and k >= 0 and nlin >= nv - 1
+    assert len(rc["w_n"]) == np_ == len(rc["a_n"])
+    assert len(rc["w_m"]) == nm == len(rc["a_m"])
+    assert len(rc["w_l"]) == nl == len(rc["a_l"])
+    # Inputs: f_m w_V meets the first kN_v compiled multiplicative rows (numerators first).
+    # f_l w_V: the spec (4.2) requires only N_l + N_r >= kN_v of the compiled circuit, but the
+    # relation of 4.1 adds w_V to the rows of W_l only; we require N_l >= kN_v so that the two
+    # agree (reported as an ambiguity).
+    assert not rc["f_l"] or nl >= k * nv, "f_l = 1 needs N_l >= k N_v"
+    assert not rc["f_m"] or nm2 >= k * nv, "f_m = 1 needs N_p + N_m >= k N_v"
+    assert k == 0 or rc["f_l"] or rc["f_m"]
+    assert len(rc["partition"]) == no and len(set(map(tuple, rc["partition"]))) == no
+    for slot, t in rc["partition"]:
+        assert slot in SLOTS and 0 <= t < (nm2 if slot == "nO" else nlin)
+    init = recip_initial_cols(rc)
+    recip_cols = set(range(nm2, nm2 + np_))
+    for row in rc["w_n"]:
+        for col, _ in row:
+            assert col in init, f"W_n uses non-initial column {col}"
+    for row in rc["w_m"] + rc["w_l"]:
+        for col, _ in row:
+            assert 0 <= col < nw2
+    for row in rc["recip"]:
+        for col, _, t in row["terms"]:
+            if t is None:
+                assert col in init or col in recip_cols, f"pole-free term on column {col}"
+            else:
+                assert col in init, f"pole term on non-initial column {col}"
+
+
+def recip_wprime(rc, wit, w_P):
+    """w' = w_D || w_L || w_P || w_R || w_O."""
+    assert len(wit["w_D"]) == rc["n_p"] == len(w_P)
+    assert len(wit["w_L"]) == rc["n_m"] == len(wit["w_R"]) and len(wit["w_O"]) == rc["n_o"]
+    return wit["w_D"] + wit["w_L"] + w_P + wit["w_R"] + wit["w_O"]
+
+
+def recip_wv(wit):
+    return [x for v in wit["v"] for x in v]
+
+
+def recip_numerators(rc, wit):
+    """(W_n w' + f_m w_V + a_n)_i. W_n reads initial columns only, so w_P, w_R and the l_R
+    elements are replaced by zeros here: the numerators are fixed before alpha."""
+    nm2, _ = recip_dims(rc)
+    init = recip_initial_cols(rc)
+    w = recip_wprime(rc, wit, [0] * rc["n_p"])
+    w = [x if i in init else 0 for i, x in enumerate(w)]
+    wv = recip_wv(wit)
+    return [(x + rc["f_m"] * (wv[i] if i < len(wv) else 0) + rc["a_n"][i]) % L
+            for i, x in enumerate(sparse_mul(rc["w_n"], w))]
+
+
+def recip_reciprocals(rc, wit, alpha):
+    """Spec 4.3 step 3: w_P,i = num_i / (alpha + w_D,i); fails if alpha + w_D,i = 0."""
+    out = []
+    for d, num in zip(wit["w_D"], recip_numerators(rc, wit)):
+        if (alpha + d) % L == 0:
+            raise ReciprocalError("alpha + w_D,i = 0")
+        out.append(num * inv(alpha + d) % L)
+    return out
+
+
+def recip_row_residual(rc, wit, row):
+    """A reciprocal row as a rational function of X: ({pole value t: total multiplicity at
+    1/(X + t)}, polynomial part), with w_P,i(X) = num_i / (X + w_D,i). The row vanishes iff
+    every multiplicity and the polynomial part are zero (the 1/(X + t) for distinct t and 1 are
+    linearly independent in F(X))."""
+    nm2, _ = recip_dims(rc)
+    num = recip_numerators(rc, wit)
+    w = recip_wprime(rc, wit, [None] * rc["n_p"])
+    mult, poly = {}, 0
+
+    def add(t, x):
+        mult[t % L] = (mult.get(t % L, 0) + x) % L
+
+    for col, c, t in row["terms"]:
+        if t is not None:
+            add(t, c * w[col])
+        elif nm2 <= col < nm2 + rc["n_p"]:
+            i = col - nm2
+            add(wit["w_D"][i], c * num[i])
+        else:
+            poly += c * w[col]
+    for c, t in row["consts"]:
+        if t is None:
+            poly += c
+        else:
+            add(t, c)
+    return {t: m for t, m in mult.items() if m}, poly % L
+
+
+def recip_ordinary_residuals(rc, wit, w_P):
+    """Residuals of the ordinary rows of 4.1 for a given w_P (= w_P(alpha)):
+    (W_l w' + f_l w_V + a_l, W_m w' + f_m w~_V + a_m - w_L o w_R)."""
+    w = recip_wprime(rc, wit, w_P)
+    wv = recip_wv(wit)
+    np_ = rc["n_p"]
+    lin = [(x + rc["f_l"] * (wv[t] if t < len(wv) else 0) + rc["a_l"][t]) % L
+           for t, x in enumerate(sparse_mul(rc["w_l"], w))]
+    mul = [(x + rc["f_m"] * (wv[np_ + t] if np_ + t < len(wv) else 0) + rc["a_m"][t]
+            - wit["w_L"][t] * wit["w_R"][t]) % L
+           for t, x in enumerate(sparse_mul(rc["w_m"], w))]
+    return lin, mul
+
+
+def recip_satisfied(rc, wit, alpha):
+    """Spec 4.1. The reciprocal rows must vanish as rational functions of X; the ordinary rows
+    are checked with w_P = w_P(alpha) (they may read w_P, so they depend on alpha: the spec
+    does not say at which X they hold; reported). Returns (recip_ok, ordinary_ok)."""
+    recip_ok = all(recip_row_residual(rc, wit, row) == ({}, 0) for row in rc["recip"])
+    lin, mul = recip_ordinary_residuals(rc, wit, recip_reciprocals(rc, wit, alpha))
+    return recip_ok, not any(lin) and not any(mul)
+
+
+def recip_compile(rc, alpha):
+    """Spec 4.2: the section-3 circuit for a challenge alpha. Raises ReciprocalError if
+    alpha + t = 0 for a public pole t (the spec does not cover this case; reported)."""
+    recip_check_shape(rc)
+    np_ = rc["n_p"]
+    nm2, _ = recip_dims(rc)
+    w_m = [list(row) + [(nm2 + i, -alpha % L)] for i, row in enumerate(rc["w_n"])]
+    w_m += [list(row) for row in rc["w_m"]]
+    w_l = [list(row) for row in rc["w_l"]]
+    a_r = []
+    for row in rc["recip"]:
+        acc = {}
+        for col, c, t in row["terms"]:
+            if t is None:
+                x = c
+            else:
+                if (alpha + t) % L == 0:
+                    raise ReciprocalError("alpha + t = 0 for a public pole")
+                x = c * inv(alpha + t)
+            acc[col] = (acc.get(col, 0) + x) % L
+        # one term per column, in the order of first appearance (any order gives the same
+        # constraint; the order only matters for the section-3 digest, which is not used here)
+        w_l.append([(col, x) for col, x in acc.items()])
+        const = 0
+        for c, t in row["consts"]:
+            if t is None:
+                const += c
+            else:
+                if (alpha + t) % L == 0:
+                    raise ReciprocalError("alpha + t = 0 for a public pole")
+                const += c * inv(alpha + t)
+        a_r.append(const % L)
+    c = {"n_m": nm2, "n_o": rc["n_o"], "n_v": rc["n_v"], "n_lin": rc["n_lin"], "k": rc["k"],
+         "n_l": rc["n_l"] + len(rc["recip"]), "f_l": rc["f_l"], "f_m": rc["f_m"],
+         "partition": [list(x) for x in rc["partition"]],
+         "w_m": w_m, "a_m": [x % L for x in rc["a_n"] + rc["a_m"]],
+         "w_l": w_l, "a_l": [x % L for x in rc["a_l"]] + a_r}
+    circuit_check_shape(c)
+    assert np_ + rc["n_m"] == len(c["w_m"])
+    return c
+
+
+def recip_compiled_witness(wit, w_P):
+    """(w'_L, w'_R, w_O) and the inputs, as a section-3 witness."""
+    return {"w_L": wit["w_D"] + wit["w_L"], "w_R": w_P + wit["w_R"], "w_O": list(wit["w_O"]),
+            "v": wit["v"], "s": wit["s"]}
+
+
+def recip_prove(rc, wit, rnd, chal, gammas):
+    """Prover of spec 4.3 with given randomness and challenges (alpha in chal). Steps 1-3 are
+    done explicitly (C_L, C_O from the initial witness alone, then w_P and C_R); step 4 runs the
+    section-3 prover on the compiled circuit, whose own C_L, C_R, C_O must coincide."""
+    recip_check_shape(rc)
+    nm2, _ = recip_dims(rc)
+    alpha = chal["alpha"]
+    G, H, _ = circuit_gens({"n_lin": rc["n_lin"], "n_m": nm2})
+    V = [circuit_input_commit(G, H, v, s) for v, s in zip(wit["v"], wit["s"])]
+    # 1. the initial witness only: w_R, w_P and the l_R elements are unknown (zero) here
+    shape = {"n_m": nm2, "n_lin": rc["n_lin"], "partition": rc["partition"]}
+    pre = {"w_L": wit["w_D"] + wit["w_L"], "w_R": [0] * nm2,
+           "w_O": [0 if slot == "lR" else x for x, (slot, _) in zip(wit["w_O"], rc["partition"])]}
+    C_L, C_O = circuit_commit_initial(shape, pre, rnd)
+    # 2.-3. alpha, reciprocals, C_R
+    w_P = recip_reciprocals(rc, wit, alpha)
+    cwit = recip_compiled_witness(wit, w_P)
+    C_R = circuit_commit_right(shape, cwit, rnd)
+    # 4. inner protocol on the compiled circuit
+    c = recip_compile(rc, alpha)
+    proof = circuit_prove(c, cwit, rnd, chal, gammas)
+    assert proof["V"] == V and proof["C_L"] == C_L and proof["C_O"] == C_O and proof["C_R"] == C_R
+    proof.update({"w_P": w_P, "compiled": c, "compiled_wit": cwit})
+    return proof
+
+
+def recip_verify(rc, V, C_L, C_R, C_O, C_S, chal, rounds, l_final, n_final, gammas, single=False):
+    """Verifier of spec 4.3: compile for alpha, then the section-3 verifier (naive, or the
+    single multiscalar equation)."""
+    try:
+        c = recip_compile(rc, chal["alpha"])
+    except ReciprocalError:
+        return False
+    f = circuit_verify_msm if single else circuit_verify
+    return f(c, V, C_L, C_R, C_O, C_S, chal, rounds, l_final, n_final, gammas)
+
+
+def recip_self_check(rc, wit, chal, gammas, proof):
+    """Self-checks of a reciprocal proof: the satisfaction check against the compiled circuit,
+    the reciprocal rows at alpha, the section-3 checks (identity, opening, both verifiers) on
+    the compiled circuit, and both reciprocal verifiers. Returns (satisfied, verifies)."""
+    alpha = chal["alpha"]
+    recip_ok, ord_ok = recip_satisfied(rc, wit, alpha)
+    satisfied = recip_ok and ord_ok
+    c, cwit, w_P = proof["compiled"], proof["compiled_wit"], proof["w_P"]
+    # w_P is the reciprocal: (alpha + w_D,i) w_P,i = num_i
+    num = recip_numerators(rc, wit)
+    assert all((alpha + d) * p % L == x for d, p, x in zip(wit["w_D"], w_P, num))
+    # the reciprocal rows evaluated at alpha = the compiled linear rows N_l.. on w'(alpha)
+    w = recip_wprime(rc, wit, w_P)
+    nl = rc["n_l"]
+    at_alpha = [(x + c["a_l"][nl + q]) % L for q, x in enumerate(sparse_mul(c["w_l"][nl:], w))]
+    for q, row in enumerate(rc["recip"]):
+        mult, poly = recip_row_residual(rc, wit, row)
+        direct = (poly + sum(m * inv(alpha + t) for t, m in mult.items())) % L
+        assert direct == at_alpha[q], "compiled reciprocal row != rational function at alpha"
+        if (mult, poly) == ({}, 0):
+            assert at_alpha[q] == 0
+        else:
+            assert at_alpha[q] != 0, "a non-vanishing reciprocal row vanishes at alpha (unlucky alpha)"
+    # compiled circuit satisfied by (w'_L, w'_R, w_O) iff the reciprocal circuit is (at alpha)
+    _, csat = circuit_error(c, cwit, chal["lambda"], chal["rho"] * chal["rho"] % L)
+    assert csat == satisfied
+    s3, v3 = circuit_self_check(c, cwit, chal, gammas, proof)
+    assert s3 == satisfied and v3 == satisfied
+    args = (rc, proof["V"], proof["C_L"], proof["C_R"], proof["C_O"], proof["C_S"], chal,
+            proof["rounds"], proof["l_final"], proof["n_final"], gammas)
+    verifies = recip_verify(*args)
+    assert recip_verify(*args, single=True) == verifies == v3
     return satisfied, verifies

@@ -313,7 +313,14 @@ A reciprocal form circuit consists of
   constants $(c, t)$ meaning $c/(X + t)$ or $c$. A term with a pole $t$ must use an initial column;
   a term without a pole must use an initial column or a reciprocal column $w_{P,i}$ (the first
   $N_p$ columns of $w'_R$);
-- the flags $f_l$, $f_m$ and the partition of $w_O$ as in §3, with $N_{lin}$, $N_v$, $k$.
+- the flags $f_l$, $f_m$ and the partition of $w_O$ as in §3, with $N_{lin}$, $N_v$, $k$;
+  $f_l = 1$ requires $N_l \ge kN_v$ (inputs never reach the reciprocal rows); $N_m = 0$ is
+  allowed (only $N'_m \ge 1$ is needed), and a slot $(n_O, t)$ needs $t < N'_m$.
+
+Ordinary rows that read $w_P$ or $w_R$ hold at the challenge $\alpha$ only (they are part of the
+compiled circuit); $w_R$ and the elements of $w_O$ in slot $l_R$ may therefore be computed
+after $\alpha$. (The Rust prover currently takes them up front, which suffices whenever they do
+not depend on $\alpha$; a callback for late witness values comes with the circuit builder.)
 
 It is satisfied if, for every $i < N_p$, $(X + w_{D,i})\, w_{P,i}(X) = (W_n w' + f_m w_V + a_n)_i$
 defines the reciprocals, every reciprocal row vanishes **as a rational function of $X$**, and the
@@ -342,7 +349,8 @@ the first $kN_v$ rows of $W_l$; the requirements of §3.1 apply to the compiled 
    §3.3 (randomness $r'_O$, then $r'_L$).
 2. Absorb (§4.5) and take the challenge $\alpha$.
 3. Compute $w_{P,i} = (W_n w' + f_m w_V + a_n)_i \cdot (\alpha + w_{D,i})^{-1}$; the prover fails if
-   $\alpha + w_{D,i} = 0$ for some $i$. Commit $C_R$ for $(r_R, l_R, w'_R)$ (randomness $r'_R$).
+   $\alpha + w_{D,i} = 0$ for some $i$, and both prover and verifier fail if $\alpha + t = 0$
+   for a public pole $t$ (probability negligible in either case). Commit $C_R$ for $(r_R, l_R, w'_R)$ (randomness $r'_R$).
 4. Absorb $C_R$ and run the inner protocol of §3 on the compiled circuit from the challenges
    $\rho, \lambda, \beta, \delta$ on (§3.4–3.7). The prover refuses if the compiled circuit is not
    satisfied (its value term is non-zero).

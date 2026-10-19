@@ -9,8 +9,9 @@ import sys
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from bppp_ref import (L, SLOTS, Sym, circuit_prove, circuit_self_check, wnla_commit,  # noqa: E402
-                      wnla_prove, wnla_rounds, wnla_verify)
+from bppp_ref import (L, SLOTS, ReciprocalError, Sym, circuit_prove, circuit_self_check,  # noqa: E402
+                      inv, recip_compile, recip_numerators, recip_prove, recip_self_check,
+                      wnla_commit, wnla_prove, wnla_rounds, wnla_verify)
 
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tests", "vectors", "bppp")
 
@@ -173,6 +174,280 @@ CIRCUITS = [
 ]
 
 
+# ---------------------------------------------------------------------------------------------
+# Reciprocal form (spec section 4)
+
+
+def recip_run(rng, name, rc, wit, expect):
+    """Randomness and challenges, prove, self-check, and the vector entry."""
+    s = lambda: rng.randrange(1, L)  # noqa: E731
+    nm2 = rc["n_p"] + rc["n_m"]
+    rnd = {"r_O": [s() for _ in range(6)], "r_L": [s() for _ in range(5)],
+           "r_R": [s() for _ in range(4)], "l_S": [s() for _ in range(rc["n_lin"])],
+           "n_S": [s() for _ in range(nm2)]}
+    chal = wit.pop("chal")
+    gammas = [s() for _ in range(wnla_rounds(7 + rc["n_lin"], nm2)[0])]
+    proof = recip_prove(rc, wit, rnd, chal, gammas)
+    satisfied, verifies = recip_self_check(rc, wit, chal, gammas, proof)
+    assert satisfied == verifies == expect, (name, satisfied, verifies)
+
+    def pt(p):
+        g, h, nn = p.coeffs(7 + rc["n_lin"], nm2)
+        return {"g": hx(g), "h": [hx(x) for x in h], "n": [hx(x) for x in nn]}
+
+    hxs = lambda v: [hx(x) for x in v]  # noqa: E731
+    rows = lambda m: [[[col, hx(x)] for col, x in row] for row in m]  # noqa: E731
+    opt = lambda t: None if t is None else hx(t)  # noqa: E731
+    return {
+        "name": name,
+        **{x: rc[x] for x in ("n_p", "n_m", "n_o", "n_v", "n_lin", "k", "n_l", "f_l", "f_m")},
+        "partition": [list(x) for x in rc["partition"]],
+        "w_n": rows(rc["w_n"]), "a_n": hxs(rc["a_n"]),
+        "w_m": rows(rc["w_m"]), "a_m": hxs(rc["a_m"]),
+        "w_l": rows(rc["w_l"]), "a_l": hxs(rc["a_l"]),
+        "recip": [{"terms": [[col, hx(c), opt(t)] for col, c, t in row["terms"]],
+                   "consts": [[hx(c), opt(t)] for c, t in row["consts"]]} for row in rc["recip"]],
+        "w_D": hxs(wit["w_D"]), "w_L": hxs(wit["w_L"]), "w_R": hxs(wit["w_R"]),
+        "w_O": hxs(wit["w_O"]), "v": [hxs(v) for v in wit["v"]], "s": hxs(wit["s"]),
+        "rand": {x: hxs(rnd[x]) for x in ("r_O", "r_L", "r_R", "l_S", "n_S")},
+        "chal": {x: hx(chal[x]) for x in ("alpha", "rho", "lambda", "beta", "delta", "tau")},
+        "gammas": hxs(gammas),
+        "satisfied": satisfied,
+        "w_P": hxs(proof["w_P"]),
+        "V": [pt(x) for x in proof["V"]],
+        "C_L": pt(proof["C_L"]), "C_R": pt(proof["C_R"]), "C_O": pt(proof["C_O"]),
+        "C_S": pt(proof["C_S"]),
+        "rounds": [{"X": pt(X), "R": pt(R)} for X, R in proof["rounds"]],
+        "l_final": hxs(proof["l_final"]), "n_final": hxs(proof["n_final"]),
+        "verifies": verifies,
+    }
+
+
+def challenges(rng):
+    return {x: rng.randrange(1, L) for x in ("alpha", "rho", "lambda", "beta", "delta", "tau")}
+
+
+def range_case(rng, name, b, n, layout, v, digits=None, mult_delta=None):
+    """Reciprocal range proof (paper 6.4): v = sum_j b^j d_j with the digits as private poles
+    (numerator 1: W_n = 0, a_n = 1) and one reciprocal row
+    sum_j w_P,j - sum_{s<b} m_s/(X + s) = 0, the multiplicities m in w_O: "inline" in n_O
+    (needs b <= n), "shared" in l_L (N_lin = b). digits overrides the decomposition (then
+    m counts the digits < b, the best multiplicities); mult_delta = (s, x) adds x to m_s."""
+    if digits is None:
+        digits = [(v // b**j) % b for j in range(n)]
+        assert v < b**n
+    assert len(digits) == n and sum(d * b**j for j, d in enumerate(digits)) == v
+    m = [sum(d == s for d in digits) for s in range(b)]
+    if mult_delta is not None:
+        m[mult_delta[0]] += mult_delta[1]
+    assert layout in ("inline", "shared") and (layout == "shared" or b <= n)
+    slot = "nO" if layout == "inline" else "lL"
+    rc = {"n_p": n, "n_m": 0, "n_o": b, "n_v": 1, "n_lin": 0 if layout == "inline" else b,
+          "k": 1, "n_l": 1, "f_l": 1, "f_m": 0, "partition": [[slot, s] for s in range(b)],
+          "w_n": [[] for _ in range(n)], "a_n": [1] * n, "w_m": [], "a_m": [],
+          "w_l": [[(j, -b**j % L) for j in range(n)]], "a_l": [0],
+          "recip": [{"terms": [(n + j, 1, None) for j in range(n)]
+                     + [(2 * n + s, L - 1, s) for s in range(b)], "consts": []}]}
+    wit = {"w_D": digits, "w_L": [], "w_R": [], "w_O": m, "v": [[v]], "s": [rng.randrange(1, L)],
+           "chal": challenges(rng)}
+    return rc, wit
+
+
+def mact_case(rng, name, txs, b, n):
+    """Multi-asset balance (paper 6.5) with range proofs of every amount, shared multiplicities.
+    txs = [(amount, type index, o)] (o = 1 for outputs); two random asset types. N_v = 2,
+    v_i = (amount_i, type_i), w_V = (a_0, t_0, a_1, t_1, ...). With f_m = 1, w_V meets the
+    numerator rows in order, so pole 2i is the amount reciprocal a_i/(X + t_i) (w_D,2i = t_i,
+    numerator w_V,2i = a_i), and pole 2i+1, whose numerator row receives t_i, is digit 0 of a_i
+    with W_n row -w_D,2i and a_n = 1 (numerator -t_i + t_i + 1 = 1). Digits j >= 1 are poles
+    2k + i(n-1) + j - 1 with numerator 1. With f_l = 1, linear row 2i is
+    a_i - sum_j b^j d_ij = 0 and row 2i+1 the copy t_i - w_D,2i = 0. Reciprocal rows: the balance
+    sum_i (-1)^o_i w_P,2i = 0 and the range row over all digit poles."""
+    k = len(txs)
+    types = [rng.randrange(1, L) for _ in range(2)]
+    np_ = k * (n + 1)
+
+    def dpole(i, j):
+        return 2 * i + 1 if j == 0 else 2 * k + i * (n - 1) + j - 1
+
+    w_D = [0] * np_
+    w_n = [[] for _ in range(np_)]
+    a_n = [1] * np_
+    w_l, digits_all = [], []
+    for i, (a, ti, _) in enumerate(txs):
+        assert 0 <= a < b**n
+        w_D[2 * i] = types[ti]
+        a_n[2 * i] = 0
+        w_n[2 * i + 1] = [(2 * i, L - 1)]
+        for j in range(n):
+            w_D[dpole(i, j)] = (a // b**j) % b
+            digits_all.append((a // b**j) % b)
+        w_l.append([(dpole(i, j), -b**j % L) for j in range(n)])
+        w_l.append([(2 * i, L - 1)])
+    m = [sum(d == s for d in digits_all) for s in range(b)]
+    P = lambda i: np_ + i  # noqa: E731
+    O = lambda s: 2 * np_ + s  # noqa: E731
+    balance = {"terms": [(P(2 * i), L - 1 if o else 1, None) for i, (_, _, o) in enumerate(txs)],
+               "consts": []}
+    rng_row = {"terms": [(P(dpole(i, j)), 1, None) for i in range(k) for j in range(n)]
+               + [(O(s), L - 1, s) for s in range(b)], "consts": []}
+    rc = {"n_p": np_, "n_m": 0, "n_o": b, "n_v": 2, "n_lin": b, "k": k, "n_l": 2 * k,
+          "f_l": 1, "f_m": 1, "partition": [["lL", s] for s in range(b)],
+          "w_n": w_n, "a_n": a_n, "w_m": [], "a_m": [], "w_l": w_l, "a_l": [0] * (2 * k),
+          "recip": [balance, rng_row]}
+    wit = {"w_D": w_D, "w_L": [], "w_R": [], "w_O": m,
+           "v": [[a, types[ti]] for a, ti, _ in txs], "s": [rng.randrange(1, L) for _ in txs],
+           "chal": challenges(rng)}
+    return rc, wit
+
+
+def generic_case(rng, name, fl, fm, violate=False):
+    """A mixed reciprocal form circuit: N_p = 3 private poles (w_D,0 = w_D,1 a private value p,
+    w_D,2 a public pole t*), N_m = 3 ordinary multiplications, k = 2 inputs with N_v = 2 (with
+    f_m = 1 they meet the three numerators and the first W_m row), w_O over all four slots.
+    Reciprocal rows: reciprocals (one column repeated), public poles with multiplicities in w_L,
+    w_D and w_O, constants with and without poles, pole-free terms on initial columns. Ordinary
+    rows read w_P; w_R is solved from the multiplications and the two l_R elements from the two
+    linear rows that read w_P and w_R, i.e. the prover computes them after alpha, and the
+    circuit itself does not depend on alpha. violate: shift a_n,0 afterwards (the reciprocal
+    rows then fail; the ordinary rows still hold)."""
+    s = lambda: rng.randrange(1, L)  # noqa: E731
+    np_, nm, no, nv, nlin, k = 3, 3, 7, 2, 3, 2
+    nl = 5 if fl else 3
+    nm2 = np_ + nm
+    D = lambda i: i  # noqa: E731
+    Lc = lambda t: np_ + t  # noqa: E731
+    P = lambda i: nm2 + i  # noqa: E731
+    R = lambda t: nm2 + np_ + t  # noqa: E731
+    O = lambda i: 2 * nm2 + i  # noqa: E731
+    # w_O roles: 0 n_O (multiplicity of a public pole), 1 l_O (pole-free term), 2 l_L (copy of
+    # w_D,0, multiplicity), 3 l_R (pivot), 4 n_O, 5 l_R (pivot), 6 l_O
+    kinds = ["nO", "lO", "lL", "lR", "nO", "lR", "lO"]
+    avail = {X: rng.sample(range(nm2 if X == "nO" else nlin), kinds.count(X)) for X in SLOTS}
+    partition = [[X, avail[X].pop()] for X in kinds]
+    init = list(range(nm2)) + [O(i) for i in (0, 1, 2, 4, 6)]
+    p, tstar, t2, t4, t5 = s(), s(), s(), s(), s()
+    w_D = [p, p, tstar]
+    w_L = [s() for _ in range(nm)]
+    w_O = [None, s(), p, None, s(), None, s()]
+    v = [[s() for _ in range(nv)] for _ in range(k)]
+    wv = [x for vi in v for x in vi]
+    c0a, c0b, c1, c2, c3, c4, c5, c6, c7, e1, e2, e3, c9 = (s() for _ in range(13))
+    c0 = (c0a + c0b) % L
+    j, j2 = rng.randrange(nm), rng.randrange(nm)
+    w_O[0] = -c5 * inv(c4) % L
+    c8 = -(c6 * w_O[1] + c7 * w_L[j2]) % L
+    recip = [
+        {"terms": [(P(0), c0a, None), (P(1), c1, None), (Lc(j), c2, tstar), (O(0), c4, t2),
+                   (O(1), c6, None), (P(2), c3, None), (P(0), c0b, None), (Lc(j2), c7, None)],
+         "consts": [(c5, t2), (c8, None)]},
+        {"terms": [(O(2), 1, t4), (P(2), e1, None), (D(0), L - 1, t4), (P(0), e2, None),
+                   (P(1), e2 * c1 * inv(c0) % L, None), (Lc(j), e1 * c2 * inv(c3) % L, tstar),
+                   (D(1), e3, None), (D(0), -e3 % L, None)],
+         "consts": [(c9, t5), (-c9 % L, t5)]},
+    ]
+    w_n = [[(col, s()) for col in sorted(rng.sample(init, 2))] for _ in range(np_)]
+    rc = {"n_p": np_, "n_m": nm, "n_o": no, "n_v": nv, "n_lin": nlin, "k": k, "n_l": nl,
+          "f_l": fl, "f_m": fm, "partition": partition, "w_n": w_n, "a_n": [s(), 0, 0],
+          "recip": recip}
+    # solve a_n,1 and a_n,2: c0 num_0 + c1 num_1 = 0 (pole p), c2 w_L,j + c3 num_2 = 0 (pole t*)
+    wit = {"w_D": w_D, "w_L": w_L, "w_R": [0] * nm, "w_O": [x or 0 for x in w_O], "v": v,
+           "s": [s() for _ in range(k)]}
+    num = recip_numerators(rc, wit)
+    rc["a_n"][1] = (-c0 * num[0] * inv(c1) - num[1]) % L
+    rc["a_n"][2] = (-c2 * w_L[j] * inv(c3) - num[2]) % L
+    if violate:
+        rc["a_n"][0] = (rc["a_n"][0] + s()) % L
+    num = recip_numerators(rc, wit)
+    chal = challenges(rng)
+    w_P = [x * inv(chal["alpha"] + d) % L for x, d in zip(num, w_D)]
+    # ordinary multiplications: W_m reads initial columns, w_P and earlier w_R; solve w_R,t
+    w_m, a_m, w_R = [], [], [0] * nm
+    for t in range(nm):
+        cols = rng.sample(init, 2) + [P(rng.randrange(np_))] + ([R(t - 1)] if t else [])
+        row = [(col, s()) for col in cols]
+        w_m.append(row)
+        a_m.append(s())
+        w = w_D + w_L + w_P + w_R + wit["w_O"]
+        rhs = (sum(x * w[col] for col, x in row) + fm * (wv[np_ + t] if np_ + t < len(wv) else 0)
+               + a_m[t]) % L
+        w_R[t] = rhs * inv(w_L[t]) % L
+    # ordinary linear rows: rows 1 and nl - 1 read w_P, w_R and an l_R pivot (solved),
+    # the others initial columns only (a_l solved)
+    w_l, a_l = [], []
+    for r in range(nl):
+        row = [(col, s()) for col in rng.sample(init, 2)]
+        pivot = {1: 3, nl - 1: 5}.get(r)
+        if pivot is not None:
+            row += [(P(rng.randrange(np_)), s()), (R(rng.randrange(nm)), s()), (O(pivot), s())]
+        rng.shuffle(row)
+        w = w_D + w_L + w_P + w_R + wit["w_O"]
+        rest = (sum(x * w[col] for col, x in row) + fl * (wv[r] if r < len(wv) else 0)) % L
+        if pivot is None:
+            a_l.append(-rest % L)
+        else:
+            a_l.append(s())
+            cp = dict((col, x) for col, x in row)[O(pivot)]
+            wit["w_O"][pivot] = -(rest + a_l[r]) * inv(cp) % L
+        w_l.append(row)
+    rc.update({"w_m": w_m, "a_m": a_m, "w_l": w_l, "a_l": a_l})
+    wit["w_R"] = w_R
+    wit["chal"] = chal
+    return rc, wit
+
+
+def recip_edge_checks(rng):
+    """alpha = -w_D,i makes the prover fail; alpha = -t for a public pole t makes the circuit
+    uncompilable (the verifier rejects). Not vectors: such challenges have negligible
+    probability and cannot be produced through the transcript."""
+    rc, wit = range_case(rng, "edge", 4, 4, "shared", 27)
+    wit.pop("chal")
+    rnd = {"r_O": [1] * 6, "r_L": [1] * 5, "r_R": [1] * 4, "l_S": [1] * 4, "n_S": [1] * 4}
+    chal = {x: 5 for x in ("rho", "lambda", "beta", "delta", "tau")}
+    chal["alpha"] = -wit["w_D"][1] % L  # digit 2, also the public pole 2
+    try:
+        recip_prove(rc, wit, rnd, chal, [1] * wnla_rounds(11, 4)[0])
+        raise AssertionError("prover accepted alpha = -w_D,i")
+    except ReciprocalError:
+        pass
+    try:
+        recip_compile(rc, chal["alpha"])
+        raise AssertionError("compiled with alpha = -t")
+    except ReciprocalError:
+        pass
+
+
+def reciprocal_cases(rng):
+    cases = []
+    # range proofs: bases 2, 4, 16; inline (n_O) and shared (l_L); values incl. 0 and b^n - 1
+    for b, n in ((2, 8), (4, 8), (16, 16)):
+        top = b**n - 1
+        for layout, vals in (("inline", (0, rng.randrange(top))), ("shared", (top, rng.randrange(top)))):
+            for v in vals:
+                name = f"range-b{b}-n{n}-{layout}-v{'max' if v == top else v}"
+                cases.append(recip_run(rng, name, *range_case(rng, name, b, n, layout, v), True))
+    # multi-asset balance with range proofs of the amounts (base 4, 3 digits)
+    txs = [(40, 0, 0), (25, 1, 0), (10, 0, 0), (50, 0, 1), (25, 1, 1)]
+    cases.append(recip_run(rng, "mact-balanced", *mact_case(rng, "mact-balanced", txs, 4, 3), True))
+    # generic mixed circuits
+    for fl, fm in ((1, 1), (1, 0), (0, 1)):
+        name = f"generic-f{fl}{fm}"
+        cases.append(recip_run(rng, name, *generic_case(rng, name, fl, fm), True))
+    # unsatisfied
+    name = "bad-range-digit-eq-base"  # v = 4^4 with digits (4, 3, 3, 3), best multiplicities
+    cases.append(recip_run(rng, name, *range_case(rng, name, 4, 4, "inline", 256, digits=[4, 3, 3, 3]),
+                           False))
+    name = "bad-range-wrong-multiplicity"
+    cases.append(recip_run(rng, name, *range_case(rng, name, 2, 8, "shared", 77, mult_delta=(0, 1)),
+                           False))
+    txs = [(40, 0, 0), (25, 1, 0), (10, 0, 0), (51, 0, 1), (25, 1, 1)]
+    cases.append(recip_run(rng, "bad-mact-unbalanced",
+                           *mact_case(rng, "bad-mact-unbalanced", txs, 4, 3), False))
+    name = "bad-generic-numerator"
+    cases.append(recip_run(rng, name, *generic_case(rng, name, 1, 1, violate=True), False))
+    return cases
+
+
 def main():
     rng = random.Random(20261019)
     # (|l|, |n|): odd and unequal lengths, a frozen norm vector (|n| = 1, 2, 3 with long l),
@@ -192,6 +467,14 @@ def main():
         json.dump({"cases": cases}, f, indent=1)
         f.write("\n")
     print(f"circuit.json: {len(cases)} cases")
+
+    rng = random.Random(20261021)
+    recip_edge_checks(rng)
+    cases = reciprocal_cases(rng)
+    with open(os.path.join(OUT, "reciprocal.json"), "w") as f:
+        json.dump({"cases": cases}, f, indent=1)
+        f.write("\n")
+    print(f"reciprocal.json: {len(cases)} cases")
 
 
 if __name__ == "__main__":

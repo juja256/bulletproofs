@@ -248,7 +248,8 @@ example a 64-bit proof in base 256 is 704 B.
 
 - The R1CS front end on BP++ (spec §6): `prover.set_backend(Backend::Bppp)` and
   `verifier.set_backend(Backend::Bppp)`; `prove`/`verify` and gadgets are unchanged. The
-  constraint system is translated into an arithmetic circuit; randomized constraints are not
+  constraint system is lowered to a reciprocal form circuit (spec §6.1, the same lowering and one
+  proof encoding with or without `CircuitBuilder` operations); randomized constraints are not
   supported on BP++ (they return a `GadgetError`).
 
 - `r1cs::CircuitBuilder` (spec §7): free witnesses, products, public tables with lookups and

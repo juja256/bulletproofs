@@ -15,7 +15,7 @@ mod sparse;
 pub(crate) mod testutil;
 #[cfg(test)]
 mod tuple_tests;
-mod transcript;
+pub(crate) mod transcript;
 pub mod wnla;
 
 pub use self::batch::BatchVerifier;

@@ -39,63 +39,38 @@ pub struct R1CSProof(pub(super) ProofKind);
 pub(super) enum ProofKind {
     /// A Bulletproofs proof; its encoding is unchanged from upstream.
     Bp(BpProof),
-    /// A Bulletproofs++ proof of the translated circuit (spec §6).
+    /// A Bulletproofs++ proof of the lowered reciprocal form circuit (spec §6, §7.6), for every
+    /// constraint system.
     #[cfg(feature = "bppp")]
     Bppp(BpppProof),
-    /// A Bulletproofs++ proof of a circuit built with `CircuitBuilder` (spec §7.6).
-    #[cfg(feature = "bppp")]
-    Builder(BuilderProof),
 }
 
-/// A Bulletproofs++ proof of a builder circuit: the dimensions of the reciprocal form circuit
-/// and its proof.
+/// A Bulletproofs++ proof: the dimensions of the lowered reciprocal form circuit and its proof.
 #[cfg(feature = "bppp")]
 #[derive(Clone, Debug)]
-pub(super) struct BuilderProof {
-    /// `N_p + N_m`.
+pub(super) struct BpppProof {
+    /// `N'_m = N_p + N_m`.
     pub(super) n_mm: usize,
-    /// Length of the linear part.
+    /// Length of the linear part, `N_lin`.
     pub(super) n_lin: usize,
     pub(super) proof: crate::bppp::CircuitProof,
 }
 
-/// A Bulletproofs++ proof of an R1CS: the dimensions of the translated circuit and the circuit
-/// proof.
+/// Version tag of a BP++ proof (BP proofs use 0 and 1; 3 was the builder encoding before
+/// spec §6 had one encoding).
 #[cfg(feature = "bppp")]
-#[derive(Clone, Debug)]
-pub(super) struct BpppProof {
-    /// Multiplications of the translated circuit, `max(1, number of multipliers)`.
-    pub(super) n_m: usize,
-    /// Number of committed inputs.
-    pub(super) k: usize,
-    pub(super) proof: crate::bppp::CircuitProof,
-}
-
-/// Version tag of a BP++ proof (BP proofs use 0 and 1).
-#[cfg(feature = "bppp")]
-const BPPP_V1: u8 = 2;
-
-/// Version tag of a BP++ proof of a builder circuit.
-#[cfg(feature = "bppp")]
-const BPPP_BUILDER_V1: u8 = 3;
+const BPPP_V2: u8 = 2;
 
 impl R1CSProof {
     /// Serializes the proof. A BP proof keeps the upstream encoding (see the BP layout below);
-    /// a BP++ proof is the byte 2, `n_m` and `k` as `u64` little-endian, then the circuit proof.
+    /// a BP++ proof is the byte 2, `N'_m` and `N_lin` as `u64` little-endian, then the proof
+    /// (spec §6.2).
     pub fn to_bytes(&self) -> Vec<u8> {
         match &self.0 {
             ProofKind::Bp(p) => p.to_bytes(),
             #[cfg(feature = "bppp")]
             ProofKind::Bppp(p) => {
-                let mut out = alloc::vec![BPPP_V1];
-                out.extend_from_slice(&(p.n_m as u64).to_le_bytes());
-                out.extend_from_slice(&(p.k as u64).to_le_bytes());
-                out.extend(p.proof.to_bytes());
-                out
-            }
-            #[cfg(feature = "bppp")]
-            ProofKind::Builder(p) => {
-                let mut out = alloc::vec![BPPP_BUILDER_V1];
+                let mut out = alloc::vec![BPPP_V2];
                 out.extend_from_slice(&(p.n_mm as u64).to_le_bytes());
                 out.extend_from_slice(&(p.n_lin as u64).to_le_bytes());
                 out.extend(p.proof.to_bytes());
@@ -109,7 +84,7 @@ impl R1CSProof {
         match &self.0 {
             ProofKind::Bp(p) => p.serialized_size(),
             #[cfg(feature = "bppp")]
-            ProofKind::Bppp(_) | ProofKind::Builder(_) => self.to_bytes().len(),
+            ProofKind::Bppp(_) => self.to_bytes().len(),
         }
     }
 
@@ -118,7 +93,7 @@ impl R1CSProof {
         #[cfg(feature = "bppp")]
         {
             let tag = slice.first().copied();
-            if tag == Some(BPPP_V1) || tag == Some(BPPP_BUILDER_V1) {
+            if tag == Some(BPPP_V2) {
                 if slice.len() < 17 {
                     return Err(R1CSError::FormatError);
                 }
@@ -126,11 +101,7 @@ impl R1CSProof {
                 let u = |b: &[u8]| usize::try_from(u64::from_le_bytes(b.try_into().unwrap())).map_err(|_| R1CSError::FormatError);
                 let (a, b) = (u(&slice[1..9])?, u(&slice[9..17])?);
                 let proof = super::backend::proof_from_bytes_shape(&slice[17..], a, b)?;
-                return Ok(R1CSProof(if tag == Some(BPPP_V1) {
-                    ProofKind::Bppp(BpppProof { n_m: a, k: b, proof })
-                } else {
-                    ProofKind::Builder(BuilderProof { n_mm: a, n_lin: b, proof })
-                }));
+                return Ok(R1CSProof(ProofKind::Bppp(BpppProof { n_mm: a, n_lin: b, proof })));
             }
         }
         BpProof::from_bytes(slice).map(|p| R1CSProof(ProofKind::Bp(p)))

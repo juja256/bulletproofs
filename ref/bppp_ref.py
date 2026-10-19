@@ -1808,9 +1808,12 @@ def bld_costs(b, fin):
             "bppp_gates": n_p + n_r + n_prod}
 
 
-def bld_lower(b, fin):
-    """Spec 7.6: the reciprocal form circuit rc (format of recip_prove) and its witness
-    (w_D, w_L, w_R, w_O, v, s; prover values from fin["wit"]). Poles of arguments with m = 1
+def bld_lower(b, fin, prover_constants=False):
+    """Spec 7.6 (also for a plain R1CS, spec 6.1): the reciprocal form circuit rc (format of
+    recip_prove) and its witness (w_D, w_L, w_R, w_O, v, s; prover values from fin["wit"]).
+    prover_constants: the prover's circuit of spec 6.2, whose constraint store drops constants
+    and recomputes the affine term of each R1CS constraint as -sum c x over its witness (equal
+    to the verifier's iff the constraint holds). Poles of arguments with m = 1
     are free poles with the pole row of linear-row step 4; poles of arguments with m >= 2 are
     tuple poles (spec 4.1), public poles are the rows as pole polynomials of length m."""
     args = fin["args"]
@@ -1881,6 +1884,8 @@ def bld_lower(b, fin):
         a_l.append(0)
     for lc in b.r1cs:                                    # 2. R1CS constraints
         t, c = low(lc)
+        if prover_constants:
+            c = -b.eval([(x, cc) for x, cc in lc if x != ONE], W) % L
         w_l.append(t)
         a_l.append(c)
     for g, (l, r, _) in enumerate(b.products):           # 3. product inputs
@@ -1925,6 +1930,52 @@ def bld_lower(b, fin):
         wit = {"w_D": w_D, "w_L": w_L, "w_R": w_R, "w_O": w_O, "v": [[x] for x in b.v],
                "s": list(b.s)}
     return rc, wit
+
+
+def r1cs_plain_circuit(b):
+    """Spec 6.1, built directly from the R1CS record (independent of bld_lower): the arithmetic
+    circuit (spec 3 format) of a constraint system without builder operations, and its witness.
+    N_m = max(1, n), N_O = N_m + k, N_v = 1, N_lin = k, f_l = [k > 0], f_m = 0; w = w_L || w_R ||
+    w_O with w_O = a_O || c (a_O,i in (n_O, i), c_j in (l_O, j)); row i of W_m selects w_O,i;
+    linear rows -c_j, then the constraints (constants in a_l)."""
+    assert not (b.wit or b.products or b.tables or b.lookups or b.args)
+    n, k = b.n, b.k
+    nm = max(1, n)
+    col = {"L": lambda i: i, "R": lambda i: nm + i, "O": lambda i: 2 * nm + i,
+           "V": lambda j: 3 * nm + j}
+    w_l = [[(3 * nm + j, L - 1)] for j in range(k)]
+    a_l = [0] * k
+    for lc in b.r1cs:
+        for x, _ in lc:
+            if x != ONE and x[1] >= (k if x[0] == "V" else n):
+                raise BuilderError("unallocated variable")
+        w_l.append([(col[x[0]](x[1]), c % L) for x, c in lc if x != ONE])
+        a_l.append(sum(c for x, c in lc if x == ONE) % L)
+    c = {"n_m": nm, "n_o": nm + k, "n_v": 1, "n_lin": k, "k": k, "n_l": len(w_l),
+         "f_l": int(k > 0), "f_m": 0,
+         "partition": [["nO", i] for i in range(nm)] + [["lO", j] for j in range(k)],
+         "w_m": [[(2 * nm + i, 1)] for i in range(nm)], "a_m": [0] * nm, "w_l": w_l, "a_l": a_l}
+    pad = lambda v: list(v) + [0] * (nm - len(v))  # noqa: E731
+    wit = {"w_L": pad(b.aL), "w_R": pad(b.aR), "w_O": pad(b.aO) + list(b.v),
+           "v": [[x] for x in b.v], "s": list(b.s)}
+    return c, wit
+
+
+def r1cs_plain_self_check(b, rng):
+    """Spec 6.1 = 7.6 on a plain R1CS: the 7.6 lowering has N_p = 0, no reciprocal rows, no
+    tuple poles, does not use eta, and compiles (for any alpha) to exactly the circuit and
+    witness of r1cs_plain_circuit; satisfaction agrees."""
+    fin = bld_finalize(b)
+    rc, wit = bld_lower(b, fin)
+    assert rc["n_p"] == 0 and rc["recip"] == [] and rc["tuples"] == [] and not recip_uses_eta(rc)
+    c6, wit6 = r1cs_plain_circuit(b)
+    alpha = rng.randrange(1, L)
+    assert recip_compile(rc, alpha) == c6
+    assert recip_compiled_witness(wit, []) == wit6
+    sat = recip_satisfied(rc, wit, alpha)
+    lam, rho = rng.randrange(1, L), rng.randrange(1, L)
+    assert circuit_error(c6, wit6, lam, rho * rho % L)[1] == (sat[0] and sat[1]) == bld_semantic(b, fin)
+    return c6
 
 
 def bld_semantic(b, fin):
@@ -2027,6 +2078,37 @@ def bld_self_check():
     assert rc["recip"][0]["terms"][2] == (ys[3], 1, [3, 5])
     assert wit["w_O"][first:] == [4, 3, 4, L - 4, 4]
     assert bld_semantic(b, fin) == bld_check_lowered(b, fin, rng)
+    r1cs_random_plain_check(rng)
+
+
+def r1cs_random_plain_check(rng, count=150):
+    """r1cs_plain_self_check on random plain programs (commit, multiply, allocate,
+    allocate_multiplier, constrain; constraints satisfied or not, n = 0 and k = 0 included)."""
+    for _ in range(count):
+        b = Builder()
+        for _ in range(rng.randrange(0, 3)):
+            b.commit(rng.randrange(L), rng.randrange(1, L))
+        for _ in range(rng.randrange(0, 6)):
+            vs = [("V", j) for j in range(b.k)] + [(t, i) for i in range(b.n) for t in "LRO"]
+
+            def rlc():
+                lc = ([(rng.choice(vs), rng.randrange(L)) for _ in range(rng.randrange(1, 3))]
+                      if vs else [])
+                return lc + [(ONE, rng.randrange(L))]
+
+            op = rng.randrange(4)
+            if op == 0:
+                b.multiply(rlc(), rlc())
+            elif op == 1:
+                b.allocate(rng.randrange(L))
+            elif op == 2:
+                b.allocate_multiplier(rng.randrange(L), rng.randrange(L))
+            else:
+                lc = rlc()
+                if rng.random() < 0.7:
+                    lc.append((ONE, -b.eval(lc) % L))
+                b.constrain(lc)
+        r1cs_plain_self_check(b, rng)
 
 
 def bld_agreement_check(b, rng):

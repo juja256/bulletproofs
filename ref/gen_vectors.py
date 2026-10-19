@@ -18,8 +18,9 @@ from bppp_ref import (L, ONE, SLOTS, U64, Builder, BuilderError,  # noqa: E402
                       range_circuit, range_circuit_self_check, range_decompose, range_layout,
                       range_layout_self_check, range_witness, recip_check_shape, recip_compile,
                       recip_digest, recip_eta_witness, recip_numerators, recip_prove,
-                      recip_satisfied, recip_self_check, recip_tuples, recip_uses_eta,
-                      recip_v2_self_check, wnla_commit, wnla_prove, wnla_rounds, wnla_verify)
+                      recip_satisfied, recip_self_check, recip_tuples, recip_uses_eta, recip_verify,
+                      recip_v2_self_check, r1cs_plain_self_check, wnla_commit, wnla_prove,
+                      wnla_rounds, wnla_verify)
 
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tests", "vectors", "bppp")
 
@@ -221,11 +222,14 @@ def tuples_json(rc):
             for i, comps in recip_tuples(rc)]
 
 
-def recip_run(rng, name, rc, wit, expect, extra=False):
+def recip_run(rng, name, rc, wit, expect, extra=False, verifier_rc=None):
     """Randomness and challenges, prove, self-check, and the vector entry. extra: also
     "uses_eta" and "digest" (spec 4.4), and for a circuit that uses eta (protocol v2) "tuples",
     "chal"."eta", "w_D_eta" and every public pole as a list (its pole polynomial); without
-    extra (range.json, mact.json) the entry is the v1 entry of phase 5."""
+    extra (range.json, mact.json) the entry is the v1 entry of phase 5. verifier_rc: the
+    verifier's circuit when the prover proves another one (spec 6.2: the prover recomputes the
+    R1CS constants from its witness); the entry then has the verifier's circuit, digest and
+    verdict, plus "prover_a_l" and "prover_digest" (the circuit the prover proved)."""
     s = lambda: rng.randrange(1, L)  # noqa: E731
     nm2 = rc["n_p"] + rc["n_m"]
     rnd = {"r_O": [s() for _ in range(6)], "r_L": [s() for _ in range(5)],
@@ -235,6 +239,16 @@ def recip_run(rng, name, rc, wit, expect, extra=False):
     gammas = [s() for _ in range(wnla_rounds(7 + rc["n_lin"], nm2)[0])]
     proof = recip_prove(rc, wit, rnd, chal, gammas)
     satisfied, verifies = recip_self_check(rc, wit, chal, gammas, proof)
+    prover_rc = rc
+    if verifier_rc is not None:
+        assert satisfied and verifies, name  # the prover's own circuit holds
+        rc = verifier_rc
+        recip_ok, ord_ok = recip_satisfied(rc, wit, chal["alpha"], chal.get("eta"))
+        satisfied = recip_ok and ord_ok
+        args = (rc, proof["V"], proof["C_L"], proof["C_R"], proof["C_O"], proof["C_S"], chal,
+                proof["rounds"], proof["l_final"], proof["n_final"], gammas)
+        verifies = recip_verify(*args)
+        assert recip_verify(*args, single=True) == verifies
     assert satisfied == verifies == expect, (name, satisfied, verifies)
 
     def pt(p):
@@ -250,6 +264,10 @@ def recip_run(rng, name, rc, wit, expect, extra=False):
             head["tuples"] = tuples_json(rc)
         head["uses_eta"] = v2
         head["digest"] = recip_digest(rc).hex()
+        if prover_rc is not rc:
+            assert recip_uses_eta(prover_rc) == v2
+            head["prover_a_l"] = hxs(prover_rc["a_l"])
+            head["prover_digest"] = recip_digest(prover_rc).hex()
     head["w_D"] = hxs(wit["w_D"])
     if v2:
         head["w_D_eta"] = hxs(proof["w_D_eta"])
@@ -1073,6 +1091,13 @@ def builder_case(rng, name, P, expect=True, uses_eta=None):
     assert expect != "prover_error", name
     rc, wit = bld_lower(b, fin)
     assert rc == rc_v
+    # spec 6.2: the prover's circuit (R1CS constants recomputed from its witness) is the
+    # verifier's iff every R1CS constraint holds
+    rc_p, _ = bld_lower(b, fin, prover_constants=True)
+    r1cs_ok = all(b.eval(lc, fin["wit"]) == 0 for lc in b.r1cs)
+    assert (rc_p == rc_v) == r1cs_ok, name
+    if not b.builder_mode:  # a plain R1CS: spec 6.1 built directly
+        r1cs_plain_self_check(b, random.Random(name + "/6.1"))
     v2 = recip_uses_eta(rc)
     if uses_eta is None:
         assert v2 == bld_uses_eta(fin), name
@@ -1087,7 +1112,8 @@ def builder_case(rng, name, P, expect=True, uses_eta=None):
     assert (recip_ok and ord_ok) == sem, (name, recip_ok, ord_ok)
     bld_agreement_check(b, random.Random(name))
     wit["chal"] = challenges(rng, eta=v2)
-    entry = recip_run(rng, name, rc, wit, expect, extra=True)
+    entry = recip_run(rng, name, rc_p, wit, expect, extra=True,
+                      verifier_rc=None if r1cs_ok else rc_v)
     if v2:
         assert recip_v2_self_check(rc, wit, random.Random(name + "/v2")) == sem
     del entry["name"]
@@ -1452,6 +1478,54 @@ def builder_cases(rng):
         P.reciprocal(1, [(lc(1), [lc(X)])], [(lc(L - 1), [1])])
         P.fail("reciprocal", 0, [])
     err("err-reciprocal-zero-columns", e_recip_zero)
+
+    # -- plain R1CS programs, no builder operation (spec 6.1, option B: lowered by 7.6 to the
+    # circuit of 6.1, N_p = 0, no reciprocal rows; checked against 6.1 built directly)
+    P = Prog()
+    av, bv, xv = s(), s(), 11
+    V0, V1, V2 = P.commit(av, s()), P.commit(bv, s()), P.commit(xv, s())
+    L0, R0, O0 = P.multiply(lc(V0), lc(V1, 3))
+    P.constrain(lc(O0, -(av * (bv + 3)) % L))
+    bits = []
+    for i in range(4):
+        bi = (xv >> i) & 1
+        Lb, Rb, Ob = P.allocate_multiplier(bi, 1 - bi)
+        P.constrain(lc(Ob))
+        P.constrain(lc(Lb, Rb, L - 1))
+        bits.append(Lb)
+    P.constrain(lc(*[(bits[i], 2**i) for i in range(4)], (V2, L - 1)))
+    La = P.allocate(7)  # a lone allocate: pending, right input and output 0
+    P.constrain(lc(La, L - 7))
+    P.constrain(lc(("R", La[1]), ("O", La[1])))
+    add("plain-r1cs-mul-and-bits", P)
+
+    P = Prog()  # n = 0: one zero padding gate
+    av, bv = s(), s()
+    V0, V1, V2 = P.commit(av, s()), P.commit(bv, s()), P.commit(av + bv, s())
+    P.constrain(lc(V0, V1, (V2, L - 1)))
+    P.constrain(lc((V0, 2), (V1, 0), -2 * av % L))
+    add("plain-r1cs-no-multipliers", P)
+
+    P = Prog()  # k = 0: f_l = 0, N_lin = 0
+    L0, R0, O0 = P.multiply(lc(3), lc(5))
+    P.constrain(lc(O0, L - 15))
+    xv, yv = s(), s()
+    L1, R1, O1 = P.allocate_multiplier(xv, yv)
+    P.constrain(lc(O1, (L1, -yv % L)))
+    x2, y2 = s(), s()
+    L2 = P.allocate(x2)
+    R2 = P.allocate(y2)  # fills multiplier 2
+    P.constrain(lc(("O", 2), -(x2 * y2) % L))
+    add("plain-r1cs-no-inputs", P)
+
+    # a violated linear constraint: the prover recomputes the constants (spec 6.2) and proves
+    # its own circuit (prover_a_l, prover_digest); the vector's circuit is the verifier's
+    P = Prog()
+    V0, V1 = P.commit(5, s()), P.commit(6, s())
+    L0, R0, O0 = P.multiply(lc(V0), lc(V1))
+    P.constrain(lc(O0, L - 31))  # 5 * 6 = 30
+    P.constrain(lc(V0, (V1, L - 1), 1))
+    add("bad-plain-r1cs-constraint", P, False)
     return cases
 
 

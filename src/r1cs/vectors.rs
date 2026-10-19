@@ -69,7 +69,7 @@ fn run<CS: CircuitBuilder>(
                 "witness" => {
                     cs.witness(val(op, "v"))?;
                 }
-                "product" => cs.product(lc(&op["l"]), lc(&op["r"]), lc(&op["out"]))?,
+                "product" => cs.constrain_product(lc(&op["l"]), lc(&op["r"]), lc(&op["out"]))?,
                 "table" => {
                     let rows: Vec<Vec<u64>> = op["rows"].as_array().unwrap().iter().map(ints).collect();
                     cs.table(rows)?;
@@ -80,14 +80,13 @@ fn run<CS: CircuitBuilder>(
                     cs.lookup_value(TableId(op["table"].as_u64().unwrap() as usize), v)?;
                 }
                 "reciprocal" => {
-                    let mut r = cs.reciprocal(op["m"].as_u64().unwrap() as usize)?;
+                    let r = cs.reciprocal(op["m"].as_u64().unwrap() as usize)?;
                     for t in op["terms"].as_array().unwrap() {
-                        r.add_weighted(lc(&t["num"]), lcs(&t["tuple"]));
+                        r.add_weighted(cs, lc(&t["num"]), &lcs(&t["tuple"]))?;
                     }
                     for t in op["public"].as_array().unwrap() {
-                        r.add_public(lc(&t["coeff"]), ints(&t["row"]));
+                        r.add_public(cs, lc(&t["coeff"]), &ints(&t["row"]))?;
                     }
-                    cs.finish_reciprocal(r)?;
                 }
                 x => panic!("op {}", x),
             }

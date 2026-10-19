@@ -109,11 +109,10 @@ fn r1cs_proof(builder: bool) -> Vec<u8> {
         }
         p.constrain(sum - x);
         let w = p.witness(Some(Scalar::from(7u64))).unwrap();
-        p.product(w.into(), y.into(), Scalar::from(21u64).into()).unwrap();
-        let mut r = p.reciprocal(1).unwrap();
-        r.add_weighted(x.into(), vec![Variable::Committed(1).into()]);
-        r.add_public(LinearCombination::from(-Scalar::from(0xbeefu64)), vec![3]);
-        p.finish_reciprocal(r).unwrap();
+        p.constrain_product(w.into(), y.into(), Scalar::from(21u64).into()).unwrap();
+        let r = p.reciprocal(1).unwrap();
+        r.add_weighted(&mut p, x.into(), &[Variable::Committed(1).into()]).unwrap();
+        r.add_public(&mut p, LinearCombination::from(-Scalar::from(0xbeefu64)), &[3]).unwrap();
     }
     p.prove_with_rng(&bp, &mut rng(4)).unwrap().to_bytes()
 }

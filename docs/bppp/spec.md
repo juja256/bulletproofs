@@ -1,8 +1,7 @@
 # Bulletproofs++ in this crate: specification
 
-Status: §1–2 (weighted norm linear argument) and §3 (arithmetic circuits) pinned. §4
-(reciprocal form), §5 (range proofs, MACT) and §6 (R1CS translation) are written at the start
-of the phase that implements them.
+Status: §1–6 pinned: the weighted norm linear argument, arithmetic circuits, reciprocal form
+circuits, range proofs and multi-asset transactions, and the R1CS front end on BP++.
 
 Source: Eagen, Kanjalkar, Ruffing, Nick, *Bulletproofs++*, ePrint 2022/510 (version
 2023-07-17). Where the paper is ambiguous this document decides; the reference
@@ -467,3 +466,44 @@ constraints; we copy the amounts into $c_i$ with linear rows instead ($f_m = 0$)
 every numerator on an initial column.
 
 The transcript is `domain_sep("bppp-mact v1")` followed by §4.5.
+
+## 6. The R1CS front end on BP++ (paper §5.1)
+
+`Prover::set_backend(Backend::Bppp)` and `Verifier::set_backend(Backend::Bppp)` select BP++;
+`prove(&bp_gens)` and `verify(&proof, &pc_gens, &bp_gens)` keep their signatures, and gadgets
+written against `ConstraintSystem` run unchanged.
+
+### 6.1 Translation
+
+An R1CS with $n$ multipliers $(a_L, a_R, a_O)$, $k$ committed inputs $V_j = v_j B + s_j \tilde B$ and
+linear constraints $\sum c\, x + c_0 = 0$ becomes the arithmetic circuit (§3) with $N_m = \max(1, n)$
+(missing gates are zero), $N_O = N_m + k$, $N_v = 1$, $N_{lin} = k$, $f_l = [k > 0]$, $f_m = 0$:
+
+- $w_L = a_L$, $w_R = a_R$, $w_O = a_O \| c$ with $c_j$ a copy of $v_j$; partition: $a_{O,i}$ in
+  $(n_O, i)$, $c_j$ in $(l_O, j)$;
+- multiplicative rows: row $i$ selects $w_{O,i}$ ($w_L \circ w_R = a_O$), $a_m = 0$;
+- linear rows: first, for $j < k$, $-c_j$ (so $v_j - c_j = 0$ through $f_l$); then each R1CS
+  constraint in order, with `MultiplierLeft(i)`, `MultiplierRight(i)`, `MultiplierOutput(i)`,
+  `Committed(j)` mapped to the columns of $w_{L,i}$, $w_{R,i}$, $w_{O,i}$, $c_j$, and the constant
+  in $a_l$.
+
+The copies are the price of the R1CS interface (paper §5.1: inputs used in several constraints
+are copied into $w_O$); the native circuit API avoids them. Generators: §3.2 with
+$N_{lin} = k$, $N_m$, from the same `PedersenGens`/`BulletproofGens` as the BP backend, so the
+input commitments are the same in both backends.
+
+### 6.2 Protocol and encoding
+
+The prover absorbs `domain_sep("bppp-r1cs v1")` after the transcript of the constraint system
+(the BP prover's domain separator and the `V` absorbed by `commit`) and runs §3 (`prove`, with
+the circuit digest). The prover's randomness is drawn from a transcript RNG rekeyed with the
+input blindings and the caller's RNG.
+
+Randomized constraints (`specify_randomized_constraints`) are not supported: both prover and
+verifier return a `GadgetError`. A challenge between the commitments would have to come after
+$C_L, C_O$ and before $C_R$ (the reciprocal form's slot), where variables on the right wire are
+not yet bound.
+
+Encoding: the byte 2 (BP proofs start with 0 or 1), $N_m$ and $k$ as `u64` little-endian, then
+the circuit proof (§3.10). The verifier rejects a proof whose dimensions differ from its own
+constraint system, and a proof of the other backend.

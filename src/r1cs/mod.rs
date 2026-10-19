@@ -3,6 +3,7 @@
 #[cfg_attr(feature = "docs", doc(include = "../../docs/cs-proof.md"))]
 mod notes {}
 
+mod backend;
 mod compact;
 mod constraint_system;
 mod linear_combination;
@@ -11,6 +12,7 @@ mod proof;
 mod prover;
 mod verifier;
 
+pub use self::backend::Backend;
 pub use self::constraint_system::{
     ConstraintSystem, RandomizableConstraintSystem, RandomizedConstraintSystem,
 };

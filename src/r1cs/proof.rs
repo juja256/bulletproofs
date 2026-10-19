@@ -32,8 +32,83 @@ const TWO_PHASE_COMMITMENTS: u8 = 1;
 /// [`VerifierCS::verify`](::r1cs::VerifierCS::verify) to verify the
 /// proof.
 #[derive(Clone, Debug)]
+pub struct R1CSProof(pub(super) ProofKind);
+
+/// The backend-specific content of an [`R1CSProof`].
+#[derive(Clone, Debug)]
+pub(super) enum ProofKind {
+    /// A Bulletproofs proof; its encoding is unchanged from upstream.
+    Bp(BpProof),
+    /// A Bulletproofs++ proof of the translated circuit (spec §6).
+    #[cfg(feature = "bppp")]
+    Bppp(BpppProof),
+}
+
+/// A Bulletproofs++ proof of an R1CS: the dimensions of the translated circuit and the circuit
+/// proof.
+#[cfg(feature = "bppp")]
+#[derive(Clone, Debug)]
+pub(super) struct BpppProof {
+    /// Multiplications of the translated circuit, `max(1, number of multipliers)`.
+    pub(super) n_m: usize,
+    /// Number of committed inputs.
+    pub(super) k: usize,
+    pub(super) proof: crate::bppp::CircuitProof,
+}
+
+/// Version tag of a BP++ proof (BP proofs use 0 and 1).
+#[cfg(feature = "bppp")]
+const BPPP_V1: u8 = 2;
+
+impl R1CSProof {
+    /// Serializes the proof. A BP proof keeps the upstream encoding (see the BP layout below);
+    /// a BP++ proof is the byte 2, `n_m` and `k` as `u64` little-endian, then the circuit proof.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        match &self.0 {
+            ProofKind::Bp(p) => p.to_bytes(),
+            #[cfg(feature = "bppp")]
+            ProofKind::Bppp(p) => {
+                let mut out = alloc::vec![BPPP_V1];
+                out.extend_from_slice(&(p.n_m as u64).to_le_bytes());
+                out.extend_from_slice(&(p.k as u64).to_le_bytes());
+                out.extend(p.proof.to_bytes());
+                out
+            }
+        }
+    }
+
+    /// Returns the size in bytes required to serialize the proof.
+    pub fn serialized_size(&self) -> usize {
+        match &self.0 {
+            ProofKind::Bp(p) => p.serialized_size(),
+            #[cfg(feature = "bppp")]
+            ProofKind::Bppp(_) => self.to_bytes().len(),
+        }
+    }
+
+    /// Deserializes a proof of either backend.
+    pub fn from_bytes(slice: &[u8]) -> Result<R1CSProof, R1CSError> {
+        #[cfg(feature = "bppp")]
+        {
+            if slice.first() == Some(&BPPP_V1) {
+                if slice.len() < 17 {
+                    return Err(R1CSError::FormatError);
+                }
+                use core::convert::{TryFrom, TryInto};
+                let u = |b: &[u8]| usize::try_from(u64::from_le_bytes(b.try_into().unwrap())).map_err(|_| R1CSError::FormatError);
+                let (n_m, k) = (u(&slice[1..9])?, u(&slice[9..17])?);
+                let proof = super::backend::proof_from_bytes(&slice[17..], n_m, k)?;
+                return Ok(R1CSProof(ProofKind::Bppp(BpppProof { n_m, k, proof })));
+            }
+        }
+        BpProof::from_bytes(slice).map(|p| R1CSProof(ProofKind::Bp(p)))
+    }
+}
+
+/// The Bulletproofs content of an [`R1CSProof`] (upstream encoding).
+#[derive(Clone, Debug)]
 #[allow(non_snake_case)]
-pub struct R1CSProof {
+pub(super) struct BpProof {
     /// Commitment to the values of input wires in the first phase.
     pub(super) A_I1: CompressedRistretto,
     /// Commitment to the values of output wires in the first phase.
@@ -67,7 +142,7 @@ pub struct R1CSProof {
     pub(super) ipp_proof: InnerProductProof,
 }
 
-impl R1CSProof {
+impl BpProof {
     /// Serializes the proof into a byte array of 1 version byte + \\((13 or 16) + 2k\\) 32-byte elements,
     /// where \\(k=\lceil \log_2(n) \rceil\\) and \\(n\\) is the number of multiplication gates.
     ///
@@ -126,7 +201,7 @@ impl R1CSProof {
     /// Deserializes the proof from a byte slice.
     ///
     /// Returns an error if the byte slice cannot be parsed into a `R1CSProof`.
-    pub fn from_bytes(slice: &[u8]) -> Result<R1CSProof, R1CSError> {
+    pub fn from_bytes(slice: &[u8]) -> Result<BpProof, R1CSError> {
         if slice.len() < 1 {
             return Err(R1CSError::FormatError);
         }
@@ -187,7 +262,7 @@ impl R1CSProof {
         // XXX: IPPProof from_bytes gives ProofError.
         let ipp_proof = InnerProductProof::from_bytes(slice).map_err(|_| R1CSError::FormatError)?;
 
-        Ok(R1CSProof {
+        Ok(BpProof {
             A_I1,
             A_O1,
             S1,

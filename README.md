@@ -246,7 +246,10 @@ When multiplicities do not fit in the norm part (few digits, large base) they ar
 the linear part, and the proof still carries an empty `C_O` (32 B) that the paper drops; for
 example a 64-bit proof in base 256 is 704 B.
 
-A BP++ backend for the R1CS front end follows.
+- The R1CS front end on BP++ (spec §6): `prover.set_backend(Backend::Bppp)` and
+  `verifier.set_backend(Backend::Bppp)`; `prove`/`verify` and gadgets are unchanged. The
+  constraint system is translated into an arithmetic circuit; randomized constraints are not
+  supported on BP++ (they return a `GadgetError`).
 
 `cargo bench --features bppp --bench bppp -- "range|mact"`:
 

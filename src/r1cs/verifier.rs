@@ -18,7 +18,7 @@ use crate::r1cs::Metrics;
 use crate::transcript::TranscriptProtocol;
 use super::proof::ProofKind;
 #[cfg(feature = "bppp")]
-use super::proof::{BpppProof, BuilderProof};
+use super::proof::BpppProof;
 use super::builder::{self, Builder, CircuitBuilder, Cost, Counts, Reciprocal, TableId};
 use super::compact::{ConstraintStore, Flattened};
 
@@ -415,9 +415,10 @@ impl<T: BorrowMut<Transcript>> Verifier<T> {
         Ok(super::backend::builder_circuit(&self.constraints, &rec, None)?.0)
     }
 
-    /// The BP++ backend for a builder circuit (spec §7.6, §7.7): lower the record and verify.
+    /// The BP++ backend (spec §6, §7.6): lower the constraint system (with the builder's record,
+    /// empty for a plain R1CS) and verify.
     #[cfg(feature = "bppp")]
-    fn verify_builder(mut self, p: &BuilderProof, pc_gens: &PedersenGens, bp_gens: &BulletproofGens) -> Result<T, R1CSError> {
+    fn verify_bppp(mut self, p: &BpppProof, pc_gens: &PedersenGens, bp_gens: &BulletproofGens) -> Result<T, R1CSError> {
         use crate::bppp::{reciprocal, BpppGens, BpppTranscript};
         if !self.deferred_constraints.is_empty() {
             return Err(R1CSError::GadgetError {
@@ -430,29 +431,8 @@ impl<T: BorrowMut<Transcript>> Verifier<T> {
         }
         let gens = BpppGens::new(pc_gens, bp_gens, c.n_lin, p.n_mm).map_err(|_| R1CSError::InvalidGeneratorsLength)?;
         let transcript = self.transcript.borrow_mut();
-        BpppTranscript::domain_sep(transcript, b"bppp-builder v1");
+        BpppTranscript::domain_sep(transcript, b"bppp-r1cs v2");
         reciprocal::verify(&p.proof, &c, &gens, &self.V, transcript).map_err(|_| R1CSError::VerificationError)?;
-        Ok(self.transcript)
-    }
-
-    /// The BP++ backend (spec §6): rebuild the translated circuit and verify its proof.
-    #[cfg(feature = "bppp")]
-    fn verify_bppp(mut self, p: &BpppProof, pc_gens: &PedersenGens, bp_gens: &BulletproofGens) -> Result<T, R1CSError> {
-        use crate::bppp::{BpppGens, BpppTranscript};
-        if !self.deferred_constraints.is_empty() {
-            return Err(R1CSError::GadgetError {
-                description: "randomized constraints need the BP backend".into(),
-            });
-        }
-        let (n, k) = (self.num_vars, self.V.len());
-        if p.n_m != super::backend::n_m(n) || p.k != k {
-            return Err(R1CSError::VerificationError);
-        }
-        let c = super::backend::circuit(&self.constraints, n, k, super::backend::Constants::Stored)?;
-        let gens = BpppGens::new(pc_gens, bp_gens, k, p.n_m).map_err(|_| R1CSError::InvalidGeneratorsLength)?;
-        let transcript = self.transcript.borrow_mut();
-        BpppTranscript::domain_sep(transcript, b"bppp-r1cs v1");
-        p.proof.verify(&c, &gens, &self.V, transcript).map_err(|_| R1CSError::VerificationError)?;
         Ok(self.transcript)
     }
 
@@ -466,12 +446,8 @@ impl<T: BorrowMut<Transcript>> Verifier<T> {
         #[cfg(feature = "bppp")]
         {
             match &proof.0 {
-                ProofKind::Bppp(_) | ProofKind::Builder(_) if self.backend != super::Backend::Bppp => {
-                    return Err(R1CSError::VerificationError)
-                }
-                ProofKind::Bppp(p) if !self.builder.active => return self.verify_bppp(p, pc_gens, bp_gens),
-                ProofKind::Builder(p) if self.builder.active => return self.verify_builder(p, pc_gens, bp_gens),
-                ProofKind::Bppp(_) | ProofKind::Builder(_) => return Err(R1CSError::VerificationError),
+                ProofKind::Bppp(_) if self.backend != super::Backend::Bppp => return Err(R1CSError::VerificationError),
+                ProofKind::Bppp(p) => return self.verify_bppp(p, pc_gens, bp_gens),
                 _ => {}
             }
             if self.backend == super::Backend::Bppp {

@@ -154,7 +154,8 @@ pub(super) struct Counts {
 /// The backend-independent record of the builder operations (spec §7.2).
 #[derive(Default)]
 pub(super) struct Builder {
-    /// Set by the first builder operation (spec §7.2, builder mode).
+    /// Set by the first builder operation; BP lowers the record only then (an empty record adds
+    /// nothing). BP++ lowers every constraint system the same way (spec §6.1).
     pub(super) active: bool,
     /// Witnesses so far (multiplicities included after finalization).
     pub(super) n_w: usize,

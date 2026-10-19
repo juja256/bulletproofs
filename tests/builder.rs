@@ -341,7 +341,7 @@ fn bppp_builder_rules() {
     };
     assert!(matches!(prove_small(b, 4, rand_p), Err(R1CSError::GadgetError { .. })));
     assert!(matches!(verify_small(b, &proof, V, rand_v), Err(R1CSError::GadgetError { .. })));
-    // a verifier without builder operations (spec §6) rejects a builder proof, and conversely
+    // a verifier without the builder operations rejects a builder proof, and conversely
     let plain_p = |cs: &mut Prover<&mut Transcript>, x: Variable| {
         cs.constrain(x - 4u64);
         Ok(())
@@ -356,7 +356,7 @@ fn bppp_builder_rules() {
     assert!(verify_small(b, &plain, V2, gv).is_err());
     // malformed encodings
     let bytes = proof.to_bytes();
-    assert_eq!(bytes[0], 3);
+    assert_eq!(bytes[0], 2, "one BP++ encoding (spec §6.2)");
     assert!(R1CSProof::from_bytes(&bytes[..bytes.len() - 1]).is_err());
     assert!(R1CSProof::from_bytes(&bytes[..10]).is_err());
     for (at, delta) in [(1usize, 1u8), (9, 1)] {
@@ -457,11 +457,11 @@ fn constraints_on_missing_variables_are_errors() {
     assert!(matches!(prove_small(Backend::Bp, 0, gp), Err(R1CSError::GadgetError { .. })));
 }
 
-/// Builder mode starts with the first successful builder operation (review): a statement whose
-/// only builder operations failed is proven as in spec §6 (proof tag 2).
+/// Failed builder operations record nothing (spec §7.2): a statement whose only builder
+/// operations failed gives the proof of the plain constraint system, byte for byte.
 #[cfg(feature = "bppp")]
 #[test]
-fn failed_operations_do_not_enter_builder_mode() {
+fn failed_operations_leave_the_plain_proof() {
     let g = |cs: &mut Prover<&mut Transcript>, x: Variable| {
         assert!(cs.table(vec![vec![]]).is_err());
         assert!(cs.product(Variable::Witness(3).into(), x.into(), x.into()).is_err());
@@ -483,8 +483,13 @@ fn failed_operations_do_not_enter_builder_mode() {
         Ok(())
     };
     let (proof, V, _) = prove_small(Backend::Bppp, 0, g).unwrap();
-    assert_eq!(proof.to_bytes()[0], 2);
     verify_small(Backend::Bppp, &proof, V, gv).unwrap();
+    let plain = |cs: &mut Prover<&mut Transcript>, x: Variable| {
+        cs.constrain(x - 0u64);
+        Ok(())
+    };
+    let (p2, _, _) = prove_small(Backend::Bppp, 0, plain).unwrap();
+    assert_eq!(proof.to_bytes(), p2.to_bytes());
 }
 
 /// `CircuitBuilder` is object safe: gadgets can take `&mut dyn CircuitBuilder`.

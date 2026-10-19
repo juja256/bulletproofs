@@ -162,13 +162,39 @@ fn builder_matches_reference_vectors() {
         let cv = v.lower_builder_bppp().unwrap();
         assert_eq!(cv, c, "{}: verifier's circuit", name);
         let (cp, wp) = p.lower_builder_bppp().unwrap();
-        assert_eq!(cp, c, "{}: prover's circuit", name);
         assert!(
             wp.w_d == w.w_d && wp.w_l == w.w_l && wp.w_r == w.w_r && wp.w_o == w.w_o && wp.v == w.v && wp.s == w.s,
             "{}: witness",
             name
         );
-        testutil::run_recip_case(case, &c, &w);
+        if case["prover_a_l"].is_null() {
+            assert_eq!(cp, c, "{}: prover's circuit", name);
+            testutil::run_recip_case(case, &c, &w);
+        } else {
+            // A violated R1CS constraint (spec §6.2): the prover recomputes the constants from
+            // its witness and proves its own circuit, which the vector's proof data replays;
+            // the verifier's circuit rejects that proof.
+            let mut want = c.clone();
+            want.a_l = testutil::scs(&case["prover_a_l"]);
+            assert_eq!(cp, want, "{}: prover's circuit", name);
+            assert_ne!(cp, c, "{}: the circuits differ", name);
+            let mut pc_case = case.clone();
+            pc_case["a_l"] = case["prover_a_l"].clone();
+            pc_case["digest"] = case["prover_digest"].clone();
+            pc_case["satisfied"] = Value::Bool(true);
+            pc_case["verifies"] = Value::Bool(true);
+            let proof = testutil::run_recip_case(&pc_case, &cp, &w);
+            let pcg = PedersenGens::default();
+            let bpg = BulletproofGens::new((c.n_p + c.n_m).max(c.n_lin + 6), 1);
+            let g = crate::bppp::BpppGens::new(&pcg, &bpg, c.n_lin, c.n_p + c.n_m).unwrap();
+            let V: Vec<CompressedRistretto> = w.v.iter().zip(&w.s).map(|(v, s)| g.commit_input(v, *s).compress()).collect();
+            let ch = &case["chal"];
+            let challenges: Vec<Scalar> =
+                ["alpha", "rho", "lambda", "beta", "delta", "tau"].iter().map(|k| testutil::sc(&ch[*k])).chain(testutil::scs(&case["gammas"])).collect();
+            let replay = &mut crate::bppp::transcript::Replay::new(challenges);
+            assert!(crate::bppp::reciprocal::verify(&proof, &c, &g, &V, replay).is_err(), "{}: the verifier's circuit", name);
+            assert!(!c.is_satisfied(&w, Scalar::ZERO, testutil::sc(&ch["alpha"])), "{}", name);
+        }
 
         // Real proofs through the public API, both backends.
         let satisfied = case["satisfied"].as_bool().unwrap();

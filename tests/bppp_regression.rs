@@ -88,7 +88,8 @@ fn mact_proof() -> Vec<u8> {
     p.to_bytes()
 }
 
-/// The R1CS front end: plain constraint system (spec §6) or with builder operations (§7).
+/// The R1CS front end: plain constraint system or with builder operations (spec §6.2: one
+/// protocol and encoding for both; pins changed with option B).
 fn r1cs_proof(builder: bool) -> Vec<u8> {
     let pc = PedersenGens::default();
     let bp = BulletproofGens::new(1024, 1);
@@ -134,8 +135,8 @@ fn bppp_proofs_are_pinned() {
         "8ffe2a23d9fc9ab7a56602c7de5ef5424f1ed87db14ac7b08fecdb65d1613653",
         "2a48d4d8030d829f69b59399816e9bad94c0723e6eb09f8ada733f04ccd1c176",
         "c0901efd7fa5282e8e55cb0b79016df2a5b7265869b63d88b0df2d28bc4fb713",
-        "fee86b9073002e923bfa95e321e8da522fda06377b601cdadcaf9594179a4a32",
-        "fea3bc9326c3da8494bd5356c1bb0fdaca23621081cc0b403b967492fa562209",
+        "3b8491bff607cf15cbee09150936ece24b386236088bc6ee7cde59e811967c06",
+        "d4e8427bfa3e80f36f3b182626582f85fad2dcac1f7a6aba20fb354fecc8d321",
     ];
     for (name, g) in &got {
         println!("{}: {}", name, g);

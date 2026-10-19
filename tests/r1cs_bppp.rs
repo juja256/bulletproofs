@@ -256,3 +256,38 @@ fn malformed_bppp_proofs_are_rejected() {
     let small = BulletproofGens::new(4, 1);
     assert!(prove(Backend::Bppp, [6, 7, 42, 200], 8, &pc, &small).is_err());
 }
+
+/// Option B (spec §6): one BP++ encoding for every constraint system — the byte 2, `N'_m` and
+/// `N_lin`, then the reciprocal form proof; the old builder tag 3 is a format error. A plain
+/// R1CS has `N'_m = max(1, n)` and `N_lin = k`.
+#[test]
+fn one_encoding_for_every_constraint_system() {
+    let pc = PedersenGens::default();
+    let bp = BulletproofGens::new(64, 1);
+    let (proof, V) = prove(Backend::Bppp, [6, 7, 42, 200], 8, &pc, &bp).unwrap();
+    let bytes = proof.to_bytes();
+    let u = |i: usize| u64::from_le_bytes(bytes[i..i + 8].try_into().unwrap());
+    // n = 1 (multiply) + 8 (bits) + 1 (allocate), k = 4
+    assert_eq!((bytes[0], u(1), u(9)), (2, 10, 4));
+    verify(Backend::Bppp, &R1CSProof::from_bytes(&bytes).unwrap(), &V, 8, &pc, &bp).unwrap();
+    let mut three = bytes.clone();
+    three[0] = 3;
+    assert!(R1CSProof::from_bytes(&three).is_err(), "tag 3 is gone");
+    // the same statement written with a builder operation (a witness tied to x) is the same
+    // kind of proof
+    let mut t = Transcript::new(b"one");
+    let mut p = Prover::new(&pc, &mut t);
+    p.set_backend(Backend::Bppp);
+    let (vx, x) = p.commit(Scalar::from(4u64), Scalar::from(1u64));
+    let w = p.witness(Some(Scalar::from(4u64))).unwrap();
+    p.constrain(w - x);
+    let b = p.prove(&bp).unwrap().to_bytes();
+    assert_eq!(b[0], 2);
+    let mut t = Transcript::new(b"one");
+    let mut v = Verifier::new(&mut t);
+    v.set_backend(Backend::Bppp);
+    let x = v.commit(vx);
+    let w = v.witness(None).unwrap();
+    v.constrain(w - x);
+    v.verify(&R1CSProof::from_bytes(&b).unwrap(), &pc, &bp).unwrap();
+}

@@ -24,7 +24,7 @@ use super::builder::{self, Builder, CircuitBuilder, Cost, Counts, Reciprocal, Ta
 use super::compact::{ConstraintStore, Flattened};
 use super::proof::{BpProof, ProofKind};
 #[cfg(feature = "bppp")]
-use super::proof::{BpppProof, BuilderProof};
+use super::proof::BpppProof;
 
 /// Index chunk for the polynomial passes of the prover.
 const POLY_CHUNK: usize = 1 << 12;
@@ -897,15 +897,20 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
         Ok((c, w.expect("the prover has values")))
     }
 
-    /// The BP++ backend for a builder circuit (spec §7.6, §7.7): finalize, lower to a
-    /// reciprocal form circuit and prove it.
+    /// The BP++ backend (spec §6, §7.6): finalize the builder's record (empty for a plain R1CS),
+    /// lower the constraint system to a reciprocal form circuit and prove it (§4).
     #[cfg(feature = "bppp")]
-    fn prove_builder<R: RngCore + CryptoRng>(
+    fn prove_bppp<R: RngCore + CryptoRng>(
         mut self,
         bp_gens: &BulletproofGens,
         external_rng: &mut R,
     ) -> Result<(R1CSProof, T), R1CSError> {
         use crate::bppp::{reciprocal, BpppGens, BpppTranscript};
+        if !self.deferred_constraints.is_empty() {
+            return Err(R1CSError::GadgetError {
+                description: "randomized constraints need the BP backend".into(),
+            });
+        }
         let (c, mut w) = self.lower_builder_bppp()?;
         let clear = |w: &mut crate::bppp::ReciprocalWitness| {
             for s in w.w_d.iter_mut().chain(w.w_l.iter_mut()).chain(w.w_r.iter_mut()).chain(w.w_o.iter_mut()).chain(w.s.iter_mut()) {
@@ -924,6 +929,7 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
         };
         let V: Vec<CompressedRistretto> =
             a.v.iter().zip(&a.v_blinding).map(|(v, s)| self.pc_gens.commit(*v, *s).compress()).collect();
+        // The prover's randomness is bound to the witness as well as to `external_rng`.
         let mut rng = {
             let mut builder = self.transcript.borrow().build_rng();
             for s in &a.v_blinding {
@@ -932,64 +938,10 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
             builder.finalize(external_rng)
         };
         let transcript = self.transcript.borrow_mut();
-        BpppTranscript::domain_sep(transcript, b"bppp-builder v1");
+        BpppTranscript::domain_sep(transcript, b"bppp-r1cs v2");
         let proof = reciprocal::prove(&c, &gens, &V, &w, transcript, &mut rng).map_err(R1CSError::from);
         clear(&mut w);
         let n_lin = c.n_lin;
-        Ok((R1CSProof(ProofKind::Builder(BuilderProof { n_mm, n_lin, proof: proof? })), self.transcript))
-    }
-
-    /// The BP++ backend (spec §6): translate the constraint system into an arithmetic circuit
-    /// and prove it with the protocol of spec §3, which absorbs the circuit digest.
-    #[cfg(feature = "bppp")]
-    fn prove_bppp<R: RngCore + CryptoRng>(
-        mut self,
-        bp_gens: &BulletproofGens,
-        external_rng: &mut R,
-    ) -> Result<(R1CSProof, T), R1CSError> {
-        use crate::bppp::{circuit, BpppGens, BpppTranscript};
-        if !self.deferred_constraints.is_empty() {
-            return Err(R1CSError::GadgetError {
-                description: "randomized constraints need the BP backend".into(),
-            });
-        }
-        if self.builder.active {
-            return self.prove_builder(bp_gens, external_rng);
-        }
-        let (n, k) = (self.secrets.a_L.len(), self.secrets.v.len());
-        let constants = super::backend::Constants::FromWitness {
-            a_l: &self.secrets.a_L,
-            a_r: &self.secrets.a_R,
-            a_o: &self.secrets.a_O,
-            v: &self.secrets.v,
-        };
-        let c = super::backend::circuit(&self.constraints, n, k, constants)?;
-        let mut w = super::backend::witness(
-            &self.secrets.a_L,
-            &self.secrets.a_R,
-            &self.secrets.a_O,
-            &self.secrets.v,
-            &self.secrets.v_blinding,
-        );
-        let n_m = super::backend::n_m(n);
-        let gens = BpppGens::new(self.pc_gens, bp_gens, k, n_m).map_err(|_| R1CSError::InvalidGeneratorsLength)?;
-        let V: Vec<CompressedRistretto> =
-            self.secrets.v.iter().zip(&self.secrets.v_blinding).map(|(v, s)| self.pc_gens.commit(*v, *s).compress()).collect();
-        // The prover's randomness is bound to the witness as well as to `external_rng`.
-        let mut rng = {
-            let mut builder = self.transcript.borrow().build_rng();
-            for s in &self.secrets.v_blinding {
-                builder = builder.rekey_with_witness_bytes(b"v_blinding", s.as_bytes());
-            }
-            builder.finalize(external_rng)
-        };
-        let transcript = self.transcript.borrow_mut();
-        BpppTranscript::domain_sep(transcript, b"bppp-r1cs v1");
-        let proof = circuit::prove(&c, &gens, &V, &w, transcript, &mut rng).map_err(R1CSError::from);
-        for s in w.w_l.iter_mut().chain(w.w_r.iter_mut()).chain(w.w_o.iter_mut()).chain(w.s.iter_mut()) {
-            s.clear();
-        }
-        w.v.iter_mut().flatten().for_each(|s| s.clear());
-        Ok((R1CSProof(ProofKind::Bppp(BpppProof { n_m, k, proof: proof? })), self.transcript))
+        Ok((R1CSProof(ProofKind::Bppp(BpppProof { n_mm, n_lin, proof: proof? })), self.transcript))
     }
 }

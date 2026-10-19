@@ -29,7 +29,12 @@ for this discussion.
   BP++. **Cost:** a new variant of a public enum (breaks exhaustive matches downstream), and a
   witness-to-wire mapping inside BP's `flatten`.
 
-### 1.3 Builder mode and the proof tag 3 (`BuilderProof`)
+### 1.3 Builder mode and the proof tag 3 (`BuilderProof`) — superseded by option B
+
+(Option B, phase 7c: every constraint system is lowered by §7.6 and proven with §4 under
+`"bppp-r1cs v2"`; one encoding, tag 2 with `(N'_m, N_lin)`; no builder mode. The text below is
+the phase-6 design.)
+
 
 - A constraint system that uses builder operations is lowered to a **reciprocal form circuit**
   (§7.6), one that does not to the **arithmetic circuit** of §6. These are different statements

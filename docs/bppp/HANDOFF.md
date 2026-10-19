@@ -212,3 +212,13 @@ DESIGN (milestone M6). bpvm depends on this fork by git revision.
   1024 × range32, BP++ 945 B / 1.13 s / 75 ms vs BP 1345 B / 1.26 s / 119 ms. Everything
   green: 124 tests (bppp parallel yoloproofs), 67 (yoloproofs, golden unchanged), 34 (default);
   vectors regenerate unchanged; xcheck 5/5, 13/13. Not pushed.
+- 2026-10-19 — phase 7 started on branch `bppp-perf` (from `bppp-builder`). Owner's decisions:
+  variable-time MSMs inside the circuit protocol behind a feature, constant time by default;
+  format changes allowed (drop the empty `C_O`, builder witnesses beyond the norm slots).
+  Safety net: `tests/bppp_regression.rs` pins the SHA3 of BP++ proofs (fixed RNG, all front
+  ends; same with `parallel`). Profiler `examples/bppp_profile.rs`. Baseline on this machine
+  (Xeon 2.1 GHz, one thread): circuit 2^14 prove 2.53 s (WNLA 1.47 s, the four CT
+  commitments 1.06 s), verify 134 ms; 2^16: prove 10.7 s, 123 MB; R1CS on BP++ 2^16 11.3 s,
+  149 MB vs BP 10.1 s, 94 MB. Micro: CT MSM 16 µs/term, VT MSM 5 µs/term, a 2-point fold
+  48 µs, `P + sQ` 38 µs. The CT prover is all MSMs: commitments 4 N terms, WNLA ≈ 3 N terms
+  plus N folds of the norm generators.

@@ -73,6 +73,14 @@ required-features = ["yoloproofs", "bppp"]
 name = "builder"
 required-features = ["yoloproofs"]
 
+[[example]]
+name = "bppp_profile"
+required-features = ["yoloproofs", "bppp"]
+
+[[test]]
+name = "bppp_regression"
+required-features = ["yoloproofs", "bppp"]
+
 [[bench]]
 name = "range_proof"
 harness = false

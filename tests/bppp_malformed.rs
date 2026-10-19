@@ -68,7 +68,7 @@ fn range_and_mact_proofs() {
 }
 
 fn gadget<CS: CircuitBuilder>(cs: &mut CS, x: bulletproofs::r1cs::Variable, v: Option<u64>) {
-    let t = cs.table((0..16u64).map(|i| vec![i]).collect(), &[4]).unwrap();
+    let t = cs.table((0..16u64).map(|i| vec![i]).collect()).unwrap();
     let a = cs.lookup_value(t, v.map(|v| v & 15)).unwrap();
     let b = cs.lookup_value(t, v.map(|v| v >> 4)).unwrap();
     cs.constrain(x - a - b * Scalar::from(16u64));

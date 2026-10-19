@@ -19,7 +19,7 @@ mod soundness;
 mod vectors;
 
 pub use self::backend::Backend;
-pub use self::builder::{CircuitBuilder, Cost, Reciprocal, TableId, Width, MAX_TUPLE_BITS};
+pub use self::builder::{CircuitBuilder, Cost, Reciprocal, TableId};
 pub use self::constraint_system::{
     ConstraintSystem, RandomizableConstraintSystem, RandomizedConstraintSystem,
 };

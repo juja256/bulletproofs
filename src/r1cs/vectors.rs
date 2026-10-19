@@ -41,10 +41,6 @@ fn ints(v: &Value) -> Vec<u64> {
     v.as_array().unwrap().iter().map(|x| x.as_u64().unwrap()).collect()
 }
 
-fn widths(v: &Value) -> Vec<u32> {
-    ints(v).into_iter().map(|x| x as u32).collect()
-}
-
 /// Run the program; `commit(cs, v, s)` commits an input. Returns the index and error of the
 /// first failing operation.
 fn run<CS: CircuitBuilder>(
@@ -76,7 +72,7 @@ fn run<CS: CircuitBuilder>(
                 "product" => cs.product(lc(&op["l"]), lc(&op["r"]), lc(&op["out"]))?,
                 "table" => {
                     let rows: Vec<Vec<u64>> = op["rows"].as_array().unwrap().iter().map(ints).collect();
-                    cs.table(rows, &widths(&op["widths"]))?;
+                    cs.table(rows)?;
                 }
                 "lookup" => cs.lookup(TableId(op["table"].as_u64().unwrap() as usize), &lcs(&op["tuple"]))?,
                 "lookup_value" => {
@@ -84,7 +80,7 @@ fn run<CS: CircuitBuilder>(
                     cs.lookup_value(TableId(op["table"].as_u64().unwrap() as usize), v)?;
                 }
                 "reciprocal" => {
-                    let mut r = cs.reciprocal(&widths(&op["widths"]))?;
+                    let mut r = cs.reciprocal(op["m"].as_u64().unwrap() as usize)?;
                     for t in op["terms"].as_array().unwrap() {
                         r.add_weighted(lc(&t["num"]), lcs(&t["tuple"]));
                     }

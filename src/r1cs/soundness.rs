@@ -44,20 +44,32 @@ trait Gadget {
 }
 
 trait Ops {
-    fn table(&mut self, rows: Vec<Vec<u64>>, w: &[u32]) -> super::TableId;
+    fn table(&mut self, rows: Vec<Vec<u64>>) -> super::TableId;
     fn lookup(&mut self, t: super::TableId, x: &[super::LinearCombination]) -> Result<(), R1CSError>;
-    fn recip(&mut self, w: &[u32], private: Vec<(super::LinearCombination, Vec<super::LinearCombination>)>, public: Vec<(super::LinearCombination, Vec<u64>)>) -> Result<(), R1CSError>;
+    fn witness_scalar(&mut self, v: Option<Scalar>) -> Result<super::Variable, R1CSError>;
+    /// A multiplier `l * 1 = o` with `l = v`; `wire` gets its left wire.
+    fn product_wire(&mut self, v: Option<Scalar>, wire: &mut Option<super::Variable>) -> Result<(), R1CSError>;
+    fn recip(&mut self, m: usize, private: Vec<(super::LinearCombination, Vec<super::LinearCombination>)>, public: Vec<(super::LinearCombination, Vec<u64>)>) -> Result<(), R1CSError>;
 }
 
 impl<C: CircuitBuilder> Ops for C {
-    fn table(&mut self, rows: Vec<Vec<u64>>, w: &[u32]) -> super::TableId {
-        CircuitBuilder::table(self, rows, w).unwrap()
+    fn table(&mut self, rows: Vec<Vec<u64>>) -> super::TableId {
+        CircuitBuilder::table(self, rows).unwrap()
     }
     fn lookup(&mut self, t: super::TableId, x: &[super::LinearCombination]) -> Result<(), R1CSError> {
         CircuitBuilder::lookup(self, t, x)
     }
-    fn recip(&mut self, w: &[u32], private: Vec<(super::LinearCombination, Vec<super::LinearCombination>)>, public: Vec<(super::LinearCombination, Vec<u64>)>) -> Result<(), R1CSError> {
-        let mut r = self.reciprocal(w)?;
+    fn witness_scalar(&mut self, v: Option<Scalar>) -> Result<super::Variable, R1CSError> {
+        self.witness(v)
+    }
+    fn product_wire(&mut self, v: Option<Scalar>, wire: &mut Option<super::Variable>) -> Result<(), R1CSError> {
+        let (l, _, o) = self.allocate_multiplier(v.map(|v| (v, Scalar::ONE)))?;
+        self.constrain(o - l);
+        *wire = Some(l);
+        Ok(())
+    }
+    fn recip(&mut self, m: usize, private: Vec<(super::LinearCombination, Vec<super::LinearCombination>)>, public: Vec<(super::LinearCombination, Vec<u64>)>) -> Result<(), R1CSError> {
+        let mut r = self.reciprocal(m)?;
         for (n, x) in private {
             r.add_weighted(n, x);
         }
@@ -85,22 +97,72 @@ fn backends() -> [Backend; 2] {
     [Backend::Bp, Backend::Bppp]
 }
 
-/// Query `(1, 2)` in a table holding only `(2, 1)`: equal without the challenge `alpha` of BP's
-/// compression (and different packings in BP++). Multiplicities forged to match.
+/// Query `(1, 2)` in a table holding only `(2, 1)`: equal without the compression challenge
+/// (BP: `alpha`; BP++: `eta`). Multiplicities forged to match.
 #[test]
 fn swapped_tuple_is_rejected() {
     let g = |cs: &mut dyn Gadget, p: bool| {
         let a = cs.w(if p { Some(1) } else { None });
         let b = cs.w(if p { Some(2) } else { None });
-        let range = cs.cs().table((0..4).map(|x| vec![x]).collect(), &[2]);
-        let pairs = cs.cs().table(vec![vec![2, 1]], &[2, 2]);
-        cs.cs().lookup(range, &[a.into()])?;
-        cs.cs().lookup(range, &[b.into()])?;
+        let pairs = cs.cs().table(vec![vec![2, 1]]);
         cs.cs().lookup(pairs, &[a.into(), b.into()])
     };
-    let m = vec![s(0), s(1), s(1), s(0), s(1)];
     for b in backends() {
-        assert!(!accepted(b, Cheat { multiplicities: Some(m.clone()), ..Cheat::default() }, g), "{:?}", b);
+        assert!(!accepted(b, Cheat { multiplicities: Some(vec![s(1)]), ..Cheat::default() }, g), "{:?}", b);
+    }
+}
+
+/// Unbounded components (spec §7.3, no bound rule): `(3 + 16, 5 - 1)` packs with base 16 to the
+/// row `(3, 5)`, and `(3 + 2^128, 5 - 2^124)` too; neither is a row. Every component may be a
+/// fresh witness, a product wire (copied into `C_O` on BP++) or carry a constant.
+#[test]
+fn packed_collisions_are_rejected() {
+    use super::{LinearCombination, Variable};
+    let big = |e: u32| (0..e).fold(Scalar::ONE, |a, _| a + a);
+    let cheats: [(Scalar, Scalar); 2] = [(s(19), s(4)), (s(3) + big(128), s(5) - big(124))];
+    for (i, (x0, x1)) in cheats.iter().copied().enumerate() {
+        for wire in [false, true] {
+            let g = move |cs: &mut dyn Gadget, p: bool| {
+                let a_val = if p { Some(x0) } else { None };
+                // the first component as a fresh witness or as the left wire of a product
+                let first: LinearCombination = if wire {
+                    let mut l = None;
+                    cs.cs().product_wire(a_val, &mut l)?;
+                    l.unwrap().into()
+                } else {
+                    cs.cs().witness_scalar(a_val)?.into()
+                };
+                let b = cs.cs().witness_scalar(if p { Some(x1 - s(1)) } else { None })?;
+                let rows: Vec<Vec<u64>> = (0..16u64).map(|i| vec![i, (i + 2) % 16]).collect();
+                let t = cs.cs().table(rows);
+                cs.cs().lookup(t, &[first, Variable::from(b) + Scalar::ONE])
+            };
+            let mut m = vec![s(0); 16];
+            m[3] = s(1);
+            for b in backends() {
+                assert!(!accepted(b, Cheat { multiplicities: Some(m.clone()), ..Cheat::default() }, g), "cheat {} wire {} {:?}", i, wire, b);
+                assert!(!accepted(b, Cheat::default(), g), "cheat {} wire {} {:?}: honest counting", i, wire, b);
+            }
+        }
+    }
+    // the honest statement (3, 5) is accepted in both forms
+    for wire in [false, true] {
+        let g = move |cs: &mut dyn Gadget, p: bool| {
+            let first: LinearCombination = if wire {
+                let mut l = None;
+                cs.cs().product_wire(if p { Some(s(3)) } else { None }, &mut l)?;
+                l.unwrap().into()
+            } else {
+                cs.cs().witness_scalar(if p { Some(s(3)) } else { None })?.into()
+            };
+            let b = cs.cs().witness_scalar(if p { Some(s(4)) } else { None })?;
+            let rows: Vec<Vec<u64>> = (0..16u64).map(|i| vec![i, (i + 2) % 16]).collect();
+            let t = cs.cs().table(rows);
+            cs.cs().lookup(t, &[first, Variable::from(b) + Scalar::ONE])
+        };
+        for b in backends() {
+            assert!(accepted(b, Cheat::default(), g), "honest, wire {} {:?}", wire, b);
+        }
     }
 }
 
@@ -109,7 +171,7 @@ fn swapped_tuple_is_rejected() {
 fn wrong_multiplicities_are_rejected() {
     let g = |cs: &mut dyn Gadget, p: bool| {
         let x = cs.w(if p { Some(1) } else { None });
-        let t = cs.cs().table((0..4).map(|x| vec![x]).collect(), &[2]);
+        let t = cs.cs().table((0..4).map(|x| vec![x]).collect());
         cs.cs().lookup(t, &[x.into()])
     };
     for b in backends() {
@@ -126,7 +188,7 @@ fn wrong_multiplicities_are_rejected() {
 fn forged_denominator_is_rejected() {
     let g = |cs: &mut dyn Gadget, p: bool| {
         let x = cs.w(if p { Some(5) } else { None });
-        let t = cs.cs().table((0..4).map(|x| vec![x]).collect(), &[2]);
+        let t = cs.cs().table((0..4).map(|x| vec![x]).collect());
         cs.cs().lookup(t, &[x.into()])
     };
     let c = Cheat { multiplicities: Some(vec![s(0), s(1), s(0), s(0)]), denominator_row: Some(vec![1]), ..Cheat::default() };
@@ -140,7 +202,7 @@ fn forged_denominator_is_rejected() {
 fn forged_numerator_is_rejected() {
     let g = |cs: &mut dyn Gadget, p: bool| {
         let x = cs.w(if p { Some(7) } else { None });
-        cs.cs().recip(&[252], vec![(s(2).into(), vec![x.into()])], vec![((-s(1)).into(), vec![7])])
+        cs.cs().recip(1, vec![(s(2).into(), vec![x.into()])], vec![((-s(1)).into(), vec![7])])
     };
     for b in backends() {
         assert!(!accepted(b, Cheat::default(), g), "honest prover of a false statement, {:?}", b);
@@ -149,7 +211,7 @@ fn forged_numerator_is_rejected() {
     // the same statement with numerator 1 is true
     let ok = |cs: &mut dyn Gadget, p: bool| {
         let x = cs.w(if p { Some(7) } else { None });
-        cs.cs().recip(&[252], vec![(s(1).into(), vec![x.into()])], vec![((-s(1)).into(), vec![7])])
+        cs.cs().recip(1, vec![(s(1).into(), vec![x.into()])], vec![((-s(1)).into(), vec![7])])
     };
     for b in backends() {
         assert!(accepted(b, Cheat::default(), ok), "{:?}", b);

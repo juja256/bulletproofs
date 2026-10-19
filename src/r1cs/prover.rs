@@ -20,7 +20,7 @@ use crate::inner_product_proof::InnerProductProof;
 use crate::r1cs::Metrics;
 use crate::transcript::TranscriptProtocol;
 use crate::util;
-use super::builder::{self, Builder, CircuitBuilder, Cost, Counts, Reciprocal, TableId, Width};
+use super::builder::{self, Builder, CircuitBuilder, Cost, Counts, Reciprocal, TableId};
 use super::compact::{ConstraintStore, Flattened};
 use super::proof::{BpProof, ProofKind};
 #[cfg(feature = "bppp")]
@@ -259,8 +259,8 @@ impl<'g, T: BorrowMut<Transcript>> CircuitBuilder for Prover<'g, T> {
         self.builder.product(l, r, out, c)
     }
 
-    fn table(&mut self, rows: Vec<Vec<u64>>, widths: &[Width]) -> Result<TableId, R1CSError> {
-        self.builder.table(rows, widths)
+    fn table(&mut self, rows: Vec<Vec<u64>>) -> Result<TableId, R1CSError> {
+        self.builder.table(rows)
     }
 
     fn lookup(&mut self, t: TableId, tuple: &[LinearCombination]) -> Result<(), R1CSError> {

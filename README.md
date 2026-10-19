@@ -256,8 +256,9 @@ example a 64-bit proof in base 256 is 704 B.
   `Prover` and `Verifier` for both backends. A gadget is written once: BP lowers it to
   randomized constraints (one second-phase multiplier per lookup, `|T|/2` multipliers per
   table), BP++ to a reciprocal form circuit (one gate per lookup, witnesses and multiplicities
-  in free slots). Multi-column tuples are packed with a public base, so their components must
-  be bounded by one-column lookups first; the builder checks this on both backends.
+  in free slots). Multi-column tuples are compressed with a challenge on both backends (BP:
+  logUp's; BP++: a challenge `eta` after the components are committed, spec §4.7), so a lookup
+  proves the tuple is a row component by component, with no range checks on the components.
   `cost()` reports the multipliers, gates and generator capacity of either backend.
 
 `cargo bench --features bppp --bench bppp -- "range|mact"`:

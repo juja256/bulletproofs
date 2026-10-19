@@ -1,0 +1,7 @@
+# LaTeX build files of bppp-paper-errors.tex
+*.aux
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.synctex.gz

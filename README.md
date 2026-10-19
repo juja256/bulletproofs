@@ -226,7 +226,25 @@ Status:
   circuit and the inputs. The Rust prover reproduces the independently written circuit part of
   the Python reference (`tests/vectors/bppp/circuit.json`) commitment for commitment.
 
-Reciprocal-form circuits, range proofs, MACT and a BP++ backend for the R1CS front end follow.
+- `bppp::reciprocal`, reciprocal form circuits (paper §6.2–6.3, spec §4): private poles
+  committed with the initial witness, reciprocals committed after the challenge `alpha`, and
+  reciprocal rows (sums of reciprocals and public poles) that must vanish as rational functions.
+  Numerators and multiplicities may only read columns committed before `alpha`. A reciprocal
+  range proof (paper §6.4) is a small instance of it.
+
+Range-proof and MACT front ends and a BP++ backend for the R1CS front end follow.
+
+A 64-bit range proof (base 16, shared multiplicities, as a reciprocal form circuit) against the
+BP `RangeProof` (`cargo bench --features bppp --bench bppp -- range`):
+
+| | proof | prove | verify |
+|---|---|---|---|
+| BP++ | 480 B | 3.27 ms | 0.41 ms |
+| BP | 672 B | 4.34 ms | 0.59 ms |
+
+The paper's shared-multiplicity proof also drops `C_O` (32 B), which the range-proof front end
+will do. The inaccuracies found in the paper are collected in
+[`docs/bppp/bppp-paper-errors.tex`](docs/bppp/bppp-paper-errors.tex).
 
 ```sh
 cargo test --release --features bppp --lib bppp

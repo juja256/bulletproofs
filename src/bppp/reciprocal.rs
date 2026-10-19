@@ -381,6 +381,11 @@ impl ReciprocalCircuit {
         self.reciprocals(w, alpha).unwrap()
     }
 
+    /// The `LinR` elements of `w_o`, in order.
+    fn late_elements(&self, w_o: &[Scalar]) -> Vec<Scalar> {
+        w_o.iter().zip(&self.partition).filter(|(_, (s, _))| *s == Slot::LinR).map(|(x, _)| *x).collect()
+    }
+
     fn compiled_witness(&self, w: &ReciprocalWitness, w_p: Vec<Scalar>) -> CircuitWitness {
         CircuitWitness {
             w_l: w.w_d.iter().chain(&w.w_l).copied().collect(),
@@ -438,6 +443,60 @@ pub(crate) fn prove_impl<T: BpppTranscript, R: RngCore + CryptoRng>(
     rng: &mut R,
     require_satisfied: bool,
 ) -> Result<CircuitProof, ProofError> {
+    let fixed = |_: Scalar, _: &[Scalar]| {
+        Ok(LateWitness { w_r: w.w_r.clone(), w_o_late: c.late_elements(&w.w_o) })
+    };
+    prove_with(c, gens, V, w, fixed, transcript, rng, require_satisfied)
+}
+
+/// The values committed after `alpha` (spec §4.3, two-phase prover): `w_R`, and the elements
+/// of `w_O` in slot `LinR`, in `w_O` order.
+#[derive(Clone)]
+pub struct LateWitness {
+    /// Right inputs of the ordinary multiplications.
+    pub w_r: Vec<Scalar>,
+    /// The `LinR` elements of `w_O`, in `w_O` order.
+    pub w_o_late: Vec<Scalar>,
+}
+
+/// Prove `c` with the late values (`w_R` and the `LinR` elements of `w_O`) computed by `late`
+/// from `alpha` and the reciprocals `w_P` (spec §4.3), for ordinary rows that read reciprocals.
+/// The values of `w.w_r` and of the `LinR` elements of `w.w_o` are ignored (the lengths are
+/// checked as for [`prove`]). Same transcript, randomness and
+/// proof as [`prove`] given the same values; an error of `late` is returned as is.
+pub fn prove_two_phase<T, R, F>(
+    c: &ReciprocalCircuit,
+    gens: &BpppGens,
+    V: &[CompressedRistretto],
+    w: &ReciprocalWitness,
+    late: F,
+    transcript: &mut T,
+    rng: &mut R,
+) -> Result<CircuitProof, ProofError>
+where
+    T: BpppTranscript,
+    R: RngCore + CryptoRng,
+    F: FnOnce(Scalar, &[Scalar]) -> Result<LateWitness, ProofError>,
+{
+    prove_with(c, gens, V, w, late, transcript, rng, true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prove_with<T, R, F>(
+    c: &ReciprocalCircuit,
+    gens: &BpppGens,
+    V: &[CompressedRistretto],
+    w: &ReciprocalWitness,
+    late: F,
+    transcript: &mut T,
+    rng: &mut R,
+    require_satisfied: bool,
+) -> Result<CircuitProof, ProofError>
+where
+    T: BpppTranscript,
+    R: RngCore + CryptoRng,
+    F: FnOnce(Scalar, &[Scalar]) -> Result<LateWitness, ProofError>,
+{
     check_gens(c, gens)?;
     c.check()?;
     c.check_witness(w)?;
@@ -445,14 +504,28 @@ pub(crate) fn prove_impl<T: BpppTranscript, R: RngCore + CryptoRng>(
         return Err(ProofError::FormatError);
     }
     let w_l: Vec<Scalar> = w.w_d.iter().chain(&w.w_l).copied().collect();
-    let ol = circuit::commit_ol(gens, c.n_lin, &c.partition, &w_l, &w.w_o, rng);
+    let mut ol = circuit::commit_ol(gens, c.n_lin, &c.partition, &w_l, &w.w_o, rng);
     absorb_statement(transcript, c, gens, V);
     transcript.append_point(b"C_L", &ol.C_L);
     transcript.append_point(b"C_O", &ol.C_O);
     let alpha = transcript.challenge(b"alpha");
     let w_p = c.reciprocals(w, alpha)?;
+    let lw = late(alpha, &w_p)?;
+    let n_late = c.partition.iter().filter(|(s, _)| *s == Slot::LinR).count();
+    if lw.w_r.len() != c.n_m || lw.w_o_late.len() != n_late {
+        return Err(ProofError::FormatError);
+    }
+    let mut full = w.clone();
+    full.w_r = lw.w_r;
+    let mut late_values = lw.w_o_late.into_iter();
+    for (x, (slot, _)) in full.w_o.iter_mut().zip(&c.partition) {
+        if *slot == Slot::LinR {
+            *x = late_values.next().unwrap_or(Scalar::ZERO);
+        }
+    }
+    ol.set_late(&c.partition, &full.w_o);
     let compiled = c.compile(alpha)?;
-    let cw = c.compiled_witness(w, w_p);
+    let cw = c.compiled_witness(&full, w_p);
     let cr = circuit::commit_r(gens, &ol, &cw.w_r, rng);
     transcript.append_point(b"C_R", &cr.C_R);
     circuit::prove_inner(&compiled, gens, &cw, &ol, &cr, transcript, rng, require_satisfied)
@@ -819,6 +892,81 @@ mod tests {
         chal[0] = -Scalar::from(3u64);
         assert!(prove(&c, &g, &V, &w, &mut Replay::new(chal.clone()), &mut rng).is_err());
         assert!(verify(&proof, &c, &g, &V, &mut Replay::new(chal)).is_err());
+    }
+
+    /// Rebuild a matrix with more columns (inserting none: the new columns are at the end of
+    /// `w_O`, after every existing column).
+    fn widen(m: &SparseMatrix, n_cols: usize) -> SparseMatrix {
+        let mut out = SparseMatrix::new(n_cols);
+        for r in 0..m.n_rows() {
+            out.push_row(m.row(r).map(|(c, v)| (c, *v)));
+        }
+        out
+    }
+
+    /// Ordinary rows that read reciprocals: `w_R,0 = 2 w_P,0` and a `LinR` element
+    /// `y = w_P,1 + 1`. These values depend on alpha; the two-phase prover computes them in the
+    /// callback (spec §4.3) and produces exactly the proof of the one-phase prover given the
+    /// same values.
+    #[test]
+    fn two_phase_prover_takes_late_values_from_callback() {
+        let (mut c, mut w) = range_proof(4, 3, &digits_of(37, 4, 3), false); // n_p = 3, n_m = 1
+        let n_mm = c.n_p + c.n_m;
+        let n_w = 2 * n_mm + c.n_o + 1;
+        let y_col = 2 * n_mm + c.n_o;
+        c.w_n = widen(&c.w_n, n_w);
+        c.w_m = widen(&c.w_m, n_w);
+        c.w_l = widen(&c.w_l, n_w);
+        c.w_l.push_row(vec![(n_mm + c.n_p, Scalar::ONE), (n_mm, -Scalar::from(2u64))]);
+        c.w_l.push_row(vec![(y_col, Scalar::ONE), (n_mm + 1, -Scalar::ONE)]);
+        c.a_l.extend([Scalar::ZERO, -Scalar::ONE]);
+        c.n_o += 1;
+        c.n_lin = 1;
+        c.partition.push((Slot::LinR, 0));
+        w.w_o.push(Scalar::from(999u64)); // ignored: replaced by the callback
+        w.w_r = vec![Scalar::from(998u64)]; // ignored
+        c.check().unwrap();
+        let (pc, bp) = setup(&c);
+        let g = BpppGens::new(&pc, &bp, c.n_lin, n_mm).unwrap();
+        let V = inputs(&g, &w);
+        let chal: Vec<Scalar> = (5..40u64).map(Scalar::from).collect();
+        let mut seen = None;
+        let late = |alpha: Scalar, w_p: &[Scalar]| {
+            seen = Some((alpha, w_p.to_vec()));
+            Ok(LateWitness { w_r: vec![Scalar::from(2u64) * w_p[0]], w_o_late: vec![w_p[1] + Scalar::ONE] })
+        };
+        let mut t = Replay::new(chal.clone());
+        let proof = prove_two_phase(&c, &g, &V, &w, late, &mut t, &mut ChaCha20Rng::seed_from_u64(7)).unwrap();
+        let (alpha, w_p) = seen.unwrap();
+        assert_eq!(alpha, chal[0]);
+        assert_eq!(w_p, c.reciprocals_for_test(&w, alpha));
+        verify(&proof, &c, &g, &V, &mut Replay::new(chal.clone())).unwrap();
+        // the one-phase prover with the same values gives the same proof
+        let mut full = w.clone();
+        full.w_r = vec![Scalar::from(2u64) * w_p[0]];
+        *full.w_o.last_mut().unwrap() = w_p[1] + Scalar::ONE;
+        assert!(c.is_satisfied(&full, alpha));
+        let one = prove(&c, &g, &V, &full, &mut Replay::new(chal.clone()), &mut ChaCha20Rng::seed_from_u64(7)).unwrap();
+        assert_eq!(one, proof);
+        // values that ignore alpha do not satisfy the circuit: the prover refuses
+        assert!(prove(&c, &g, &V, &w, &mut Replay::new(chal.clone()), &mut ChaCha20Rng::seed_from_u64(7)).is_err());
+        // a callback error or late values of the wrong length are errors
+        let bad = |_: Scalar, _: &[Scalar]| Err(ProofError::FormatError);
+        assert!(prove_two_phase(&c, &g, &V, &w, bad, &mut Replay::new(chal.clone()), &mut ChaCha20Rng::seed_from_u64(7)).is_err());
+        let short = |_: Scalar, _: &[Scalar]| Ok(LateWitness { w_r: vec![], w_o_late: vec![Scalar::ONE] });
+        assert_eq!(
+            prove_two_phase(&c, &g, &V, &w, short, &mut Replay::new(chal.clone()), &mut ChaCha20Rng::seed_from_u64(7)),
+            Err(ProofError::FormatError)
+        );
+        for n in [0usize, 2] {
+            let late = move |_: Scalar, _: &[Scalar]| Ok(LateWitness { w_r: vec![Scalar::ONE], w_o_late: vec![Scalar::ONE; n] });
+            assert_eq!(
+                prove_two_phase(&c, &g, &V, &w, late, &mut Replay::new(chal.clone()), &mut ChaCha20Rng::seed_from_u64(7)),
+                Err(ProofError::FormatError),
+                "{} LinR values",
+                n
+            );
+        }
     }
 
     #[test]

@@ -425,6 +425,17 @@ pub(crate) struct CommittedOL {
     pub C_O: CompressedRistretto,
 }
 
+impl CommittedOL {
+    /// Set the `LinR` slots (committed later, in `C_R`) from `w_o`.
+    pub(crate) fn set_late(&mut self, partition: &[(Slot, usize)], w_o: &[Scalar]) {
+        for (x, &(slot, t)) in w_o.iter().zip(partition) {
+            if slot == Slot::LinR {
+                self.l_r[t] = *x;
+            }
+        }
+    }
+}
+
 /// The commitment to `w_R` and the `LinR` slots (spec §3.3, CommitR).
 pub(crate) struct CommittedR {
     r_r: [Scalar; 8],

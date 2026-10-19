@@ -11,7 +11,7 @@ pub mod range;
 pub mod reciprocal;
 mod sparse;
 #[cfg(test)]
-mod testutil;
+pub(crate) mod testutil;
 mod transcript;
 pub mod wnla;
 
@@ -19,7 +19,7 @@ pub use self::circuit::{ArithmeticCircuit, CircuitProof, CircuitWitness, Slot};
 pub use self::gens::BpppGens;
 pub use self::mact::{MactEntry, MactProof, MactStatement};
 pub use self::range::{RangeProof, RangeStatement};
-pub use self::reciprocal::{ReciprocalCircuit, ReciprocalRow, ReciprocalWitness};
+pub use self::reciprocal::{LateWitness, ReciprocalCircuit, ReciprocalRow, ReciprocalWitness};
 pub use self::sparse::SparseMatrix;
 pub use self::transcript::BpppTranscript;
 pub use self::wnla::{WnlaProof, WnlaStatement};

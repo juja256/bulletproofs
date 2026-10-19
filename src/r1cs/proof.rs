@@ -56,14 +56,15 @@ pub(super) struct BpppProof {
     pub(super) proof: crate::bppp::CircuitProof,
 }
 
-/// Version tag of a BP++ proof (BP proofs use 0 and 1; 3 was the builder encoding before
-/// spec §6 had one encoding).
+/// Version tag of a BP++ proof (spec §6.2). BP proofs use 0 and 1; 2 and 3 were the BP++
+/// encodings before option B (a tag-2 proof had the same header and body layout, so the tag
+/// changes to make old proofs format errors).
 #[cfg(feature = "bppp")]
-const BPPP_V2: u8 = 2;
+const BPPP_V2: u8 = 4;
 
 impl R1CSProof {
     /// Serializes the proof. A BP proof keeps the upstream encoding (see the BP layout below);
-    /// a BP++ proof is the byte 2, `N'_m` and `N_lin` as `u64` little-endian, then the proof
+    /// a BP++ proof is the byte 4, `N'_m` and `N_lin` as `u64` little-endian, then the proof
     /// (spec §6.2).
     pub fn to_bytes(&self) -> Vec<u8> {
         match &self.0 {

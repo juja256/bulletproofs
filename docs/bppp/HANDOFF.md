@@ -25,7 +25,7 @@ then the zkVM `bpvm` (github.com/juja256/bpvm, a separate repository) on BP++.
 | 6 | `CircuitBuilder` | `src/r1cs/builder.rs`, `backend.rs`, `prover.rs`, `verifier.rs`, `compact.rs`, spec §7 | branch `claude/beautiful-goodall-m369g7` (local commits, not pushed) |
 | 7 | performance and hardening | `wnla.rs`, `batch.rs`, `oblivious.rs`, spec §2.6, §3.11 | branch `bppp-perf` (pushed); format changes held |
 | 7b | tuple poles (option F): lookups of tuples without the bound rule | `reciprocal.rs`, `builder.rs`, `backend.rs`, spec §4.1–4.7, §7.2–7.6 | branch `bppp-tuples` (pushed); reviewed, done |
-| 7c | option B: one BP++ lowering and encoding for every constraint system | `prover.rs`, `verifier.rs`, `proof.rs`, `backend.rs`, spec §6, §7.7 | branch `bppp-one-proof` (local), in progress |
+| 7c | option B: one BP++ lowering and encoding for every constraint system | `prover.rs`, `verifier.rs`, `proof.rs`, `backend.rs`, spec §6, §7.7 | branch `bppp-one-proof` (pushed); reviewed, done |
 | 8 | bpvm on BP++ | other repository | open |
 
 The branches are stacked: `main` ⊂ `bppp-circuit` ⊂ `bppp-reciprocal` ⊂ `bppp-range` ⊂
@@ -113,8 +113,10 @@ What exists:
   constant time) and lowered to BP (logUp over randomized constraints, port of bpvm's `LogUp`,
   §7.5) or to a BP++ reciprocal form circuit (§7.6, proof tag 3). Same gadget code, any time
   `set_backend`. Gadgets that use only `ConstraintSystem` keep the §6 translation (tag 2).
+  (Superseded by option B, phase 7c: one BP++ lowering for every constraint system, tag 4.)
 - Tuples are packed with a public base; components of multi-column tuples need bounds recorded
   by one-column table lookups (§7.3), enforced on both backends so that gadgets are portable.
+  (Superseded by option F, phase 7b: tuple poles compressed with eta, no bound rule.)
   The phase plan's "every variable carries its phase" became: builder operations exist only in
   phase 1 and their variables must exist at the call; numerators and coefficients that read
   `MultiplierRight` are copied into initial columns (§7.6).
@@ -292,3 +294,19 @@ DESIGN (milestone M6). bpvm depends on this fork by git revision.
   R1CS is the case $N_p = 0$, the same circuit as the old §6 translation); §6.2 one protocol (§4,
   `"bppp-r1cs v2"`) and one encoding (byte 2, $N'_m$, $N_{lin}$; tag 3 gone); §7.2 no builder mode;
   §7.7 points to §6.2. Changes the BP++ proofs of plain constraint systems (pins).
+- 2026-10-19 — phase 7c, implementation and review. `prove_bppp`/`verify_bppp` lower every
+  constraint system with `builder_circuit` and prove it with `reciprocal::prove` under
+  `"bppp-r1cs v2"`; the §6 translation (`backend::circuit`, `Constants`) and `BuilderProof` are
+  removed; `builder.active` is left for BP only. Independent reference: plain programs lowered by
+  §7.6 and checked against a direct §6.1 construction (150 random programs), 4 new builder
+  cases, among them a violated linear constraint whose prover circuit differs (`prover_a_l`,
+  `prover_digest`). Review (most capable model): 0 Critical, 2 Important, Minor. Fixed: I1 the
+  tag is now 4 (an old tag-2 proof of a plain R1CS had the same header and body layout and would
+  only fail verification; now a format error); I2 the vector test picks the protocol's
+  challenge order (v2 with eta) for prover-circuit cases; I3 tests for the empty constraint
+  system, a `Witness` in a plain constraint, old tags; Minor: HANDOFF "Done: phase 6" notes the
+  superseded parts, the reference's `builder_mode` renamed. Not done: `proof_from_bytes_shape`
+  builds a dummy circuit (pre-existing, cosmetic); `finish_reciprocal` of an empty argument
+  sets `active` (harmless). Mutants of 7c: 8 of 8 killed. Pins of the R1CS front end updated
+  twice (protocol, then tag). Tests: 151 (bppp parallel yoloproofs, also bppp-vartime), 70
+  (yoloproofs), 34 (default); vectors regenerate unchanged; xcheck 13/13. Phase 7c done.

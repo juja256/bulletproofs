@@ -224,7 +224,7 @@ fn malformed_bppp_proofs_are_rejected() {
     let bp = BulletproofGens::new(64, 1);
     let (proof, V) = prove(Backend::Bppp, [6, 7, 42, 200], 8, &pc, &bp).unwrap();
     let bytes = proof.to_bytes();
-    assert_eq!(bytes[0], 2, "BP++ tag");
+    assert_eq!(bytes[0], 4, "BP++ tag");
     assert!(R1CSProof::from_bytes(&bytes[..bytes.len() - 1]).is_err());
     assert!(R1CSProof::from_bytes(&bytes[..10]).is_err());
     // wrong dimensions in the header: parses (or not) but never verifies
@@ -257,8 +257,8 @@ fn malformed_bppp_proofs_are_rejected() {
     assert!(prove(Backend::Bppp, [6, 7, 42, 200], 8, &pc, &small).is_err());
 }
 
-/// Option B (spec §6): one BP++ encoding for every constraint system — the byte 2, `N'_m` and
-/// `N_lin`, then the reciprocal form proof; the old builder tag 3 is a format error. A plain
+/// Option B (spec §6): one BP++ encoding for every constraint system — the byte 4, `N'_m` and
+/// `N_lin`, then the reciprocal form proof; the old tags 2 and 3 are format errors. A plain
 /// R1CS has `N'_m = max(1, n)` and `N_lin = k`.
 #[test]
 fn one_encoding_for_every_constraint_system() {
@@ -268,11 +268,15 @@ fn one_encoding_for_every_constraint_system() {
     let bytes = proof.to_bytes();
     let u = |i: usize| u64::from_le_bytes(bytes[i..i + 8].try_into().unwrap());
     // n = 1 (multiply) + 8 (bits) + 1 (allocate), k = 4
-    assert_eq!((bytes[0], u(1), u(9)), (2, 10, 4));
+    assert_eq!((bytes[0], u(1), u(9)), (4, 10, 4));
     verify(Backend::Bppp, &R1CSProof::from_bytes(&bytes).unwrap(), &V, 8, &pc, &bp).unwrap();
-    let mut three = bytes.clone();
-    three[0] = 3;
-    assert!(R1CSProof::from_bytes(&three).is_err(), "tag 3 is gone");
+    // the tags of the BP++ encodings before option B (2: §3 proof of a plain R1CS with the same
+    // header and body layout, 3: builder) are format errors, not proofs that fail later
+    for old in [2u8, 3] {
+        let mut x = bytes.clone();
+        x[0] = old;
+        assert!(matches!(R1CSProof::from_bytes(&x), Err(R1CSError::FormatError)), "tag {}", old);
+    }
     // the same statement written with a builder operation (a witness tied to x) is the same
     // kind of proof
     let mut t = Transcript::new(b"one");
@@ -282,7 +286,7 @@ fn one_encoding_for_every_constraint_system() {
     let w = p.witness(Some(Scalar::from(4u64))).unwrap();
     p.constrain(w - x);
     let b = p.prove(&bp).unwrap().to_bytes();
-    assert_eq!(b[0], 2);
+    assert_eq!(b[0], 4);
     let mut t = Transcript::new(b"one");
     let mut v = Verifier::new(&mut t);
     v.set_backend(Backend::Bppp);
@@ -290,4 +294,37 @@ fn one_encoding_for_every_constraint_system() {
     let w = v.witness(None).unwrap();
     v.constrain(w - x);
     v.verify(&R1CSProof::from_bytes(&b).unwrap(), &pc, &bp).unwrap();
+}
+
+/// Corner cases of the plain lowering (review of option B): an empty constraint system (one
+/// padding gate, no inputs) proves and verifies on BP++ and is rejected by the other backend; a
+/// builder `Witness` in a plain constraint is a `GadgetError` on both sides.
+#[test]
+fn plain_corner_cases() {
+    let pc = PedersenGens::default();
+    let bp = BulletproofGens::new(16, 1);
+    let mut t = Transcript::new(b"empty");
+    let mut p = Prover::new(&pc, &mut t);
+    p.set_backend(Backend::Bppp);
+    let proof = p.prove(&bp).unwrap();
+    let bytes = proof.to_bytes();
+    assert_eq!((bytes[0], u64::from_le_bytes(bytes[1..9].try_into().unwrap()), u64::from_le_bytes(bytes[9..17].try_into().unwrap())), (4, 1, 0));
+    for backend in [Backend::Bppp, Backend::Bp] {
+        let mut t = Transcript::new(b"empty");
+        let mut v = Verifier::new(&mut t);
+        v.set_backend(backend);
+        assert_eq!(v.verify(&proof, &pc, &bp).is_ok(), backend == Backend::Bppp, "{:?}", backend);
+    }
+    let mut t = Transcript::new(b"w");
+    let mut p = Prover::new(&pc, &mut t);
+    p.set_backend(Backend::Bppp);
+    let (V, x) = p.commit(Scalar::from(1u64), Scalar::from(2u64));
+    p.constrain(x - Variable::Witness(0));
+    assert!(matches!(p.prove(&bp), Err(R1CSError::GadgetError { .. })));
+    let mut t = Transcript::new(b"w");
+    let mut v = Verifier::new(&mut t);
+    v.set_backend(Backend::Bppp);
+    let x = v.commit(V);
+    v.constrain(x - Variable::Witness(0));
+    assert!(matches!(v.verify(&proof, &pc, &bp), Err(R1CSError::GadgetError { .. })));
 }

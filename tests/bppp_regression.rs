@@ -135,8 +135,8 @@ fn bppp_proofs_are_pinned() {
         "8ffe2a23d9fc9ab7a56602c7de5ef5424f1ed87db14ac7b08fecdb65d1613653",
         "2a48d4d8030d829f69b59399816e9bad94c0723e6eb09f8ada733f04ccd1c176",
         "c0901efd7fa5282e8e55cb0b79016df2a5b7265869b63d88b0df2d28bc4fb713",
-        "3b8491bff607cf15cbee09150936ece24b386236088bc6ee7cde59e811967c06",
-        "d4e8427bfa3e80f36f3b182626582f85fad2dcac1f7a6aba20fb354fecc8d321",
+        "21078855863d69b79787eb06eff4da666c2267a5e07fdd33b4beb59427b6db0a",
+        "2ac7b65d11dcb0907397768fa234e173c7f04f19a409368d0fe860524059f2e9",
     ];
     for (name, g) in &got {
         println!("{}: {}", name, g);

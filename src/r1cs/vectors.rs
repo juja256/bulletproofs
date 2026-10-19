@@ -189,11 +189,13 @@ fn builder_matches_reference_vectors() {
             let g = crate::bppp::BpppGens::new(&pcg, &bpg, c.n_lin, c.n_p + c.n_m).unwrap();
             let V: Vec<CompressedRistretto> = w.v.iter().zip(&w.s).map(|(v, s)| g.commit_input(v, *s).compress()).collect();
             let ch = &case["chal"];
-            let challenges: Vec<Scalar> =
-                ["alpha", "rho", "lambda", "beta", "delta", "tau"].iter().map(|k| testutil::sc(&ch[*k])).chain(testutil::scs(&case["gammas"])).collect();
+            // the challenges in protocol order (v2 starts with eta, as in run_recip_case)
+            let names: &[&str] = if c.uses_eta() { &["eta", "alpha", "rho", "lambda", "beta", "delta", "tau"] } else { &["alpha", "rho", "lambda", "beta", "delta", "tau"] };
+            let challenges: Vec<Scalar> = names.iter().map(|k| testutil::sc(&ch[*k])).chain(testutil::scs(&case["gammas"])).collect();
             let replay = &mut crate::bppp::transcript::Replay::new(challenges);
             assert!(crate::bppp::reciprocal::verify(&proof, &c, &g, &V, replay).is_err(), "{}: the verifier's circuit", name);
-            assert!(!c.is_satisfied(&w, Scalar::ZERO, testutil::sc(&ch["alpha"])), "{}", name);
+            let eta = if c.uses_eta() { testutil::sc(&ch["eta"]) } else { Scalar::ZERO };
+            assert!(!c.is_satisfied(&w, eta, testutil::sc(&ch["alpha"])), "{}", name);
         }
 
         // Real proofs through the public API, both backends.

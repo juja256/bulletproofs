@@ -630,7 +630,8 @@ At `prove`/`verify`, before anything is committed:
 1. For every table with at least one lookup, in id order: append $|T|$ *multiplicity* witnesses
    `Witness(n_w)`, … (one per row, in row order). The prover sets $m_r$ to the number of lookups
    whose evaluated tuple equals row $r$ (component by component, entries as scalars), counting each lookup for the first
-   equal row only, in constant time (every lookup is compared with every row); a lookup equal to no row is a `GadgetError` (prover only).
+   equal row only, in constant time (every lookup is compared with every row, or, for large tables, a bitonic
+   sort of rows and lookups); a lookup equal to no row is a `GadgetError` (prover only).
 2. The arguments $\mathcal A$ are the recorded reciprocal arguments in call order, followed by one
    argument per table with lookups, in id order: the private terms $+1 / (X + \mathrm{pack}(q))$ for
    the lookups $q$ in call order, then the public terms $(-m_r) / (X + \mathrm{pack}(row_r))$ in row

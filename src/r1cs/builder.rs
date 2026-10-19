@@ -15,6 +15,11 @@ use crate::errors::R1CSError;
 /// A column width, in bits.
 pub type Width = u32;
 
+/// Up to this many (row, lookup) pairs the multiplicities are counted directly (≈50 ns a
+/// pair), beyond by an oblivious sort (both constant time; measured crossover: 2^16 rows and
+/// 2^12 lookups take 0.8 s sorted, 13 s directly).
+const DIRECT_COUNT_MAX: usize = 1 << 16;
+
 /// Largest total width of a tuple: packed tuples stay below `2^252 < l`.
 pub const MAX_TUPLE_BITS: u64 = 252;
 
@@ -166,6 +171,7 @@ pub(super) fn pack_row(row: &[u64], widths: &[Width]) -> Scalar {
 }
 
 /// A recorded table.
+#[derive(Clone)]
 pub(super) struct Table {
     pub(super) widths: Vec<Width>,
     pub(super) rows: Vec<Vec<u64>>,
@@ -201,6 +207,9 @@ pub(super) struct Builder {
     pub(super) args: Vec<Argument>,
     /// Recorded bounds `b_x` in bits (spec §7.3).
     bounds: HashMap<Variable, Width>,
+    /// Test hook: count by the oblivious sort from this many (row, lookup) pairs on.
+    #[cfg(test)]
+    pub(super) direct_count_max: Option<usize>,
 }
 
 impl Builder {
@@ -363,7 +372,7 @@ impl Builder {
     /// Finalization (spec §7.4): one multiplicity witness per row of each table with lookups,
     /// and the tables appended to the arguments. With `eval` (the prover) returns the
     /// multiplicities, or an error for a lookup equal to no row. Constant time in the witness:
-    /// `|T|` comparisons per lookup (an oblivious sort would make it `O((|T| + |Q|) log)`).
+    /// `|T|` comparisons per lookup, or an oblivious sort for large tables.
     pub(super) fn finalize(&mut self, eval: Option<&dyn Fn(&LinearCombination) -> Scalar>) -> Result<Vec<Scalar>, R1CSError> {
         let mut values = Vec::new();
         #[cfg(test)]
@@ -377,20 +386,36 @@ impl Builder {
             if let (Some(_), Some(m)) = (eval, &cheat) {
                 values.extend(m[values.len()..values.len() + table.rows.len()].iter().copied());
             } else if let Some(eval) = eval {
-                // Constant time in the witness: every lookup is compared with every row.
-                let rows: Vec<Vec<Scalar>> = table.rows.iter().map(|r| r.iter().map(|e| Scalar::from(*e)).collect()).collect();
-                let mut m = vec![0u64; table.rows.len()];
-                let mut all_found = Choice::from(1u8);
-                for q in &table.queries {
-                    let qv: Vec<Scalar> = q.iter().map(|lc| eval(lc)).collect();
-                    let mut found = Choice::from(0u8);
-                    for (r, row) in rows.iter().enumerate() {
-                        let eq = qv.iter().zip(row).fold(Choice::from(1u8), |acc, (x, y)| acc & x.ct_eq(y));
-                        m[r] += (eq & !found).unwrap_u8() as u64;
-                        found |= eq;
+                // Constant time in the witness: every lookup is compared with every row, or,
+                // for large tables, an oblivious sort (same counts).
+                #[cfg(test)]
+                let direct_max = self.direct_count_max.unwrap_or(DIRECT_COUNT_MAX);
+                #[cfg(not(test))]
+                let direct_max = DIRECT_COUNT_MAX;
+                let (m, all_found) = if table.rows.len().saturating_mul(table.queries.len()) <= direct_max {
+                    let rows: Vec<Vec<Scalar>> = table.rows.iter().map(|r| r.iter().map(|e| Scalar::from(*e)).collect()).collect();
+                    let mut m = vec![0u64; table.rows.len()];
+                    let mut all_found = Choice::from(1u8);
+                    for q in &table.queries {
+                        let mut qv: Vec<Scalar> = q.iter().map(|lc| eval(lc)).collect();
+                        let mut found = Choice::from(0u8);
+                        for (r, row) in rows.iter().enumerate() {
+                            let eq = qv.iter().zip(row).fold(Choice::from(1u8), |acc, (x, y)| acc & x.ct_eq(y));
+                            m[r] += (eq & !found).unwrap_u8() as u64;
+                            found |= eq;
+                        }
+                        all_found &= found;
+                        qv.iter_mut().for_each(|x| x.clear());
                     }
-                    all_found &= found;
-                }
+                    (m, all_found)
+                } else {
+                    let key = |xs: &mut dyn Iterator<Item = Scalar>| xs.flat_map(|x| x.to_bytes()).collect::<Vec<u8>>();
+                    let rows: Vec<Vec<u8>> = table.rows.iter().map(|r| key(&mut r.iter().map(|e| Scalar::from(*e)))).collect();
+                    let mut lookups: Vec<Vec<u8>> = table.queries.iter().map(|q| key(&mut q.iter().map(|lc| eval(lc)))).collect();
+                    let out = super::oblivious::count(&rows, &lookups);
+                    lookups.iter_mut().flatten().for_each(|b| *b = 0);
+                    out
+                };
                 if !bool::from(all_found) {
                     return Err(gadget_error("lookup query is not a table row"));
                 }
@@ -741,6 +766,45 @@ mod tests {
         b.lookup(t, &[x.into()], C).unwrap();
         let zero = |_: &LinearCombination| Scalar::ZERO;
         assert!(b.finalize(Some(&zero)).is_err());
+    }
+
+    /// The oblivious sort gives the multiplicities of the direct count (duplicate rows, a
+    /// multi-column table, a lookup equal to no row).
+    #[test]
+    fn oblivious_counting_matches_direct() {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        for trial in 0..40 {
+            let mut b = Builder::default();
+            let n_w = rng.gen_range(1..30);
+            let vals: Vec<(u64, u64)> = (0..n_w).map(|_| (rng.gen_range(0..6), rng.gen_range(0..3))).collect();
+            let w: Vec<Variable> = (0..2 * n_w).map(|_| b.witness()).collect();
+            let rows: Vec<Vec<u64>> = (0..rng.gen_range(1..20)).map(|_| vec![rng.gen_range(0..6), rng.gen_range(0..3)]).collect();
+            let range = b.table((0..8).map(|x| vec![x]).collect(), &[3]).unwrap();
+            let t = b.table(rows, &[3, 3]).unwrap();
+            for x in &w {
+                b.lookup(range, &[(*x).into()], C).unwrap();
+            }
+            for i in 0..n_w {
+                b.lookup(t, &[w[2 * i].into(), w[2 * i + 1].into()], C).unwrap();
+            }
+            let eval = |lc: &LinearCombination| {
+                lc.terms
+                    .iter()
+                    .map(|(x, c)| match x {
+                        Variable::Witness(i) => c * Scalar::from(if i % 2 == 0 { vals[i / 2].0 } else { vals[i / 2].1 }),
+                        _ => *c,
+                    })
+                    .sum()
+            };
+            let mut b2 = Builder { direct_count_max: Some(0), tables: b.tables.clone(), n_w: b.n_w, ..Builder::default() };
+            let direct = b.finalize(Some(&eval));
+            let sorted = b2.finalize(Some(&eval));
+            assert_eq!(direct.is_ok(), sorted.is_ok(), "trial {}", trial);
+            if let (Ok(d), Ok(s)) = (direct, sorted) {
+                assert_eq!(d, s, "trial {}", trial);
+            }
+        }
     }
 
     #[test]

@@ -9,6 +9,7 @@ mod compact;
 mod constraint_system;
 mod linear_combination;
 mod metrics;
+mod oblivious;
 mod proof;
 mod prover;
 mod verifier;

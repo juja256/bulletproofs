@@ -277,6 +277,41 @@ mod tests {
         }
     }
 
+    /// The circuits built from the statements equal the reference's field by field, honest
+    /// witnesses match, and the proofs reproduce `tests/vectors/bppp/mact.json`.
+    #[test]
+    fn matches_reference_vectors() {
+        use crate::bppp::testutil::{self, int, sc};
+        let file: serde_json::Value = serde_json::from_str(include_str!("../../tests/vectors/bppp/mact.json")).unwrap();
+        for case in file["cases"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let u = |k: &str| case[k].as_u64().unwrap() as usize;
+            let st = MactStatement::new(case["base"].as_u64().unwrap(), u("n_in"), u("n_out")).unwrap();
+            let (c, info) = st.circuit();
+            assert_eq!(c, testutil::recip_circuit(case), "{}: circuit", name);
+            let w = testutil::recip_witness(case);
+            if case["satisfied"].as_bool().unwrap() {
+                let parse = |v: &serde_json::Value| -> Vec<MactEntry> {
+                    v.as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|e| MactEntry { amount: int(&e["amount"]) as u64, asset: sc(&e["asset"]), blinding: sc(&e["blinding"]) })
+                        .collect()
+                };
+                let (ins, outs) = (parse(&case["inputs"]), parse(&case["outputs"]));
+                let entries: Vec<MactEntry> = ins.iter().chain(&outs).copied().collect();
+                let digits: Vec<Vec<u64>> = outs.iter().map(|e| decompose(e.amount as u128, &info.layout)).collect();
+                let ours = info.witness(&entries, &digits);
+                assert!(
+                    ours.w_d == w.w_d && ours.w_o == w.w_o && ours.v == w.v && ours.s == w.s,
+                    "{}: witness",
+                    name
+                );
+            }
+            testutil::run_recip_case(case, &c, &w);
+        }
+    }
+
     /// An output with a digit outside its radix (a "negative" amount in disguise) does not verify.
     #[test]
     fn output_digit_out_of_range_is_rejected() {

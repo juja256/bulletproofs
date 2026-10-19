@@ -10,6 +10,8 @@ mod poly;
 pub mod range;
 pub mod reciprocal;
 mod sparse;
+#[cfg(test)]
+mod testutil;
 mod transcript;
 pub mod wnla;
 

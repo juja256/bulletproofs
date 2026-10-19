@@ -8,6 +8,8 @@ and ("N", i). Challenges are inputs, so the vectors check the protocol algebra; 
 and point encoding are checked separately (transcript tests in Rust).
 """
 
+import random
+
 L = 2**252 + 27742317777372353535851937790883648493
 
 
@@ -870,3 +872,318 @@ def recip_self_check(rc, wit, chal, gammas, proof):
     verifies = recip_verify(*args)
     assert recip_verify(*args, single=True) == verifies == v3
     return satisfied, verifies
+
+
+# ---------------------------------------------------------------------------------------------
+# Range proofs and multi-asset transactions (spec section 5, paper sections 6.4-6.5)
+#
+# Front ends that build reciprocal form circuits (section 4) column for column as the spec
+# prescribes; they are proven with recip_prove and checked with recip_self_check.
+
+U64 = 2**64
+
+
+def range_layout(B, b):
+    """Spec 5.1: the digit layout [(weight g_j, radix r_j)] of the range [0, B) in base b, in
+    construction order (the paper's Cases 1-3, plus a radix-B digit for B < b)."""
+    assert B >= 2 and b >= 2
+    lay, S, p = [], 0, 1
+    while S + (b - 1) * p <= B - 1:  # 1. powers of b while they fit
+        lay.append((p, b))
+        S += (b - 1) * p
+        p *= b
+    R = B - 1 - S
+    if R == 0:
+        return lay
+    if R % (b - 1) == 0 and R // (b - 1) <= S + 1:  # 2. Case 1: one more base-b digit
+        lay.append((R // (b - 1), b))
+    elif R <= S + 1:  # 3. Case 2: a binary digit
+        lay.append((R, 2))
+    elif R >= b - 1:  # 4. Case 3: a base-b digit, then a binary digit for the rest
+        g = R // (b - 1)
+        lay.append((g, b))
+        S += (b - 1) * g
+        R -= (b - 1) * g
+        if R > 0:
+            assert R < b - 1 <= S + 1
+            lay.append((R, 2))
+    else:  # 5. B < b
+        assert S == 0 and B < b and 2 <= R < b - 1
+        lay.append((1, R + 1))
+    return lay
+
+
+def range_layout_order(layout):
+    """Digit indices in increasing weight; ties: the later digit counts as larger (spec 5.1)."""
+    return sorted(range(len(layout)), key=lambda j: (layout[j][0], j))
+
+
+def range_decompose(x, layout, strict=True):
+    """Spec 5.1: digits of x, from the largest weight down, d_j = max(0, ceil((x - M_j)/g_j)),
+    M_j the maximum of the digits of smaller weight. strict=False accepts x >= B (for
+    unsatisfied vectors): the excess then lands in the largest digit, which leaves its radix,
+    and sum_j g_j d_j = x still holds."""
+    assert x >= 0
+    order = range_layout_order(layout)
+    M, acc = {}, 0
+    for j in order:
+        M[j] = acc
+        acc += (layout[j][1] - 1) * layout[j][0]
+    d = [0] * len(layout)
+    rem = x
+    for j in reversed(order):
+        g = layout[j][0]
+        d[j] = max(0, -((M[j] - rem) // g))  # ceil((rem - M_j) / g)
+        rem -= d[j] * g
+        assert 0 <= rem <= M[j]
+    assert rem == 0 and sum(g * dj for (g, _), dj in zip(layout, d)) == x
+    if strict:
+        assert all(0 <= dj < r for (_, r), dj in zip(layout, d)), "x outside [0, B)"
+    return d
+
+
+def range_tables(radices):
+    """Spec 5.2 tables: the distinct radices in ascending order and the offset of each table's
+    multiplicities m_{r,1..r-1} in the concatenation; returns (tables, offsets, N_O)."""
+    tables = sorted(set(radices))
+    off, n = {}, 0
+    for r in tables:
+        off[r] = n
+        n += r - 1
+    return tables, off, n
+
+
+def range_multiplicities(digits, radices):
+    """m_{r,s} (s = 1..r-1) per table, concatenated. Digits outside [1, r) are not counted
+    (value 0 is implicit; a digit >= r, possible only in an unsatisfied witness, has no slot)."""
+    tables, off, n = range_tables(radices)
+    m = [0] * n
+    for d, r in zip(digits, radices):
+        if 1 <= d < r:
+            m[off[r] + d - 1] += 1
+    return m
+
+
+def range_table_rows(radices, n_mp, mult_col):
+    """Spec 5.2 reciprocal rows, one per table r: (w_P,p, 1) for the poles p of radix r in pole
+    order; then per s = 1..r-1 the terms (m_{r,s}, 1, pole 0) and (m_{r,s}, -1, pole s); the
+    constant (-N_r, pole 0). radices[p] is the radix of pole p (None for a non-digit pole),
+    n_mp = N'_m (w_P,p is column N'_m + p), mult_col the column of the first multiplicity."""
+    digit_radices = [r for r in radices if r is not None]
+    tables, off, _ = range_tables(digit_radices)
+    rows = []
+    for r in tables:
+        terms = [(n_mp + p, 1, None) for p, rp in enumerate(radices) if rp == r]
+        for s in range(1, r):
+            col = mult_col + off[r] + s - 1
+            terms += [(col, 1, 0), (col, L - 1, s)]
+        nr = sum(rp == r for rp in digit_radices)
+        rows.append({"terms": terms, "consts": [(-nr % L, 0)]})
+    return rows
+
+
+def range_circuit(ranges, base):
+    """Spec 5.2: the reciprocal form circuit for m ranges [A_i, B_i) in base b. Returns
+    (rc, info) with info = {"layouts", "radices" (per pole), "inline"}."""
+    assert 2 <= base <= 256 and len(ranges) >= 1
+    for A, B in ranges:
+        assert 0 <= A and A + 2 <= B <= U64
+    layouts = [range_layout(B - A, base) for A, B in ranges]
+    poles = [(i, g, r) for i, lay in enumerate(layouts) for g, r in lay]
+    np_ = len(poles)
+    radices = [r for _, _, r in poles]
+    _, _, n_mult = range_tables(radices)
+    inline = n_mult <= np_
+    m = len(ranges)
+    w_l = [[(p, -g % L) for p, (i2, g, _) in enumerate(poles) if i2 == i] for i in range(m)]
+    rc = {"n_p": np_, "n_m": 0, "n_o": n_mult, "n_v": 1, "n_lin": 0 if inline else n_mult,
+          "k": m, "n_l": m, "f_l": 1, "f_m": 0,
+          "partition": [["nO" if inline else "lL", t] for t in range(n_mult)],
+          "w_n": [[] for _ in range(np_)], "a_n": [1] * np_, "w_m": [], "a_m": [],
+          "w_l": w_l, "a_l": [-A % L for A, _ in ranges],
+          "recip": range_table_rows(radices, np_, 2 * np_)}
+    recip_check_shape(rc)
+    return rc, {"layouts": layouts, "radices": radices, "inline": inline}
+
+
+def range_witness(values, blindings, ranges, base, strict=True):
+    """Spec 5.2 witness: w_D = the digits of v_i - A_i (range after range), w_O = the
+    multiplicities, inputs v_i with blindings s_i. strict=False: see range_decompose."""
+    assert len(values) == len(blindings) == len(ranges)
+    digits = []
+    for v, (A, B) in zip(values, ranges):
+        digits += range_decompose(v - A, range_layout(B - A, base), strict)
+    radices = [r for A, B in ranges for _, r in range_layout(B - A, base)]
+    return {"w_D": [d % L for d in digits], "w_L": [], "w_R": [],
+            "w_O": range_multiplicities(digits, radices),
+            "v": [[v % L] for v in values], "s": [s % L for s in blindings]}
+
+
+def mact_circuit(n_in, n_out, base):
+    """Spec 5.3: the reciprocal form circuit of a multi-asset transaction with n_in inputs and
+    n_out outputs in base b. Returns (rc, info)."""
+    k = n_in + n_out
+    assert k >= 1 and 2 <= base <= 256
+    lay = range_layout(U64, base)
+    np_ = k + n_out * len(lay)
+    radices = [None] * k + [r for _ in range(n_out) for _, r in lay]
+    _, _, n_mult = range_tables([r for r in radices if r is not None])
+    inline = n_mult <= np_
+    n_lin = max(k, 0 if inline else n_mult)
+    C = lambda i: 2 * np_ + i  # noqa: E731  amount copy c_i
+    dpole = lambda j, x: k + j * len(lay) + x  # noqa: E731  digit x of output j
+    w_n = [[(C(i), 1 if i < n_in else L - 1)] for i in range(k)] + [[] for _ in range(np_ - k)]
+    a_n = [0] * k + [1] * (np_ - k)
+    w_l = []
+    for i in range(k):
+        w_l.append([(C(i), L - 1)])  # a_i - c_i = 0
+        w_l.append([(i, L - 1)])  # t_i - w_D,i = 0
+    for j in range(n_out):
+        w_l.append([(dpole(j, x), -g % L) for x, (g, _) in enumerate(lay)] + [(C(n_in + j), 1)])
+    recip = [{"terms": [(np_ + i, 1, None) for i in range(k)], "consts": []}]
+    recip += range_table_rows(radices, np_, C(k))
+    rc = {"n_p": np_, "n_m": 0, "n_o": k + n_mult, "n_v": 2, "n_lin": n_lin, "k": k,
+          "n_l": len(w_l), "f_l": 1, "f_m": 0,
+          "partition": [["lO", i] for i in range(k)]
+          + [["nO" if inline else "lL", t] for t in range(n_mult)],
+          "w_n": w_n, "a_n": a_n, "w_m": [], "a_m": [], "w_l": w_l, "a_l": [0] * len(w_l),
+          "recip": recip}
+    recip_check_shape(rc)
+    return rc, {"layout": lay, "radices": radices, "inline": inline}
+
+
+def mact_witness(inputs, outputs, base, strict=True, digits=None):
+    """Spec 5.3 witness from inputs/outputs [(amount, asset type, blinding)]. strict=False
+    lets an output amount be >= 2^64 (range_decompose); digits overrides the digits of the
+    outputs (a list per output, None to keep), for unsatisfied vectors; the linear rows must
+    still hold."""
+    entries = list(inputs) + list(outputs)
+    lay = range_layout(U64, base)
+    out_digits = []
+    for j, (a, _, _) in enumerate(outputs):
+        d = range_decompose(a, lay, strict)
+        if digits is not None and digits[j] is not None:
+            d = list(digits[j])
+            assert len(d) == len(lay) and sum(g * x for (g, _), x in zip(lay, d)) == a
+        out_digits += d
+    radices = [r for _ in outputs for _, r in lay]
+    return {"w_D": [t % L for _, t, _ in entries] + [d % L for d in out_digits],
+            "w_L": [], "w_R": [],
+            "w_O": [a % L for a, _, _ in entries] + range_multiplicities(out_digits, radices),
+            "v": [[a % L, t % L] for a, t, _ in entries], "s": [s % L for _, _, s in entries]}
+
+
+def range_layout_self_check():
+    """Spec 5.1 checks: every layout is exact (the digit sums are exactly [0, B), with
+    sum (r_j - 1) g_j = B - 1), satisfies the sorted-prefix rule, and every decomposition is
+    valid; pure power layouts give the ordinary base-b digits."""
+
+    def exact_small(B, b, lay):
+        sums = {0}
+        for g, r in lay:
+            sums = {s + d * g for s in sums for d in range(r)}
+        assert sums == set(range(B)), (B, b, lay)
+
+    def prefix_rule(B, b, lay):
+        acc = 0
+        for j in range_layout_order(lay):
+            g, r = lay[j]
+            assert 1 <= g <= acc + 1 and 2 <= r <= max(b, 2), (B, b, lay)
+            acc += (r - 1) * g
+        assert acc == B - 1
+
+    def paper_counts(B, b):
+        """(digits, radices) of the paper's 6.4.1: Case 1 ((b-1) | (B-1)) and Case 2
+        (b^(n-1) < B <= 2 b^(n-1)) n digits, Case 3 n + 1, n = ceil(log_b B); B < b: one
+        digit of radix B (B = 2: radix 2)."""
+        if B <= b:
+            return 1, {B}
+        n = 1
+        while b**n < B:
+            n += 1
+        if (B - 1) % (b - 1) == 0:
+            return n, {b}
+        return (n, {b, 2}) if B <= 2 * b ** (n - 1) else (n + 1, {b, 2})
+
+    def check_counts(B, b, lay):
+        nd, rad = paper_counts(B, b)
+        assert len(lay) == nd and {r for _, r in lay} == rad, (B, b, lay)
+
+    for b in range(2, 257):
+        for B in range(2, 300):
+            lay = range_layout(B, b)
+            prefix_rule(B, b, lay)
+            check_counts(B, b, lay)
+            exact_small(B, b, lay)
+            assert all(r in (b, 2) for _, r in lay) or (B < b and lay == [(1, B)])
+            if b in (2, 3, 4, 16, 256):
+                for x in range(B):
+                    range_decompose(x, lay)
+    rng = random.Random(5)
+    large = [U64, U64 - 1, U64 // 3, 2**63 + 1, 10**18, 16**15 + 1, 2 * 16**15 + 7,
+             16**15 * 15, 256**7 * 3 + 5, 2**40 + 2**20, 1000, 4097]
+    large += [rng.randrange(2, U64 + 1) for _ in range(20)]
+    for b in (2, 3, 4, 7, 10, 16, 255, 256):
+        for B in large:
+            lay = range_layout(B, b)
+            prefix_rule(B, b, lay)
+            check_counts(B, b, lay)
+            xs = [0, 1, B - 1, B // 2] + [rng.randrange(B) for _ in range(200)]
+            for x in xs:
+                d = range_decompose(x, lay)
+                if B == b ** len(lay) and all(r == b for _, r in lay):
+                    assert d == [(x // b**j) % b for j in range(len(lay))]
+            # an out-of-range value: the decomposition still satisfies the linear row, and
+            # some digit leaves its radix
+            d = range_decompose(B + rng.randrange(B), lay, strict=False)
+            assert any(not 0 <= x < r for (_, r), x in zip(lay, d))
+    for b in (2, 3, 4, 16):  # counts for a longer stretch of small B
+        for B in range(300, 5000):
+            check_counts(B, b, range_layout(B, b))
+    # B = 2^64 in base 16 / 256 / 2: the plain powers
+    assert range_layout(U64, 16) == [(16**j, 16) for j in range(16)]
+    assert range_layout(U64, 256) == [(256**j, 256) for j in range(8)]
+    assert range_layout(U64, 2) == [(2**j, 2) for j in range(64)]
+
+
+def range_circuit_self_check():
+    """Semantic checks of the section-5 circuits without proving: the reciprocal circuit
+    (spec 4.1, at a random alpha) is satisfied exactly when the statement holds. Range: every
+    value in [A, B + 5) for small ranges, out-of-range values decomposed with strict=False.
+    MACT: balanced / unbalanced amounts, digit tampering that keeps the linear row."""
+    rng = random.Random(7)
+    for b in (2, 3, 4, 16):
+        for B in (2, 3, 5, 10, 16, 17, 31, 64, 100):
+            A = rng.randrange(1000)
+            rc, info = range_circuit([(A, A + B)], b)
+            assert info["layouts"][0] == range_layout(B, b)
+            for v in range(A, A + B + 5):
+                wit = range_witness([v], [1], [(A, A + B)], b, strict=v < A + B)
+                recip_ok, ord_ok = recip_satisfied(rc, wit, rng.randrange(1, L))
+                assert ord_ok and recip_ok == (v < A + B), (b, B, v)
+                # wrong multiplicities break the table rows
+                wit["w_O"][0] += 1
+                assert not recip_satisfied(rc, wit, rng.randrange(1, L))[0]
+    ranges = [(0, U64), (5, 1005), (3, 5)]
+    for b in (2, 4, 16):
+        rc, _ = range_circuit(ranges, b)
+        for vals, ok in (([0, 5, 3], True), ([U64 - 1, 1004, 4], True), ([7, 1005, 3], False),
+                         ([U64, 5, 4], False), ([1, 6, 5], False)):
+            wit = range_witness(vals, [1, 2, 3], ranges, b, strict=ok)
+            assert recip_satisfied(rc, wit, rng.randrange(1, L)) == (ok, True)
+    t0, t1 = rng.randrange(L), rng.randrange(L)
+    for b in (4, 16):
+        rc, _ = mact_circuit(2, 2, b)
+        lay = range_layout(U64, b)
+        for ins, outs, ok in ((([9, t0, 1], [U64 - 1, t1, 2]), ([U64 - 1, t1, 3], [9, t0, 4]), True),
+                              (([9, t0, 1], [7, t1, 2]), ([8, t0, 3], [8, t1, 4]), False),
+                              (([9, t0, 1], [7, t0, 2]), ([8, t0, 3], [8, t0, 4]), True),
+                              (([9, t0, 1], [7, t0, 2]), ([8, t0, 3], [8, t1, 4]), False)):
+            wit = mact_witness(ins, outs, b)
+            assert recip_satisfied(rc, wit, rng.randrange(1, L)) == (ok, True)
+        d = range_decompose(b + 3, lay)
+        d[0] += b
+        d[1] -= 1
+        wit = mact_witness([(b + 3, t0, 1), (0, t1, 2)], [(b + 3, t0, 3), (0, t1, 4)], b,
+                           digits=[d, None])
+        assert recip_satisfied(rc, wit, rng.randrange(1, L)) == (False, True)

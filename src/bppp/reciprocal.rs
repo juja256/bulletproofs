@@ -1359,6 +1359,34 @@ mod tests {
         assert!(!x.uses_eta());
     }
 
+    /// v2 proofs in a batch (spec §3.11) next to v1 proofs; a bad one fails the batch.
+    #[test]
+    fn tuple_poles_batch() {
+        let s = |x: u64| Scalar::from(x);
+        let mut m = vec![0u64; 16];
+        m[3] = 1;
+        let (c, w) = tuple_lookup(&[(s(3), s(5))], &rows16(), &m);
+        let (r, rw) = range_proof(4, 3, &digits_of(37, 4, 3), true);
+        let pc = PedersenGens::default();
+        let bp = BulletproofGens::new(64, 1);
+        let g = BpppGens::new(&pc, &bp, c.n_lin, c.n_p + c.n_m).unwrap();
+        let gr = BpppGens::new(&pc, &bp, r.n_lin, r.n_p + r.n_m).unwrap();
+        let Vr = inputs(&gr, &rw);
+        let mut rng = ChaCha20Rng::seed_from_u64(9);
+        let p1 = prove(&c, &g, &[], &w, &mut Transcript::new(b"b"), &mut rng).unwrap();
+        let p2 = prove(&r, &gr, &Vr, &rw, &mut Transcript::new(b"b"), &mut rng).unwrap();
+        let run = |p1: &CircuitProof| {
+            let mut b = crate::bppp::BatchVerifier::new(&pc, &bp, ChaCha20Rng::seed_from_u64(1));
+            b.add_reciprocal(p1, &c, &[], &mut Transcript::new(b"b"))?;
+            b.add_reciprocal(&p2, &r, &Vr, &mut Transcript::new(b"b"))?;
+            b.verify()
+        };
+        run(&p1).unwrap();
+        let mut bad = p1.clone();
+        bad.C_O = p2.C_O;
+        assert!(run(&bad).is_err());
+    }
+
     /// The v2 digest covers the tuple poles and the pole polynomials; v1 circuits keep the v1
     /// digest (regression pins and vectors), and a length-1 pole hashes differently in v2.
     #[test]

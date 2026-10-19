@@ -17,7 +17,7 @@ use sha3::{Digest, Sha3_256};
 use super::gens::BpppGens;
 use super::poly::{pow_signed, Poly, VecPoly};
 use super::sparse::SparseMatrix;
-use super::transcript::{BpppTranscript, DynRng, Randomness};
+use super::transcript::BpppTranscript;
 use super::wnla::{self, WnlaProof, WnlaStatement};
 use crate::errors::ProofError;
 use crate::util;
@@ -337,13 +337,8 @@ fn commit(gens: &BpppGens, r: &[Scalar; 8], l: &[Scalar], n: &[Scalar]) -> Ristr
         + util::msm_slices(n, gens.n, util::MSM_CHUNK_CT, false)
 }
 
-fn absorb_statement<T: BpppTranscript>(
-    t: &mut T,
-    c: &ArithmeticCircuit,
-    gens: &BpppGens,
-    V: &[CompressedRistretto],
-    bind: bool,
-) {
+/// Absorb the statement (spec §3.8); returns the circuit digest.
+fn absorb_statement<T: BpppTranscript>(t: &mut T, c: &ArithmeticCircuit, gens: &BpppGens, V: &[CompressedRistretto]) -> [u8; 32] {
     t.domain_sep(b"bppp-circuit v1");
     let labels: [&'static [u8]; 8] = [b"N_m", b"N_O", b"N_v", b"N_lin", b"k", b"N_l", b"f_l", b"f_m"];
     for (label, x) in labels.iter().zip(c.dims()) {
@@ -353,12 +348,12 @@ fn absorb_statement<T: BpppTranscript>(
     // they are part of the statement; the others are the fixed setup.
     t.append_point(b"G", &gens.g.compress());
     t.append_point(b"H_0", &gens.h[0].compress());
-    if bind {
-        t.append_message(b"circuit", &c.digest());
-    }
+    let digest = c.digest();
+    t.append_message(b"circuit", &digest);
     for v in V {
         t.append_point(b"V", v);
     }
+    digest
 }
 
 /// A challenge that must be invertible (zero has probability `2^-252`).
@@ -383,20 +378,26 @@ pub fn prove<T: BpppTranscript, R: RngCore + CryptoRng>(
     transcript: &mut T,
     rng: &mut R,
 ) -> Result<CircuitProof, ProofError> {
-    prove_impl(c, gens, V, w, transcript, Randomness::Derived(rng), true, true)
+    let secrets = w.w_l.iter().chain(&w.w_r).chain(&w.w_o).chain(w.v.iter().flatten()).chain(&w.s);
+    prove_impl(c, gens, V, w, transcript, |t, digest| super::transcript::prover_rng(t, b"circuit", digest, secrets, rng), true)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn prove_impl<T: BpppTranscript, R: RngCore + CryptoRng>(
+/// The prover with the randomness `rng_for(transcript, digest)`, made once the statement is
+/// absorbed: derived from the transcript by [`prove`], the caller's RNG as is in the tests.
+fn prove_impl<T, R, F>(
     c: &ArithmeticCircuit,
     gens: &BpppGens,
     V: &[CompressedRistretto],
     w: &CircuitWitness,
     transcript: &mut T,
-    randomness: Randomness<R>,
-    bind: bool,
+    rng_for: F,
     require_satisfied: bool,
-) -> Result<CircuitProof, ProofError> {
+) -> Result<CircuitProof, ProofError>
+where
+    T: BpppTranscript,
+    R: RngCore + CryptoRng,
+    F: FnOnce(&T, &[u8; 32]) -> R,
+{
     // The generators bound the dimensions by memory that exists, so check them first.
     c.check_gens(gens)?;
     c.check()?;
@@ -404,17 +405,8 @@ fn prove_impl<T: BpppTranscript, R: RngCore + CryptoRng>(
     if V.len() != c.k {
         return Err(ProofError::FormatError);
     }
-    absorb_statement(transcript, c, gens, V, bind);
-    let mut derived;
-    let rng: &mut dyn rand_core::CryptoRngCore = match randomness {
-        Randomness::Given(r) => r,
-        Randomness::Derived(r) => {
-            let secrets = w.w_l.iter().chain(&w.w_r).chain(&w.w_o).chain(w.v.iter().flatten()).chain(&w.s);
-            derived = super::transcript::prover_rng(&*transcript, b"circuit", &c.digest(), secrets, r);
-            &mut derived
-        }
-    };
-    let rng = &mut DynRng(rng);
+    let digest = absorb_statement(transcript, c, gens, V);
+    let rng = &mut rng_for(&*transcript, &digest);
     let ol = commit_ol(gens, c.n_lin, &c.partition, &w.w_l, &w.w_o, rng);
     let r = commit_r(gens, &ol, &w.w_r, rng);
     transcript.append_point(b"C_L", &ol.C_L);
@@ -654,39 +646,7 @@ impl CircuitProof {
         V: &[CompressedRistretto],
         transcript: &mut T,
     ) -> Result<(), ProofError> {
-        self.verify_impl(c, gens, V, transcript, true)
-    }
-
-    fn verify_impl<T: BpppTranscript>(
-        &self,
-        c: &ArithmeticCircuit,
-        gens: &BpppGens,
-        V: &[CompressedRistretto],
-        transcript: &mut T,
-        bind: bool,
-    ) -> Result<(), ProofError> {
-        c.check_gens(gens)?;
-        c.check().map_err(|_| ProofError::VerificationError)?;
-        if V.len() != c.k {
-            return Err(ProofError::VerificationError);
-        }
-        absorb_statement(transcript, c, gens, V, bind);
-        transcript.append_point(b"C_L", &self.C_L);
-        transcript.append_point(b"C_R", &self.C_R);
-        transcript.append_point(b"C_O", &self.C_O);
-        self.verify_inner(c, gens, V, transcript)
-    }
-
-    /// The inner verification (spec §3.7), from the challenge `rho` on; the caller has checked
-    /// the shapes and absorbed the statement and `C_L`, `C_R`, `C_O`.
-    pub(crate) fn verify_inner<T: BpppTranscript>(
-        &self,
-        c: &ArithmeticCircuit,
-        gens: &BpppGens,
-        V: &[CompressedRistretto],
-        transcript: &mut T,
-    ) -> Result<(), ProofError> {
-        self.inner_terms(c, gens, V, transcript)?.check(gens)
+        self.terms(c, gens, V, transcript)?.check(gens)
     }
 
     /// The terms of the verification equation (spec §3.7) of [`CircuitProof::verify`], for
@@ -703,18 +663,18 @@ impl CircuitProof {
         if V.len() != c.k {
             return Err(ProofError::VerificationError);
         }
-        absorb_statement(transcript, c, gens, V, true);
+        absorb_statement(transcript, c, gens, V);
         transcript.append_point(b"C_L", &self.C_L);
         transcript.append_point(b"C_R", &self.C_R);
         transcript.append_point(b"C_O", &self.C_O);
-        self.inner_terms(c, gens, V, transcript)
+        self.inner_terms(c, V, transcript)
     }
 
-    /// [`CircuitProof::verify_inner`] up to the multiscalar multiplication.
+    /// The terms of the inner verification (spec §3.7), from the challenge `rho` on; the caller
+    /// has checked the shapes and absorbed the statement and `C_L`, `C_R`, `C_O`.
     pub(crate) fn inner_terms<T: BpppTranscript>(
         &self,
         c: &ArithmeticCircuit,
-        gens: &BpppGens,
         V: &[CompressedRistretto],
         transcript: &mut T,
     ) -> Result<Terms, ProofError> {
@@ -901,7 +861,7 @@ mod tests {
         t: &mut T,
         rng: &mut R,
     ) -> Result<CircuitProof, ProofError> {
-        prove_impl(c, g, V, w, t, Randomness::Given(rng), true, false)
+        prove_impl(c, g, V, w, t, |_, _| rng, false)
     }
 
     fn prove_and_verify(c: &ArithmeticCircuit, w: &CircuitWitness, rng: &mut ChaCha20Rng) -> Result<(), ProofError> {
@@ -1193,7 +1153,7 @@ mod tests {
         assert!(proof.verify(&c, &g, &V, &mut Transcript::new(b"t")).is_err());
         // Replay the verifier: A is the coefficient of G in the check, B the rest; G := -B/A.
         let mut t = Transcript::new(b"t");
-        absorb_statement(&mut t, &c, &g, &V, true);
+        absorb_statement(&mut t, &c, &g, &V);
         t.append_point(b"C_L", &proof.C_L);
         t.append_point(b"C_R", &proof.C_R);
         t.append_point(b"C_O", &proof.C_O);

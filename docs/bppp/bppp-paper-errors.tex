@@ -402,10 +402,16 @@ $(x_0, \dots, x_{m-1})$ cannot be compressed with a second challenge as in logUp
 commitment round. Packing it with a public base, $\sum_j 2^{o_j} x_j$, is sound only if every
 component is already known to be in range (otherwise $(x_0 + 2^{w_0}, x_1 - 1)$ collides with
 $(x_0, x_1)$, and even with all but one component in range the remaining one can absorb the
-difference); in particular a lookup into a multi-column table does \emph{not} by itself bound its
-components, unlike logUp with a random compression. Our circuit builder records bounds only
-from lookups into one-column tables and requires them for every component of a packed tuple
-(\texttt{docs/bppp/spec.md} \S7.3).
+difference); in particular a packed lookup into a multi-column table does \emph{not} by itself
+bound its components, unlike logUp with a random compression. Our first builder (phase 6)
+therefore required a recorded bound for every component of a packed tuple. We now add the
+round instead (an extension, not in the paper; \texttt{docs/bppp/spec.md} \S4.1, \S4.3, \S4.7):
+the components are committed in $C_O$, then a challenge $\eta$, then $C_L$ with the poles
+$w_{D,i} = \sum_j \eta^j x_{i,j}$ (defined by linear rows compiled for $\eta$), then $\alpha$ and
+$C_R$; public poles become polynomials in $\eta$. Distinct tuples fixed before $\eta$ collide with
+probability at most $\binom{|S|}{2}(m-1)/\ell$ (Schwartz--Zippel), so a lookup again bounds its
+components as in logUp. The proof size is unchanged; circuits without tuples keep the paper's
+transcript.
 
 \paragraph{Denominators defined by ordinary rows.} Eq.~(65) defines the poles by $W_d w_I$, a
 function of the initial witness only. It suffices that the pole column $w_D$ itself is committed

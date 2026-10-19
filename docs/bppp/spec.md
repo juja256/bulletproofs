@@ -30,7 +30,7 @@ Source: Eagen, Kanjalkar, Ruffing, Nick, *Bulletproofs++*, ePrint 2022/510 (vers
   (`circuit` or `reciprocal`), `"digest"` (§3.9, §4.4) and `"witness"` = SHA3-256 of the witness
   scalars (circuit: $w_L, w_R, w_O$, the inputs, their blindings; reciprocal: $w_D, w_L$, the
   elements of $w_O$ not in slot $l_R$, the inputs, the blindings — the late values are not known
-  before $\alpha$), then finalized with the caller's RNG, as BP's `TranscriptRng`. Defense in depth
+  before $\alpha$; the tuple poles of §4.1 are hashed as 0, they are not known before $\eta$), then finalized with the caller's RNG, as BP's `TranscriptRng`. Defense in depth
   against a weak RNG: the same witness proven in another context gets other blindings. The vectors
   use the inner functions with explicit randomness.
 
@@ -326,6 +326,13 @@ $N'_m = N_p + N_m$ multiplications, which is then proven with the inner protocol
 challenge $\rho$ on). Soundness of the reciprocal argument (paper Lemma 1) needs every numerator
 and multiplicity committed before $\alpha$; the rules below enforce it.
 
+**Tuple poles (our extension, not in the paper).** A pole may also be a *tuple pole*
+$w_{D,i} = \sum_j \eta^j x_{i,j}$, a compression of a tuple with a challenge $\eta$, and a public
+pole may be a polynomial in $\eta$. The components $x_{i,j}$ are committed in $C_O$ before $\eta$;
+$C_L$ (which holds $w_D$) follows $\eta$: the transcript becomes $C_O, \eta, C_L, \alpha, C_R$ (§4.3).
+This gives lookups of tuples whose components are arbitrary field elements, as logUp does in
+BP (§7.3); soundness in §4.7. A circuit without them is proven exactly as before (protocol v1).
+
 ### 4.1 Witness and circuit
 
 Witness: poles $w_D \in \mathbb F^{N_p}$, $w_L, w_R \in \mathbb F^{N_m}$, $w_O \in \mathbb F^{N_O}$,
@@ -335,7 +342,12 @@ $$w' = w'_L \| w'_R \| w_O, \qquad w'_L = w_D \| w_L, \qquad w'_R = w_P \| w_R,$
 
 with $N'_w = 2N'_m + N_O$ columns; all matrices below index $w'$. The **initial columns** are
 those committed before $\alpha$: all of $w'_L$, and the elements of $w_O$ whose partition slot is
-not $l_R$ (that slot is committed in $C_R$, after $\alpha$).
+not $l_R$ (that slot is committed in $C_R$, after $\alpha$). The **early columns** are those
+committed in $C_O$: the elements of $w_O$ in slots $n_O$ and $l_O$.
+
+A *pole polynomial* is a list of $d \ge 1$ scalars $(t_0, \dots, t_{d-1})$, with the value
+$t(\eta) = \sum_e t_e \eta^e$; a public pole $t$ (below) is a pole polynomial, and one of length 1
+is the constant $t_0$.
 
 A reciprocal form circuit consists of
 
@@ -347,6 +359,11 @@ A reciprocal form circuit consists of
   constants $(c, t)$ meaning $c/(X + t)$ or $c$. A term with a pole $t$ must use an initial column;
   a term without a pole must use an initial column or a reciprocal column $w_{P,i}$ (the first
   $N_p$ columns of $w'_R$);
+- the *tuple poles*: a list of entries $(i, x_{i,0}, \dots, x_{i,m_i - 1})$ with $i < N_p$ (each $i$ at
+  most once, the entries in increasing $i$) and $m_i \ge 1$ components; a component is a list of
+  terms $(\text{column}, c)$ over **early columns only** and a constant $a$, with the value
+  $x_{i,j} = \sum c\, w'_{\text{column}} + a$. Then $w_{D,i}$ is not a witness value but
+  $\sum_j \eta^j x_{i,j}$ (computed by the prover after $\eta$); the other poles are *free*;
 - the flags $f_l$, $f_m$ and the partition of $w_O$ as in §3, with $N_{lin}$, $N_v$, $k$;
   $f_l = 1$ requires $N_l \ge kN_v$ (inputs never reach the reciprocal rows); $N_m = 0$ is
   allowed (only $N'_m \ge 1$ is needed), and a slot $(n_O, t)$ needs $t < N'_m$.
@@ -356,13 +373,18 @@ compiled circuit); $w_R$ and the elements of $w_O$ in slot $l_R$ may therefore b
 after $\alpha$: the two-phase prover (§4.3) takes them from a callback that receives $\alpha$ and
 $w_P$.
 
-It is satisfied if, for every $i < N_p$, $(X + w_{D,i})\, w_{P,i}(X) = (W_n w' + f_m w_V + a_n)_i$
+The circuit **uses $\eta$** if it has a tuple pole or a public pole of length at least 2; only then
+is $\eta$ drawn (§4.3). For a circuit that does not, $\eta$ plays no role below.
+
+It is satisfied for $(\eta, \alpha)$ if, with the tuple poles set to $w_{D,i} = \sum_j \eta^j x_{i,j}$ and every
+public pole $t$ replaced by $t(\eta)$: for every $i < N_p$,
+$(X + w_{D,i})\, w_{P,i}(X) = (W_n w' + f_m w_V + a_n)_i$
 defines the reciprocals, every reciprocal row vanishes **as a rational function of $X$**, and the
 ordinary rows hold:
 $w_L \circ w_R = (W_m w' + f_m \tilde w_V + a_m)$ and $W_l w' + f_l w_V + a_l = 0$, where
 $\tilde w_V$ is the part of the zero-padded $w_V$ that falls on rows $N_p..N'_m - 1$ (see §4.2).
 
-### 4.2 Compilation for a challenge $\alpha$
+### 4.2 Compilation for the challenges $(\eta, \alpha)$
 
 The compiled circuit (§3) has $N'_m = N_p + N_m$, $N_O$, $N_v$, $N_{lin}$, $k$, the same flags and
 partition, and
@@ -370,9 +392,13 @@ partition, and
 - multiplicative rows: for $i < N_p$, row $i$ of $W_n$ with $-\alpha$ added at the column of
   $w_{P,i}$ (that is, $w_{D,i}\, w_{P,i} = (W_n w')_i - \alpha\, w_{P,i} + f_m w_{V,i} + a_{n,i}$), then
   the rows of $W_m$; $a'_m = a_n \| a_m$;
-- linear rows: the rows of $W_l$, then each reciprocal row evaluated at $X = \alpha$ (a term with
-  pole $t$ gets the coefficient $c/(\alpha + t)$, constants are summed into the affine term);
-  $a'_l = a_l \| a_r(\alpha)$.
+- linear rows: the rows of $W_l$; then, for each tuple pole $(i, x_{i,0}, \dots)$ in order, the row
+  $[(w_{D,i}, 1)]$ followed, for $j = 0, 1, \dots$, by the terms of $x_{i,j}$ with coefficients
+  multiplied by $-\eta^j$, affine term $-\sum_j \eta^j a_{i,j}$ (so $w_{D,i} = \sum_j \eta^j x_{i,j}$);
+  then each reciprocal row evaluated at $X = \alpha$ (a term with pole $t$ gets the coefficient
+  $c/(\alpha + t(\eta))$, constants are summed into the affine term);
+  $a'_l = a_l \| a_t(\eta) \| a_r(\eta, \alpha)$.
+  (A circuit that does not use $\eta$ has no tuple rows and constant poles: the compilation of v1.)
 
 So $f_m w_V$ meets the first $kN_v$ compiled multiplicative rows (numerators first) and $f_l w_V$
 the first $kN_v$ rows of $W_l$; the requirements of §3.1 apply to the compiled dimensions.
@@ -381,6 +407,10 @@ the first $kN_v$ rows of $W_l$; the requirements of §3.1 apply to the compiled 
 
 1. Commit the initial witness: $C_L$ for $(r_L, l_L, w'_L)$ and $C_O$ for $(r_O, l_O, n_O)$ as in
    §3.3 (randomness $r'_O$, then $r'_L$).
+   **If the circuit uses $\eta$** (protocol v2): commit $C_O$ first (randomness $r'_O$), absorb it
+   and take the challenge $\eta$; set the tuple poles $w_{D,i} = \sum_j \eta^j x_{i,j}$ (the
+   witness's values for them are ignored); then commit $C_L$ (randomness $r'_L$). The randomness
+   is drawn in the same order as in v1.
 2. Absorb (§4.5) and take the challenge $\alpha$.
 3. Compute $w_{P,i} = (W_n w' + f_m w_V + a_n)_i \cdot (\alpha + w_{D,i})^{-1}$; the prover fails if
    $\alpha + w_{D,i} = 0$ for some $i$, and both prover and verifier fail if $\alpha + t = 0$
@@ -389,7 +419,9 @@ the first $kN_v$ rows of $W_l$; the requirements of §3.1 apply to the compiled 
    $\rho, \lambda, \beta, \delta$ on (§3.4–3.7). The prover refuses if the compiled circuit is not
    satisfied (its value term is non-zero).
 
-The verifier compiles the circuit for $\alpha$ and runs the §3 verification on $C_L, C_R, C_O, C_S$.
+The verifier compiles the circuit for $(\eta, \alpha)$ and runs the §3 verification on $C_L, C_R, C_O, C_S$.
+$\eta = 0$ needs no special case: the compiled circuit is still well defined, and the soundness
+bound of §4.7 counts it.
 Randomness is drawn in the order of §3.3 ($r'_O$, $r'_L$, $r'_R$, then $l_S$, $n_S$).
 
 **Two-phase prover.** The *late* values — $w_R$ and the elements of $w_O$ in slot $l_R$ — may
@@ -402,11 +434,16 @@ special case of a callback that returns values fixed in advance.
 
 ### 4.4 Digest
 
-SHA3-256 over: the bytes `bppp-reciprocal-digest v1`; the dimensions of §4.5 as `u64`
+For a circuit that does not use $\eta$: SHA3-256 over: the bytes `bppp-reciprocal-digest v1`; the dimensions of §4.5 as `u64`
 little-endian; the partition as in §3.9; the rows of $W_n$, $W_m$, $W_l$ as in §3.9; $a_n$, $a_m$,
 $a_l$ (32 bytes each); then per reciprocal row: the number of terms (`u64`), per term the column
 (`u64`), $c$ (32 bytes) and the pole (one byte 0, or one byte 1 and $t$, 32 bytes); the number of
 constants (`u64`) and per constant $c$ and the pole likewise.
+
+For a circuit that uses $\eta$: the same with the bytes `bppp-reciprocal-digest v2`, the dimensions
+of v2 (§4.5, $N_t$ last), each pole as one byte 0, or one byte 1, its length $d$ (`u64`) and $t_0..t_{d-1}$
+(32 bytes each), and at the end, per tuple pole: $i$ (`u64`), $m_i$ (`u64`), per component the
+number of terms (`u64`), per term the column (`u64`) and $c$ (32 bytes), then $a$ (32 bytes).
 
 ### 4.5 Transcript
 
@@ -416,9 +453,45 @@ constants (`u64`) and per constant $c$ and the pole likewise.
 the challenges and messages of §3.8 from `"rho"` on (the §3 statement — dimensions, generators,
 digest, inputs — is not absorbed again: the reciprocal statement above covers it).
 
+v2 (the circuit uses $\eta$): `domain_sep("bppp-reciprocal v2")`; the dimensions of v1, then `u64`
+`"N_t"` (the number of tuple poles); points `"G"`, `"H_0"`; message `"circuit"` (the v2 digest);
+point `"V"` per input; point `"C_O"`; challenge `"eta"`; point `"C_L"`; challenge `"alpha"`; point
+`"C_R"`; then as v1.
+
 ### 4.6 Encoding
 
-As §3.10, for the compiled dimensions ($|n| = N_p + N_m$).
+As §3.10, for the compiled dimensions ($|n| = N_p + N_m$); v1 and v2 proofs have the same size.
+
+### 4.7 Soundness of tuple poles (argument, not a formal proof)
+
+The §3 extractor (from $\rho$ on) yields openings of $C_O, C_L, C_R$ that satisfy the compiled
+circuit for $(\eta, \alpha)$; by binding, the opening of $C_O$ — the early columns, hence every
+component $x_{i,j}$ — is fixed before $\eta$, and the initial columns are fixed before $\alpha$.
+For a fixed $\eta$, paper Lemma 1 applies unchanged (the poles $w_{D,i}$ and the numerators are in
+$C_L$, $C_O$, fixed before $\alpha$): except with probability about $(N_p + T)/\ell$ over $\alpha$, every
+reciprocal row vanishes as a rational function of $X$ with the poles $w_{D,i} = \sum_j \eta^j x_{i,j}$
+and $t(\eta)$.
+
+What a tuple lookup needs is the identity *per tuple*: for each distinct tuple, the sum of the
+numerators of its terms is zero. Let $S$ be the set of distinct tuples (component lists, padded
+with zeros to a common length $m$) of the private tuple poles and the public poles of one row.
+They are fixed before $\eta$ (private: by $C_O$; public: by the statement). If $\tau \mapsto
+\sum_j \eta^j \tau_j$ is injective on $S$, grouping by pole value is grouping by tuple and the
+identity per tuple follows. For two distinct tuples the difference $\sum_j \eta^j(\tau_j - \tau'_j)$ is
+a non-zero polynomial of degree $\le m - 1$, so (Schwartz–Zippel, union bound) injectivity fails
+with probability at most $\binom{|S|}{2}(m-1)/\ell$ over $\eta$; summed over the rows, at most
+$(N_p + T)^2 (m-1)/(2\ell)$ with $T$ public terms. This needs every private pole of the row to be
+a tuple pole: a free pole ($w_{D,i}$ in $C_L$, after $\eta$) can take the compressed value of any
+tuple, so a row that mixes free and tuple poles only has the identity over pole values (as in v1),
+which is all a row of free poles needs: its poles are fixed before $\alpha$. The builder (§7.6)
+never mixes them (an argument has one $m$).
+
+So the extra round adds one challenge with a bad-challenge probability as above (round-by-round
+soundness); the Fiat–Shamir loss for multi-round special-sound protocols is linear in the number
+of random-oracle queries (Attema, Fehr, Klooß 2022), so with $Q$ queries the added term is
+$Q (N_p + T)^2 (m-1)/(2\ell)$. Zero knowledge is unaffected: the commitments, their randomness and
+the openings are those of v1, only the order of the public challenges differs (§3's simulator
+does not depend on it).
 
 ## 5. Range proofs and multi-asset transactions (paper §6.4–6.5)
 
@@ -595,57 +668,52 @@ coefficients and repeated variables stay).
 
 ### 7.2 Operations
 
-Widths are numbers of bits. A *width list* $(w_0, \dots, w_{m-1})$ is valid if $m \ge 1$, every
-$w_j \ge 1$ and $\sum_j w_j \le 252$. Offsets: $o_0 = 0$, $o_{j+1} = o_j + w_j$; the *packing* of a
-tuple is $\mathrm{pack}(x) = \sum_j 2^{o_j} x_j$ ($< 2^{252} < \ell$ for components in range).
+A table has $m \ge 1$ columns; a *tuple* is a list of $m$ LCs (private) or of $m$ `u64` entries
+(a public row, entries as scalars). Components are arbitrary field elements: there is no width
+or bound (§7.3).
 
 - `witness(v)` → `Witness(n_w)`, $n_w \mathrel{+}= 1$. The prover must supply $v$
   (`MissingAssignment` otherwise).
 - `product(l, r, out)` records the constraint $l \cdot r = out$.
-- `table(rows, widths)` → a table id ($0, 1, \dots$ in call order). Fails unless the width list is
-  valid, there is at least one row, every row has $m$ entries (`u64`) and every entry of column
-  $j$ is $< 2^{w_j}$.
+- `table(rows)` → a table id ($0, 1, \dots$ in call order). Fails unless there is at least one row,
+  the first row has $m \ge 1$ entries and every row has $m$ entries.
 - `lookup(t, tuple)` records that the tuple of $m$ LCs is a row of table $t$. Fails if $t$ does not
-  exist, the length differs from $m$, or (for $m \ge 2$) a component breaks the bound rule
-  (§7.3). For $m = 1$ and a tuple whose LC is exactly one term $(x, 1)$ with $x \ne$ `One`, it
-  records the bound $b_x \gets \min(b_x, w_0)$.
+  exist or the length differs from $m$.
 - `lookup_value(t, v)`: fails unless $t$ has one column; then $x$ = `witness(v)` and
-  `lookup(t, [x])`; returns $x$ (with the bound $w_0$).
-- `reciprocal(widths)` → an argument with that (valid) width list. Its methods record terms:
-  `add_weighted(num, tuple)` the private term $num / (X + \mathrm{pack}(tuple))$, `add(tuple)`
+  `lookup(t, [x])`; returns $x$.
+- `reciprocal(m)` → an argument with $m \ge 1$ columns. Its methods record terms:
+  `add_weighted(num, tuple)` the private term $num / (X + tuple)$, `add(tuple)`
   and `sub(tuple)` the same with $num = \pm 1$, and `add_public(coeff, row)` the public term
-  $coeff / (X + \mathrm{pack}(row))$ for a row of $m$ `u64` entries. The argument asserts that the
-  sum of its terms vanishes as a rational function of $X$.
+  $coeff / (X + row)$ for a row of $m$ `u64` entries. The argument asserts that the terms cancel
+  per tuple: for every tuple value, the sum of the numerators (coefficients) of the terms whose
+  tuple has that value (component by component) is zero — the sum vanishes as a rational
+  function in which distinct tuples are distinct poles.
 - `finish_reciprocal(r)` validates and records the argument (in call order): every tuple and
-  row has $m$ entries, every row entry of column $j$ is $< 2^{w_j}$, every variable exists, and
-  for $m \ge 2$ every tuple component obeys the bound rule. An argument without terms is
-  dropped.
+  row has $m$ entries and every variable exists. An argument without terms is dropped.
 
 Errors are `GadgetError`; a failed operation records nothing. The first successful builder
 operation (other than `reciprocal`, which records nothing) puts the constraint system in
 *builder mode*, which selects §7.6 instead of §6 for BP++ (§6 is used
 when only `ConstraintSystem` methods were called).
 
-### 7.3 The bound rule
+### 7.3 Tuples
 
-The packing is injective only on components in range, so a component of a tuple with $m \ge 2$
-must be provably below $2^{w_j}$. Bounds $b_x$ are recorded only by lookups into one-column
-tables (§7.2): such a lookup proves that $x$ equals a table entry, hence $x < 2^{w_0}$ as an
-integer. For an LC, merge its terms per variable (sum the coefficients in $\mathbb F$) and let
-$c_0$ be its constant. Its bound is defined if $c_0$ and every non-zero merged coefficient $c_x$
-are integers below $2^{64}$ (as canonical scalars) and every $x$ with $c_x \ne 0$ has a recorded
-bound; then
+Both backends compress a tuple of $m \ge 2$ components with a challenge drawn after the
+components are committed, so a lookup proves that the tuple *is* a table row, component by
+component, whatever the components are (no range checks are needed for them):
 
-$$\mathrm{bound} = c_0 + \sum_x c_x \left(2^{b_x} - 1\right).$$
+- BP (§7.5): $c + \sum_j \alpha^j x_j$ with the second-phase challenges `"logup alpha"`,
+  `"logup c"`; the components are first-phase values.
+- BP++ (§7.6): tuple poles $\sum_j \eta^j x_j$ (§4.1, protocol v2); every component is lowered to
+  early columns ($C_O$), with a copy when it reads $w_L$ or $w_R$ (committed after $\eta$).
 
-(A constant LC has the bound $c_0$, the empty LC 0; $c_0$ is the sum mod $\ell$ of the `One`
-coefficients, so $5 + (-3)$ counts as 2.) Component $j$ obeys the rule iff its bound is defined
-and $< 2^{w_j}$. Then its value is an integer
-in $[0, 2^{w_j})$ (the sum has no wrap-around since $2^{252} < \ell$), and equal packings mean equal
-tuples. The rule is checked when the lookup or `finish_reciprocal` is called, against the bounds
-recorded so far; both backends apply it, so that a gadget accepted by BP is accepted by BP++
-(BP itself compresses tuples with challenges and would not need it). One-component tuples need no
-bound: their pole is the component itself (e.g. an asset type in $\mathbb F$).
+A one-component tuple is its own pole on both backends ($m = 1$: BP takes $\alpha = 1$, BP++ a free
+pole and protocol v1 if no argument has $m \ge 2$). Soundness: §4.7 for BP++; for BP the same
+Schwartz–Zippel argument over `"logup alpha"` (bpvm's LogUp).
+
+(Phase 6 packed tuples with a public base and therefore needed a *bound rule*: every component
+of a multi-column tuple had to be bounded by an earlier one-column lookup. It is gone; see
+`builder-api-notes.md`.)
 
 ### 7.4 Finalization
 
@@ -657,8 +725,8 @@ At `prove`/`verify`, before anything is committed:
    equal row only, in constant time (every lookup is compared with every row, or, for large tables, a bitonic
    sort of rows and lookups); a lookup equal to no row is a `GadgetError` (prover only).
 2. The arguments $\mathcal A$ are the recorded reciprocal arguments in call order, followed by one
-   argument per table with lookups, in id order: the private terms $+1 / (X + \mathrm{pack}(q))$ for
-   the lookups $q$ in call order, then the public terms $(-m_r) / (X + \mathrm{pack}(row_r))$ in row
+   argument per table with lookups, in id order: the private terms $+1 / (X + q)$ for
+   the lookups $q$ in call order, then the public terms $(-m_r) / (X + row_r)$ in row
    order (coefficient: the LC $[(m_r, -1)]$).
 
 Let $n_w$ now include the multiplicities, $n_{prod}$ be the number of products and $N_p$ the
@@ -699,11 +767,13 @@ $w_{O, n_r + k + i}$. Lowering an LC maps each non-`One` term $(x, c)$, in order
 (column of $x$, $c$); its constant goes to the affine term.
 
 **Copies.** A numerator or a public coefficient must read initial columns only (§4.1), and $w_R$
-is committed after $\alpha$. So, for each argument in $\mathcal A$, for its private terms in order,
-then its public terms in order: if the numerator (coefficient) has a `MultiplierRight` term (any, whatever its
-coefficient), it
-is replaced by a new copy $y$ (the next element of $w_O$; the prover sets $y$ to the LC's value),
-and the LC $[(y, 1)]$ is used instead.
+is committed after $\alpha$; a component of a tuple pole must read early columns only, and $w_L$,
+$w_R$ are committed after $\eta$. So, for each argument in $\mathcal A$, for its private terms in
+order — first the numerator, then, if $m \ge 2$, the components $j = 0..m-1$ — then its public
+terms in order: if the numerator (coefficient) has a `MultiplierRight` term, or the component
+has a `MultiplierLeft` or `MultiplierRight` term (any, whatever its coefficient), it is replaced by
+a new copy $y$ (the next element of $w_O$; the prover sets $y$ to the LC's value), and the LC
+$[(y, 1)]$ is used instead. (Copies are in $w_O$, slots $n_O$ or $l_O$: early columns.)
 
 **Numerators** (row $i$ of $W_n$, $a_{n,i}$): the lowered numerator of pole $i$.
 
@@ -715,32 +785,42 @@ $out$ of product $g$ (its constant in $a_m$).
 2. the R1CS constraints in order, lowered (the prover recomputes their constants as in §6.2);
 3. for each product $g$: $[(w_{L, n_r + g}, 1)] \| (-l)$ and then $[(w_{R, n_r + g}, 1)] \| (-r)$, where
    $-l$ is the lowered $l$ with negated coefficients and the affine term is $-$(constant of $l$);
-4. for each pole $i$ with tuple $x$: $[(w_{D,i}, 1)]$ followed, for $j = 0..m-1$, by the lowered
-   $x_j$ with coefficients multiplied by $-2^{o_j}$; affine term $-\sum_j 2^{o_j}$ (constant of $x_j$);
+4. for each pole $i$ of an argument with $m = 1$, tuple $(x_0)$: $[(w_{D,i}, 1)] \| (-x_0)$, affine term
+   $-$(constant of $x_0$) (poles of arguments with $m \ge 2$ are tuple poles, below);
 5. for each copy $y$ of an LC $u$: $[(y, 1)] \| (-u)$, affine term $-$(constant of $u$).
+
+**Tuple poles**, for each pole $i$ of an argument with $m \ge 2$, in pole order: $(i, x_0, \dots,
+x_{m-1})$ with $x_j$ the lowered component (terms and constant), or $[(y, 1)]$ with constant 0 for a
+copy $y$.
 
 **Reciprocal rows**, one per argument of $\mathcal A$ in order: the terms $(w_{P,i}, 1, \text{none})$ for
 its poles in order; then for each public term $(coeff, row)$ in order, the lowered $coeff$ with
-pole $t = \mathrm{pack}(row)$ (each term as $(\text{column}, c, t)$, and, if $coeff$ has a `One`
+the pole polynomial $t = (row_0, \dots, row_{m-1})$ (length $m$) (each term as $(\text{column}, c, t)$, and, if $coeff$ has a `One`
 term, the constant $(\text{constant}, t)$, even if it is 0). An argument with public terms only
 is a reciprocal row without poles.
 
-**Witness.** $w_{D,i} = \mathrm{pack}$ of the evaluated tuple; $w_L$, $w_R$, $w_O$ as above; inputs
-$v_j$ with blindings $s_j$.
+**Witness.** $w_{D,i}$ = the value of $x_0$ for a pole of an argument with $m = 1$, and 0 (ignored,
+§4.3) for a tuple pole; $w_L$, $w_R$, $w_O$ as above; inputs $v_j$ with blindings $s_j$.
+
+The circuit uses $\eta$ (protocol v2, §4.3) exactly when $\mathcal A$ has an argument with $m \ge 2$;
+otherwise it is the circuit of phase 6, byte for byte.
 
 Every rule of §4.1 holds by construction: numerators and pole terms read $w_L$, $w_D$ or $w_O$
-(never slot $l_R$); pole-free terms read $w_P$. A pole row (linear rows, step 4) may read $w_R$
+(never slot $l_R$); pole-free terms read $w_P$; components of tuple poles read $w_O$ (slots
+$n_O$, $l_O$). A pole row (linear rows, step 4) may read $w_R$
 (a `MultiplierRight` component): it is an ordinary row, which §4.1 allows, unlike the paper's
 eq. (65), where the denominators $W_d w_I$ read the initial witness only. It is sound: the pole
 $w_{D,i}$ itself is initial, fixed before $\alpha$, and no ordinary row reads $w_P$, so the row ties
-the component to values fixed before $\alpha$. When $n = 0$ but there are products or poles,
+the component to values fixed before $\alpha$. A copy row (step 5) of a component may read $w_L$ or $w_R$
+likewise: the copy $y$ is early, fixed before $\eta$, and the row ties the component to it. When $n = 0$ but there are products or poles,
 $n_r = 0$ (a circuit of lookups only has $N_m = 0$). Nothing depends on $\alpha$, so the one-phase
 prover suffices (a builder operation that exposed reciprocals would need the two-phase prover of
 §4.3). Randomized constraints are refused (`GadgetError`), as in §6: mapping a challenge to the slot
 between $C_O$ and $C_R$ would leave `MultiplierRight` values of `allocate` unbound there.
 
 Cost in gates: $N'_m = N_p + n_r + n_{prod}$. Witnesses, multiplicities and copies cost no gate (a
-slot in $n_O$ while $N_O \le N'_m$, then a linear slot), nor do public terms.
+slot in $n_O$ while $N_O \le N'_m$, then a linear slot), nor do public terms, nor the number of
+columns $m$ (a component is a row term; one that reads $w_L$ or $w_R$ costs a copy).
 
 ### 7.7 Protocol and encoding
 
@@ -748,7 +828,7 @@ BP: the R1CS of §7.5 is proven as usual (unchanged encoding).
 
 BP++: after the transcript of the constraint system (the R1CS domain separator and the `V`
 absorbed by `commit`), `domain_sep("bppp-builder v1")`, then the reciprocal form protocol §4.5
-(whose digest binds the lowered circuit) with generators §3.2 for $N_{lin}$ and $N'_m$ (capacity at
+(v1 or v2 as §7.6 says; its digest binds the lowered circuit) with generators §3.2 for $N_{lin}$ and $N'_m$ (capacity at
 least $\max(N'_m, N_{lin} + 6)$). Prover randomness as in §6.2. Encoding: the byte 3, $N'_m$ and
 $N_{lin}$ as `u64` little-endian, then the proof (§4.6). The verifier rejects a proof whose
 dimensions differ from its own lowering, and proofs of §6 or BP.

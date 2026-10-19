@@ -76,14 +76,63 @@ fn same_gadget_both_backends() {
     }
 }
 
+/// An unsatisfied witness never yields a verifying proof. The BP++ prover recomputes the
+/// constants from its witness, so a linear violation gives a proof of another circuit (another
+/// digest), which the verifier rejects.
 #[test]
-fn unsatisfied_witness_is_refused() {
+fn unsatisfied_witness_does_not_verify() {
     let pc = PedersenGens::default();
     let bp = BulletproofGens::new(64, 1);
-    // 6 * 7 != 41
-    assert!(prove(Backend::Bppp, [6, 7, 41, 5], 8, &pc, &bp).is_err());
-    // 300 does not fit 8 bits: the decomposition of 300 mod 256 does not sum to 300
-    assert!(prove(Backend::Bppp, [6, 7, 42, 300], 8, &pc, &bp).is_err());
+    // 6 * 7 != 41; 300 does not fit 8 bits (its decomposition mod 256 does not sum to 300)
+    for values in [[6u64, 7, 41, 5], [6, 7, 42, 300]] {
+        if let Ok((proof, V)) = prove(Backend::Bppp, values, 8, &pc, &bp) {
+            assert!(verify(Backend::Bppp, &proof, &V, 8, &pc, &bp).is_err(), "{:?}", values);
+        }
+    }
+}
+
+/// Several constant terms in one constraint add up (`(x + 1) + 2 - c = 0` with `c = x + 3`).
+#[test]
+fn several_constants_in_one_constraint() {
+    let pc = PedersenGens::default();
+    let bp = BulletproofGens::new(16, 1);
+    let mut t = Transcript::new(b"consts");
+    let mut prover = Prover::new(&pc, &mut t);
+    prover.set_backend(Backend::Bppp);
+    let (vx, x) = prover.commit(Scalar::from(5u64), Scalar::from(1u64));
+    let (vc, c) = prover.commit(Scalar::from(8u64), Scalar::from(2u64));
+    prover.constrain((x + Scalar::ONE) + Scalar::from(2u64) - c);
+    let proof = prover.prove(&bp).unwrap();
+    let check = |offset: u64| {
+        let mut t = Transcript::new(b"consts");
+        let mut verifier = Verifier::new(&mut t);
+        verifier.set_backend(Backend::Bppp);
+        let (x, c) = (verifier.commit(vx), verifier.commit(vc));
+        verifier.constrain((x + Scalar::ONE) + Scalar::from(2u64 + offset) - c);
+        verifier.verify(&proof, &pc, &bp)
+    };
+    check(0).unwrap();
+    assert!(check(1).is_err());
+}
+
+/// A variable that the constraint system never allocated is a gadget error on BP++ (it would
+/// otherwise alias another column).
+#[test]
+fn foreign_variables_are_gadget_errors() {
+    let pc = PedersenGens::default();
+    let bp = BulletproofGens::new(16, 1);
+    for var in [Variable::MultiplierLeft(1), Variable::MultiplierOutput(5), Variable::Committed(1)] {
+        let mut t = Transcript::new(b"foreign");
+        let mut prover = Prover::new(&pc, &mut t);
+        prover.set_backend(Backend::Bppp);
+        let (_, x) = prover.commit(Scalar::from(5u64), Scalar::from(1u64));
+        let (_, _, o) = prover.allocate_multiplier(Some((Scalar::from(2u64), Scalar::from(3u64)))).unwrap();
+        prover.constrain(o - Scalar::from(6u64) + x - Scalar::from(5u64) + var);
+        match prover.prove(&bp) {
+            Err(R1CSError::GadgetError { .. }) => {}
+            other => panic!("{:?}: expected a gadget error, got {:?}", var, other.map(|_| ())),
+        }
+    }
 }
 
 #[test]
@@ -144,6 +193,28 @@ fn randomized_constraints_need_bp() {
     match prover.prove(&bp) {
         Err(R1CSError::GadgetError { .. }) => {}
         other => panic!("expected a gadget error, got {:?}", other.map(|_| ())),
+    }
+    // the verifier refuses too: otherwise a proof of the circuit without the randomized part
+    // would pass for a statement that also has it (found in review)
+    let mut t = Transcript::new(b"rand");
+    let mut prover = Prover::new(&pc, &mut t);
+    prover.set_backend(Backend::Bppp);
+    let (vx, _) = prover.commit(Scalar::from(4u64), Scalar::from(1u64));
+    let proof = prover.prove(&bp).unwrap();
+    let mut t = Transcript::new(b"rand");
+    let mut verifier = Verifier::new(&mut t);
+    verifier.set_backend(Backend::Bppp);
+    let x = verifier.commit(vx);
+    verifier
+        .specify_randomized_constraints(move |cs| {
+            let z = cs.challenge_scalar(b"z");
+            cs.constrain(x - z);
+            Ok(())
+        })
+        .unwrap();
+    match verifier.verify(&proof, &pc, &bp) {
+        Err(R1CSError::GadgetError { .. }) => {}
+        other => panic!("expected a gadget error, got {:?}", other),
     }
 }
 

@@ -37,11 +37,25 @@ mod bppp_backend {
         n.max(1)
     }
 
+    /// Where the constants of the constraints come from.
+    pub(crate) enum Constants<'a> {
+        /// Stored in the constraint store (the verifier).
+        Stored,
+        /// `-sum c x` over the witness (the prover, whose store drops constants): equal to
+        /// the stored constants exactly when the witness satisfies the linear constraints.
+        FromWitness {
+            a_l: &'a [Scalar],
+            a_r: &'a [Scalar],
+            a_o: &'a [Scalar],
+            v: &'a [Scalar],
+        },
+    }
+
     /// The arithmetic circuit of an R1CS with `n` multipliers and `k` committed inputs
     /// (spec §6): `w_L = a_L`, `w_R = a_R`, `w_O = a_O || c`, `W_m` selects `a_O`, the first
     /// `k` linear rows copy the inputs (`v_j - c_j = 0`), then every constraint with its
-    /// constant in `a_l`.
-    pub(crate) fn circuit(store: &ConstraintStore, n: usize, k: usize) -> ArithmeticCircuit {
+    /// constant in `a_l`. A variable outside the constraint system is a `GadgetError`.
+    pub(crate) fn circuit(store: &ConstraintStore, n: usize, k: usize, constants: Constants) -> Result<ArithmeticCircuit, R1CSError> {
         let n_m = n_m(n);
         let n_w = 3 * n_m + k;
         let copy = |j: usize| 3 * n_m + j;
@@ -51,17 +65,33 @@ mod bppp_backend {
             w_l.push_row(vec![(copy(j), -Scalar::ONE)]);
             a_l.push(Scalar::ZERO);
         }
+        let unknown = || R1CSError::GadgetError { description: "a constraint uses a variable outside the constraint system".into() };
         for q in 0..store.len() {
             let mut constant = Scalar::ZERO;
             let mut terms = Vec::new();
             for (var, c) in store.row(q) {
-                match var {
-                    Variable::MultiplierLeft(i) => terms.push((i, c)),
-                    Variable::MultiplierRight(i) => terms.push((n_m + i, c)),
-                    Variable::MultiplierOutput(i) => terms.push((2 * n_m + i, c)),
-                    Variable::Committed(j) => terms.push((copy(j), c)),
-                    Variable::One() => constant += c,
+                let col = match var {
+                    Variable::MultiplierLeft(i) if i < n => i,
+                    Variable::MultiplierRight(i) if i < n => n_m + i,
+                    Variable::MultiplierOutput(i) if i < n => 2 * n_m + i,
+                    Variable::Committed(j) if j < k => copy(j),
+                    Variable::One() => {
+                        constant += c;
+                        continue;
+                    }
+                    _ => return Err(unknown()),
+                };
+                if let Constants::FromWitness { a_l, a_r, a_o, v } = &constants {
+                    let x = match var {
+                        Variable::MultiplierLeft(i) => a_l[i],
+                        Variable::MultiplierRight(i) => a_r[i],
+                        Variable::MultiplierOutput(i) => a_o[i],
+                        Variable::Committed(j) => v[j],
+                        Variable::One() => Scalar::ZERO,
+                    };
+                    constant -= c * x;
                 }
+                terms.push((col, c));
             }
             w_l.push_row(terms);
             a_l.push(constant);
@@ -70,7 +100,7 @@ mod bppp_backend {
         for i in 0..n_m {
             w_m.push_row(vec![(2 * n_m + i, Scalar::ONE)]);
         }
-        ArithmeticCircuit {
+        Ok(ArithmeticCircuit {
             n_m,
             n_o: n_m + k,
             n_v: 1,
@@ -83,7 +113,7 @@ mod bppp_backend {
             f_l: k > 0,
             f_m: false,
             partition: (0..n_m).map(|i| (Slot::NormO, i)).chain((0..k).map(|j| (Slot::LinO, j))).collect(),
-        }
+        })
     }
 
     /// The witness of the translated circuit.

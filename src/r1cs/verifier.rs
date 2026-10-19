@@ -246,7 +246,8 @@ impl<T: BorrowMut<Transcript>> Verifier<T> {
     }
 
     /// Choose the proof system for [`Verifier::verify`] (default: [`Backend::Bp`](super::Backend));
-    /// a proof of the other backend is rejected.
+    /// a proof of the other backend is rejected. See [`Prover::set_backend`](super::Prover::set_backend)
+    /// for what changes with `Backend::Bppp`.
     pub fn set_backend(&mut self, backend: super::Backend) {
         self.backend = backend;
     }
@@ -346,7 +347,7 @@ impl<T: BorrowMut<Transcript>> Verifier<T> {
         if p.n_m != super::backend::n_m(n) || p.k != k {
             return Err(R1CSError::VerificationError);
         }
-        let c = super::backend::circuit(&self.constraints, n, k);
+        let c = super::backend::circuit(&self.constraints, n, k, super::backend::Constants::Stored)?;
         let gens = BpppGens::new(pc_gens, bp_gens, k, p.n_m).map_err(|_| R1CSError::InvalidGeneratorsLength)?;
         let transcript = self.transcript.borrow_mut();
         BpppTranscript::domain_sep(transcript, b"bppp-r1cs v1");

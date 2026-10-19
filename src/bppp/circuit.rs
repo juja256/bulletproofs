@@ -453,17 +453,28 @@ pub(crate) struct CommittedR {
     pub C_R: CompressedRistretto,
 }
 
-/// CommitOL: draws `r'_O`, `r'_L` and commits. `w_l` has length `n_m`.
-pub(crate) fn commit_ol<R: RngCore + CryptoRng>(
+/// The commitment to the early witness (spec §3.3 / §4.3): the `NormO` and `LinO` slots in
+/// `C_O` (drawing `r'_O`), with the other slots of `w_O` set aside for `C_L` and `C_R`.
+pub(crate) struct CommittedO {
+    n_o: Vec<Scalar>,
+    l_o: Vec<Scalar>,
+    l_l: Vec<Scalar>,
+    l_r: Vec<Scalar>,
+    r_o: [Scalar; 8],
+    pub C_O: CompressedRistretto,
+}
+
+/// CommitOL, first half: draws `r'_O` and commits `C_O`. `n_m` is the norm length.
+pub(crate) fn commit_o<R: RngCore + CryptoRng>(
     gens: &BpppGens,
     n_lin: usize,
+    n_m: usize,
     partition: &[(Slot, usize)],
-    w_l: &[Scalar],
     w_o: &[Scalar],
     rng: &mut R,
-) -> CommittedOL {
+) -> CommittedO {
     let zero = Scalar::ZERO;
-    let mut n_o = vec![zero; w_l.len()];
+    let mut n_o = vec![zero; n_m];
     let (mut l_o, mut l_l, mut l_r) = (vec![zero; n_lin], vec![zero; n_lin], vec![zero; n_lin]);
     for (x, &(slot, t)) in w_o.iter().zip(partition) {
         match slot {
@@ -473,12 +484,32 @@ pub(crate) fn commit_ol<R: RngCore + CryptoRng>(
             Slot::LinR => l_r[t] = *x,
         }
     }
-    let (ro, rl) = (draw(rng, 6), draw(rng, 5));
+    let ro = draw(rng, 6);
     let r_o = [ro[0], ro[1], ro[2], ro[3], zero, ro[4], ro[5], zero];
-    let r_l = [rl[0], rl[1], rl[2], zero, rl[3], rl[4], zero, zero];
-    let C_L = commit(gens, &r_l, &l_l, w_l).compress();
     let C_O = commit(gens, &r_o, &l_o, &n_o).compress();
-    CommittedOL { n_o, l_o, l_l, l_r, r_o, r_l, C_L, C_O }
+    CommittedO { n_o, l_o, l_l, l_r, r_o, C_O }
+}
+
+/// CommitOL, second half: draws `r'_L` and commits `C_L` (`w_l` and the `LinL` slots).
+pub(crate) fn commit_l<R: RngCore + CryptoRng>(gens: &BpppGens, o: CommittedO, w_l: &[Scalar], rng: &mut R) -> CommittedOL {
+    let zero = Scalar::ZERO;
+    let rl = draw(rng, 5);
+    let r_l = [rl[0], rl[1], rl[2], zero, rl[3], rl[4], zero, zero];
+    let C_L = commit(gens, &r_l, &o.l_l, w_l).compress();
+    CommittedOL { n_o: o.n_o, l_o: o.l_o, l_l: o.l_l, l_r: o.l_r, r_o: o.r_o, r_l, C_L, C_O: o.C_O }
+}
+
+/// CommitOL: draws `r'_O`, `r'_L` and commits. `w_l` has length `n_m`.
+pub(crate) fn commit_ol<R: RngCore + CryptoRng>(
+    gens: &BpppGens,
+    n_lin: usize,
+    partition: &[(Slot, usize)],
+    w_l: &[Scalar],
+    w_o: &[Scalar],
+    rng: &mut R,
+) -> CommittedOL {
+    let o = commit_o(gens, n_lin, w_l.len(), partition, w_o, rng);
+    commit_l(gens, o, w_l, rng)
 }
 
 /// CommitR: draws `r'_R` and commits `w_r` with the `LinR` slots.

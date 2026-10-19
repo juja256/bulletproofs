@@ -11,7 +11,7 @@ use subtle::ConstantTimeEq;
 
 use super::circuit::{CircuitProof, Slot};
 use super::gens::BpppGens;
-use super::reciprocal::{self, ReciprocalCircuit, ReciprocalRow, ReciprocalWitness};
+use super::reciprocal::{self, Pole, ReciprocalCircuit, ReciprocalRow, ReciprocalWitness};
 use super::sparse::SparseMatrix;
 use super::transcript::BpppTranscript;
 use crate::errors::ProofError;
@@ -139,19 +139,19 @@ pub(crate) fn table_rows(radices: &[u64], pole_offset: usize, n_mm: usize, mult_
     let mut rows = Vec::new();
     let mut col = mult_col;
     for &r in &tables {
-        let mut terms: Vec<(usize, Scalar, Option<Scalar>)> = radices
+        let mut terms: Vec<(usize, Scalar, Option<Pole>)> = radices
             .iter()
             .enumerate()
             .filter(|(_, &x)| x == r)
             .map(|(p, _)| (n_mm + pole_offset + p, Scalar::ONE, None))
             .collect();
         for s in 1..r {
-            terms.push((col, Scalar::ONE, Some(Scalar::ZERO)));
-            terms.push((col, -Scalar::ONE, Some(Scalar::from(s))));
+            terms.push((col, Scalar::ONE, Some(Scalar::ZERO.into())));
+            terms.push((col, -Scalar::ONE, Some(Scalar::from(s).into())));
             col += 1;
         }
         let count = radices.iter().filter(|&&x| x == r).count() as u64;
-        rows.push(ReciprocalRow { terms, consts: vec![(-Scalar::from(count), Some(Scalar::ZERO))] });
+        rows.push(ReciprocalRow { terms, consts: vec![(-Scalar::from(count), Some(Scalar::ZERO.into()))] });
     }
     (tables, rows)
 }
@@ -221,6 +221,7 @@ impl RangeStatement {
             w_l,
             a_l: self.ranges.iter().map(|&(a, _)| -Scalar::from(a)).collect(),
             recip,
+            tuples: vec![],
             f_l: true,
             f_m: false,
             partition: (0..n_o).map(|t| (slot, t)).collect(),
@@ -459,7 +460,7 @@ mod tests {
         let w = info.witness(&[v], &[Scalar::ONE], &[digits]);
         let g = st.gens(&pc, &bp).unwrap();
         let V = vec![pc.commit(Scalar::from(v), Scalar::ONE).compress()];
-        assert!(!c.is_satisfied(&w, Scalar::from(77u64)));
+        assert!(!c.is_satisfied(&w, Scalar::ZERO, Scalar::from(77u64)));
         let mut t = Transcript::new(b"r");
         t.append_message(b"dom-sep", b"bppp-range v1");
         let proof = reciprocal::prove_impl(&c, &g, &V, &w, &mut t, &mut rng, false).unwrap();

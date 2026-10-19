@@ -154,7 +154,7 @@ mod tests {
         let rp = reciprocal::prove(&rc, &g, &V, &w, &mut Transcript::new(b"r"), &mut rng).unwrap();
         // the compiled circuit for some alpha is an arithmetic circuit with a witness
         let alpha = Scalar::from(99u64);
-        let (ac, aw) = rc.compiled_for_test(&w, alpha);
+        let (ac, aw) = rc.compiled_for_test(&w, Scalar::ZERO, alpha);
         let ag = BpppGens::new(&pc, &bp, ac.n_lin, ac.n_m).unwrap();
         let cp = super::super::circuit::prove(&ac, &ag, &V, &aw, &mut Transcript::new(b"c"), &mut rng).unwrap();
         let run = |rp: &CircuitProof, cp: &CircuitProof| {

@@ -4,6 +4,10 @@
 //! initial witness, reciprocals `w_P,i = num_i / (alpha + w_D,i)` committed after the challenge
 //! `alpha`, and reciprocal rows that must vanish as rational functions. For a fixed `alpha` the
 //! circuit compiles to an [`ArithmeticCircuit`] proven with the inner protocol of spec §3.
+//!
+//! Tuple poles (spec §4.1, our extension): `w_D,i = sum_j eta^j x_ij` with components in `C_O`,
+//! committed before a challenge `eta`; public poles are then polynomials in `eta`. A circuit
+//! that uses `eta` is proven with protocol v2 (`C_O`, `eta`, `C_L`, `alpha`, `C_R`).
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -19,14 +23,52 @@ use super::sparse::SparseMatrix;
 use super::transcript::{BpppTranscript, DynRng, Randomness};
 use crate::errors::ProofError;
 
+/// A public pole (spec §4.1): a polynomial in the challenge `eta`, `t(eta) = sum_e t_e eta^e`,
+/// with at least one coefficient; one coefficient is a constant pole.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pole(pub Vec<Scalar>);
+
+impl From<Scalar> for Pole {
+    fn from(t: Scalar) -> Self {
+        Pole(vec![t])
+    }
+}
+
+impl Pole {
+    /// `t(eta)` (Horner).
+    pub fn eval(&self, eta: Scalar) -> Scalar {
+        self.0.iter().rev().fold(Scalar::ZERO, |acc, t| acc * eta + t)
+    }
+}
+
 /// A reciprocal row (spec §4.1): `sum c * w'[col] / (X + t)` over the terms (no pole: `c *
 /// w'[col]`) plus `sum c / (X + t)` over the constants (no pole: `c`), which must vanish.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReciprocalRow {
     /// `(column of w', coefficient, pole)`.
-    pub terms: Vec<(usize, Scalar, Option<Scalar>)>,
+    pub terms: Vec<(usize, Scalar, Option<Pole>)>,
     /// `(coefficient, pole)`.
-    pub consts: Vec<(Scalar, Option<Scalar>)>,
+    pub consts: Vec<(Scalar, Option<Pole>)>,
+}
+
+/// A component of a tuple pole: `sum c * w'[col] + constant` over early columns (`w_O` in
+/// slots `NormO`, `LinO`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Component {
+    /// `(column of w', coefficient)`.
+    pub terms: Vec<(usize, Scalar)>,
+    /// The constant.
+    pub constant: Scalar,
+}
+
+/// A tuple pole (spec §4.1): `w_D,pole = sum_j eta^j x_j`, computed by the prover after `eta`
+/// (the witness's value for it is ignored).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TuplePole {
+    /// The pole, `< n_p`.
+    pub pole: usize,
+    /// The components `x_0, x_1, ...` (at least one).
+    pub components: Vec<Component>,
 }
 
 /// A reciprocal form circuit (spec §4.1). Columns index
@@ -59,6 +101,8 @@ pub struct ReciprocalCircuit {
     pub a_l: Vec<Scalar>,
     /// Reciprocal rows.
     pub recip: Vec<ReciprocalRow>,
+    /// Tuple poles, in increasing pole order (spec §4.1); empty for a circuit of the paper.
+    pub tuples: Vec<TuplePole>,
     /// Inputs enter the first `k n_v` ordinary linear rows.
     pub f_l: bool,
     /// Inputs enter the first `k n_v` compiled multiplicative rows (numerators first).
@@ -105,6 +149,46 @@ enum Col {
 impl ReciprocalCircuit {
     fn n_mm(&self) -> usize {
         self.n_p + self.n_m
+    }
+
+    /// Whether the circuit uses the challenge `eta` (spec §4.1): a tuple pole, or a public pole
+    /// with two or more coefficients. Only then is it proven with protocol v2.
+    pub fn uses_eta(&self) -> bool {
+        let long = |p: &Option<Pole>| p.as_ref().map_or(false, |p| p.0.len() > 1);
+        !self.tuples.is_empty()
+            || self.recip.iter().any(|r| r.terms.iter().any(|t| long(&t.2)) || r.consts.iter().any(|t| long(&t.1)))
+    }
+
+    /// Whether column `c` is early (committed in `C_O`: `w_O` in slots `NormO`, `LinO`).
+    fn is_early(&self, c: usize) -> bool {
+        let n_mm = self.n_mm();
+        c >= 2 * n_mm && matches!(self.partition.get(c - 2 * n_mm), Some((Slot::NormO, _)) | Some((Slot::LinO, _)))
+    }
+
+    /// `w_D` with the tuple poles set for `eta` (spec §4.3); the components read `w_O` only.
+    fn poles_at(&self, w: &ReciprocalWitness, eta: Scalar) -> Vec<Scalar> {
+        let mut w_d = w.w_d.clone();
+        let base = 2 * self.n_mm();
+        for tp in &self.tuples {
+            let mut acc = Scalar::ZERO;
+            for x in tp.components.iter().rev() {
+                let v: Scalar = x.terms.iter().map(|(c, k)| k * w.w_o[c - base]).sum::<Scalar>() + x.constant;
+                acc = acc * eta + v;
+            }
+            w_d[tp.pole] = acc;
+        }
+        w_d
+    }
+
+    /// The witness with the tuple poles set for `eta` (a copy only if there are tuple poles).
+    fn at_eta<'w>(&self, w: &'w ReciprocalWitness, eta: Scalar) -> alloc::borrow::Cow<'w, ReciprocalWitness> {
+        if self.tuples.is_empty() {
+            alloc::borrow::Cow::Borrowed(w)
+        } else {
+            let mut x = w.clone();
+            x.w_d = self.poles_at(w, eta);
+            alloc::borrow::Cow::Owned(x)
+        }
     }
 
     fn dims(&self) -> [u64; 10] {
@@ -168,10 +252,12 @@ impl ReciprocalCircuit {
                 return bad;
             }
         }
+        let empty = |p: &Option<Pole>| p.as_ref().map_or(false, |p| p.0.is_empty());
         for row in &self.recip {
-            for &(c, _, pole) in &row.terms {
-                let ok = c < n_w
-                    && match (self.col(c), pole) {
+            for (c, _, pole) in &row.terms {
+                let ok = *c < n_w
+                    && !empty(pole)
+                    && match (self.col(*c), pole) {
                         (Col::Initial, _) => true,
                         (Col::Reciprocal(_), None) => true,
                         _ => false,
@@ -180,13 +266,28 @@ impl ReciprocalCircuit {
                     return bad;
                 }
             }
+            if row.consts.iter().any(|(_, p)| empty(p)) {
+                return bad;
+            }
         }
-        self.compile_with(|_| Some(Scalar::ONE), Scalar::ONE)?.check()
+        // tuple poles: increasing, in range, components on early columns only
+        let mut next = 0;
+        for tp in &self.tuples {
+            if tp.pole < next || tp.pole >= self.n_p || tp.components.is_empty() {
+                return bad;
+            }
+            next = tp.pole + 1;
+            if tp.components.iter().any(|x| x.terms.iter().any(|(c, _)| !self.is_early(*c))) {
+                return bad;
+            }
+        }
+        self.compile_with(|_| Some(Scalar::ONE), Scalar::ONE, Scalar::ONE)?.check()
     }
 
-    /// The compiled circuit, with `coef(pole)` the factor of a term with that pole (`None`
-    /// when undefined) and `alpha` the coefficient subtracted at the reciprocal columns.
-    fn compile_with<F: Fn(Scalar) -> Option<Scalar>>(&self, coef: F, alpha: Scalar) -> Result<ArithmeticCircuit, ProofError> {
+    /// The compiled circuit, with `coef(t)` the factor of a term with a pole of value `t`
+    /// (`None` when undefined), `alpha` the coefficient subtracted at the reciprocal columns,
+    /// and `eta` the challenge of the tuple poles and pole polynomials.
+    fn compile_with<F: Fn(Scalar) -> Option<Scalar>>(&self, coef: F, alpha: Scalar, eta: Scalar) -> Result<ArithmeticCircuit, ProofError> {
         let n_mm = self.n_mm();
         let n_w = 2 * n_mm + self.n_o;
         let mut w_m = SparseMatrix::new(n_w);
@@ -201,18 +302,31 @@ impl ReciprocalCircuit {
             w_l.push_row(self.w_l.row(r).map(|(c, v)| (c, *v)));
         }
         let mut a_l = self.a_l.clone();
-        let factor = |pole: Option<Scalar>| match pole {
+        // w_D,i - sum_j eta^j x_ij = 0
+        for tp in &self.tuples {
+            let mut terms = vec![(tp.pole, Scalar::ONE)];
+            let mut a = Scalar::ZERO;
+            let mut e = Scalar::ONE;
+            for x in &tp.components {
+                terms.extend(x.terms.iter().map(|(c, v)| (*c, -e * v)));
+                a -= e * x.constant;
+                e *= eta;
+            }
+            w_l.push_row(terms);
+            a_l.push(a);
+        }
+        let factor = |pole: &Option<Pole>| match pole {
             None => Ok(Scalar::ONE),
-            Some(t) => coef(t).ok_or(ProofError::VerificationError),
+            Some(t) => coef(t.eval(eta)).ok_or(ProofError::VerificationError),
         };
         for row in &self.recip {
             let mut terms = Vec::with_capacity(row.terms.len());
-            for &(c, v, pole) in &row.terms {
-                terms.push((c, v * factor(pole)?));
+            for (c, v, pole) in &row.terms {
+                terms.push((*c, v * factor(pole)?));
             }
             w_l.push_row(terms);
             let mut a = Scalar::ZERO;
-            for &(v, pole) in &row.consts {
+            for (v, pole) in &row.consts {
                 a += v * factor(pole)?;
             }
             a_l.push(a);
@@ -233,9 +347,9 @@ impl ReciprocalCircuit {
         })
     }
 
-    /// The compiled circuit for the challenge `alpha` (spec §4.2); an error if a public pole
-    /// `t` has `alpha + t = 0`.
-    fn compile(&self, alpha: Scalar) -> Result<ArithmeticCircuit, ProofError> {
+    /// The compiled circuit for the challenges `eta` (ignored by a circuit that does not use
+    /// it) and `alpha` (spec §4.2); an error if a public pole has `alpha + t(eta) = 0`.
+    fn compile(&self, eta: Scalar, alpha: Scalar) -> Result<ArithmeticCircuit, ProofError> {
         self.compile_with(
             |t| {
                 let d = alpha + t;
@@ -246,15 +360,20 @@ impl ReciprocalCircuit {
                 }
             },
             alpha,
+            eta,
         )
     }
 
     /// The reciprocal circuit digest (spec §4.4).
     pub fn digest(&self) -> [u8; 32] {
+        let v2 = self.uses_eta();
         let mut h = Sha3_256::new();
-        h.update(b"bppp-reciprocal-digest v1");
+        h.update(if v2 { &b"bppp-reciprocal-digest v2"[..] } else { &b"bppp-reciprocal-digest v1"[..] });
         for x in self.dims() {
             h.update(x.to_le_bytes());
+        }
+        if v2 {
+            h.update((self.tuples.len() as u64).to_le_bytes());
         }
         for &(slot, t) in &self.partition {
             h.update([slot as u8]);
@@ -266,11 +385,16 @@ impl ReciprocalCircuit {
         for a in self.a_n.iter().chain(&self.a_m).chain(&self.a_l) {
             h.update(a.as_bytes());
         }
-        let pole = |h: &mut Sha3_256, p: &Option<Scalar>| match p {
+        let pole = |h: &mut Sha3_256, p: &Option<Pole>| match p {
             None => h.update([0u8]),
             Some(t) => {
                 h.update([1u8]);
-                h.update(t.as_bytes());
+                if v2 {
+                    h.update((t.0.len() as u64).to_le_bytes());
+                    t.0.iter().for_each(|x| h.update(x.as_bytes()));
+                } else {
+                    t.0.iter().for_each(|x| h.update(x.as_bytes())); // one coefficient
+                }
             }
         };
         for row in &self.recip {
@@ -284,6 +408,18 @@ impl ReciprocalCircuit {
             for (v, p) in &row.consts {
                 h.update(v.as_bytes());
                 pole(&mut h, p);
+            }
+        }
+        for tp in &self.tuples {
+            h.update((tp.pole as u64).to_le_bytes());
+            h.update((tp.components.len() as u64).to_le_bytes());
+            for x in &tp.components {
+                h.update((x.terms.len() as u64).to_le_bytes());
+                for (c, v) in &x.terms {
+                    h.update((*c as u64).to_le_bytes());
+                    h.update(v.as_bytes());
+                }
+                h.update(x.constant.as_bytes());
             }
         }
         h.finalize().into()
@@ -322,13 +458,16 @@ impl ReciprocalCircuit {
             .collect()
     }
 
-    /// Whether `w` satisfies the circuit: every reciprocal row vanishes as a rational function
-    /// of `X` (all multiplicities per pole value and the polynomial part are zero), and the
-    /// compiled circuit holds at `alpha` (for rows that read reciprocals).
-    pub fn is_satisfied(&self, w: &ReciprocalWitness, alpha: Scalar) -> bool {
+    /// Whether `w` satisfies the circuit for the challenges `eta` (ignored by a circuit that
+    /// does not use it) and `alpha` (spec §4.1): with the tuple poles set for `eta`, every
+    /// reciprocal row vanishes as a rational function of `X` (all multiplicities per pole value
+    /// and the polynomial part are zero), and the compiled circuit holds (for rows that read
+    /// reciprocals).
+    pub fn is_satisfied(&self, w: &ReciprocalWitness, eta: Scalar, alpha: Scalar) -> bool {
         if self.check().is_err() || self.check_witness(w).is_err() {
             return false;
         }
+        let w = &*self.at_eta(w, eta);
         let num = self.numerators(w);
         let full = self.full(w, &vec![Scalar::ZERO; self.n_p]);
         for row in &self.recip {
@@ -341,20 +480,20 @@ impl ReciprocalCircuit {
                     None => poles.push((t, x)),
                 },
             };
-            for &(c, v, pole) in &row.terms {
-                match self.col(c) {
+            for (c, v, pole) in &row.terms {
+                match self.col(*c) {
                     Col::Reciprocal(i) => add(Some(w.w_d[i]), v * num[i]),
-                    _ => add(pole, v * full[c]),
+                    _ => add(pole.as_ref().map(|p| p.eval(eta)), v * full[*c]),
                 }
             }
-            for &(v, pole) in &row.consts {
-                add(pole, v);
+            for (v, pole) in &row.consts {
+                add(pole.as_ref().map(|p| p.eval(eta)), *v);
             }
             if poly != Scalar::ZERO || poles.iter().any(|(_, m)| *m != Scalar::ZERO) {
                 return false;
             }
         }
-        match (self.reciprocals(w, alpha), self.compile(alpha)) {
+        match (self.reciprocals(w, alpha), self.compile(eta, alpha)) {
             (Ok(w_p), Ok(c)) => c.is_satisfied(&self.compiled_witness(w, w_p)),
             _ => false,
         }
@@ -376,16 +515,23 @@ impl ReciprocalCircuit {
             .collect()
     }
 
-    /// The compiled circuit and witness for `alpha` (tests).
+    /// The compiled circuit and witness for `(eta, alpha)` (tests).
     #[cfg(test)]
-    pub(crate) fn compiled_for_test(&self, w: &ReciprocalWitness, alpha: Scalar) -> (ArithmeticCircuit, CircuitWitness) {
+    pub(crate) fn compiled_for_test(&self, w: &ReciprocalWitness, eta: Scalar, alpha: Scalar) -> (ArithmeticCircuit, CircuitWitness) {
+        let w = &*self.at_eta(w, eta);
         let w_p = self.reciprocals(w, alpha).unwrap();
-        (self.compile(alpha).unwrap(), self.compiled_witness(w, w_p))
+        (self.compile(eta, alpha).unwrap(), self.compiled_witness(w, w_p))
     }
 
     #[cfg(test)]
-    pub(crate) fn reciprocals_for_test(&self, w: &ReciprocalWitness, alpha: Scalar) -> Vec<Scalar> {
-        self.reciprocals(w, alpha).unwrap()
+    pub(crate) fn reciprocals_for_test(&self, w: &ReciprocalWitness, eta: Scalar, alpha: Scalar) -> Vec<Scalar> {
+        self.reciprocals(&self.at_eta(w, eta), alpha).unwrap()
+    }
+
+    /// `w_D` with the tuple poles set for `eta` (tests).
+    #[cfg(test)]
+    pub(crate) fn poles_for_test(&self, w: &ReciprocalWitness, eta: Scalar) -> Vec<Scalar> {
+        self.poles_at(w, eta)
     }
 
     /// The `LinR` elements of `w_o`, in order.
@@ -405,11 +551,15 @@ impl ReciprocalCircuit {
 }
 
 fn absorb_statement<T: BpppTranscript>(t: &mut T, c: &ReciprocalCircuit, gens: &BpppGens, V: &[CompressedRistretto]) {
-    t.domain_sep(b"bppp-reciprocal v1");
+    let v2 = c.uses_eta();
+    t.domain_sep(if v2 { b"bppp-reciprocal v2" } else { b"bppp-reciprocal v1" });
     let labels: [&'static [u8]; 10] =
         [b"N_p", b"N_m", b"N_O", b"N_v", b"N_lin", b"k", b"N_l", b"N_r", b"f_l", b"f_m"];
     for (label, x) in labels.iter().zip(c.dims()) {
         t.append_u64(label, x);
+    }
+    if v2 {
+        t.append_u64(b"N_t", c.tuples.len() as u64);
     }
     t.append_point(b"G", &gens.g.compress());
     t.append_point(b"H_0", &gens.h[0].compress());
@@ -446,8 +596,13 @@ pub fn prove<T: BpppTranscript, R: RngCore + CryptoRng>(
 /// values are not known to the two-phase prover before `alpha`, and both provers must agree).
 fn rekeyed<T: BpppTranscript, R: RngCore + CryptoRng>(t: &T, c: &ReciprocalCircuit, w: &ReciprocalWitness, rng: &mut R) -> merlin::TranscriptRng {
     let early_o = w.w_o.iter().zip(&c.partition).filter(|(_, (s, _))| *s != Slot::LinR).map(|(x, _)| x);
-    let secrets = w.w_d.iter().chain(&w.w_l).chain(early_o).chain(w.v.iter().flatten()).chain(&w.s);
-    super::transcript::prover_rng(t, b"reciprocal", &c.digest(), secrets, rng)
+    // tuple poles are not known before eta: hashed as 0 (spec §1)
+    let mut w_d = w.w_d.clone();
+    c.tuples.iter().for_each(|tp| w_d[tp.pole] = Scalar::ZERO);
+    let secrets = w_d.iter().chain(&w.w_l).chain(early_o).chain(w.v.iter().flatten()).chain(&w.s);
+    let r = super::transcript::prover_rng(t, b"reciprocal", &c.digest(), secrets, rng);
+    w_d.iter_mut().for_each(|x| *x = Scalar::ZERO);
+    r
 }
 
 pub(crate) fn prove_impl<T: BpppTranscript, R: RngCore + CryptoRng>(
@@ -529,10 +684,21 @@ where
         }
     };
     let rng = &mut DynRng(rng);
+    let o = circuit::commit_o(gens, c.n_lin, c.n_mm(), &c.partition, &w.w_o, rng);
+    let (eta, w) = if c.uses_eta() {
+        transcript.append_point(b"C_O", &o.C_O);
+        let eta = transcript.challenge(b"eta");
+        (eta, c.at_eta(w, eta))
+    } else {
+        (Scalar::ZERO, alloc::borrow::Cow::Borrowed(w))
+    };
+    let w = &*w;
     let w_l: Vec<Scalar> = w.w_d.iter().chain(&w.w_l).copied().collect();
-    let mut ol = circuit::commit_ol(gens, c.n_lin, &c.partition, &w_l, &w.w_o, rng);
+    let mut ol = circuit::commit_l(gens, o, &w_l, rng);
     transcript.append_point(b"C_L", &ol.C_L);
-    transcript.append_point(b"C_O", &ol.C_O);
+    if !c.uses_eta() {
+        transcript.append_point(b"C_O", &ol.C_O);
+    }
     let alpha = transcript.challenge(b"alpha");
     let w_p = c.reciprocals(w, alpha)?;
     let lw = late(alpha, &w_p)?;
@@ -549,7 +715,7 @@ where
         }
     }
     ol.set_late(&c.partition, &full.w_o);
-    let compiled = c.compile(alpha)?;
+    let compiled = c.compile(eta, alpha)?;
     let cw = c.compiled_witness(&full, w_p);
     let cr = circuit::commit_r(gens, &ol, &cw.w_r, rng);
     transcript.append_point(b"C_R", &cr.C_R);
@@ -581,10 +747,18 @@ pub(crate) fn terms<T: BpppTranscript>(
         return Err(ProofError::VerificationError);
     }
     absorb_statement(transcript, c, gens, V);
-    transcript.append_point(b"C_L", &proof.C_L);
-    transcript.append_point(b"C_O", &proof.C_O);
+    let eta = if c.uses_eta() {
+        transcript.append_point(b"C_O", &proof.C_O);
+        let eta = transcript.challenge(b"eta");
+        transcript.append_point(b"C_L", &proof.C_L);
+        eta
+    } else {
+        transcript.append_point(b"C_L", &proof.C_L);
+        transcript.append_point(b"C_O", &proof.C_O);
+        Scalar::ZERO
+    };
     let alpha = transcript.challenge(b"alpha");
-    let compiled = c.compile(alpha)?;
+    let compiled = c.compile(eta, alpha)?;
     transcript.append_point(b"C_R", &proof.C_R);
     proof.inner_terms(&compiled, gens, V, transcript)
 }
@@ -646,7 +820,7 @@ mod tests {
         }
         let terms = (0..n_p)
             .map(|j| (n_mm + j, Scalar::ONE, None))
-            .chain((0..b).map(|s| (2 * n_mm + s, -Scalar::ONE, Some(Scalar::from(s as u64)))))
+            .chain((0..b).map(|s| (2 * n_mm + s, -Scalar::ONE, Some(Scalar::from(s as u64).into()))))
             .collect();
         let c = ReciprocalCircuit {
             n_p,
@@ -662,6 +836,7 @@ mod tests {
             w_l,
             a_l: vec![Scalar::ZERO],
             recip: vec![ReciprocalRow { terms, consts: vec![] }],
+            tuples: vec![],
             f_l: true,
             f_m: false,
             partition: (0..b).map(|s| if shared { (Slot::LinL, s) } else { (Slot::NormO, s) }).collect(),
@@ -749,7 +924,7 @@ mod tests {
             let mut digits = digits_of(1000, 16, 4);
             digits[1] = 16; // value = 1000 + 16*16 - digit, still a valid linear relation
             let (c, w) = range_proof(16, 4, &digits, shared);
-            assert!(!c.is_satisfied(&w, Scalar::from(12345u64)));
+            assert!(!c.is_satisfied(&w, Scalar::ZERO, Scalar::from(12345u64)));
             let (pc, bp) = setup(&c);
             let g = BpppGens::new(&pc, &bp, c.n_lin, c.n_p + c.n_m).unwrap();
             let V = inputs(&g, &w);
@@ -807,7 +982,7 @@ mod tests {
         let n_mm = c.n_p + c.n_m;
         // a pole term on a w_P column
         let mut x = c.clone();
-        x.recip[0].terms.push((n_mm, Scalar::ONE, Some(Scalar::ONE)));
+        x.recip[0].terms.push((n_mm, Scalar::ONE, Some(Scalar::ONE.into())));
         assert!(x.check().is_err());
         // a multiplicity in a LinR slot (committed after alpha)
         let mut x = c.clone();
@@ -902,17 +1077,17 @@ mod tests {
         let alpha = Scalar::from(10u64);
         let m3 = (alpha + Scalar::from(3u64)) * (alpha + Scalar::from(4u64)).invert();
         w.w_o = vec![Scalar::ZERO, Scalar::ONE, Scalar::ONE, m3];
-        let compiled = c.compile(alpha).unwrap();
+        let compiled = c.compile(Scalar::ZERO, alpha).unwrap();
         let w_p = c.reciprocals(&w, alpha).unwrap();
         assert!(compiled.is_satisfied(&c.compiled_witness(&w, w_p)));
-        assert!(!c.is_satisfied(&w, alpha));
+        assert!(!c.is_satisfied(&w, Scalar::ZERO, alpha));
         // multiplicities summing to the number of digits (so lumping all poles together would
         // cancel), tuned so that f(alpha) = 0: m_0 = x, m_3 = 1 - x, x = -alpha / (3 (alpha + 4))
         let x = -alpha * (Scalar::from(3u64) * (alpha + Scalar::from(4u64))).invert();
         w.w_o = vec![x, Scalar::ONE, Scalar::ONE, Scalar::ONE - x];
         let w_p = c.reciprocals(&w, alpha).unwrap();
         assert!(compiled.is_satisfied(&c.compiled_witness(&w, w_p)));
-        assert!(!c.is_satisfied(&w, alpha));
+        assert!(!c.is_satisfied(&w, Scalar::ZERO, alpha));
     }
 
     /// A public pole at `-alpha` is undefined: the prover fails and the verifier rejects.
@@ -975,13 +1150,13 @@ mod tests {
         let proof = prove_two_phase(&c, &g, &V, &w, late, &mut t, &mut ChaCha20Rng::seed_from_u64(7)).unwrap();
         let (alpha, w_p) = seen.unwrap();
         assert_eq!(alpha, chal[0]);
-        assert_eq!(w_p, c.reciprocals_for_test(&w, alpha));
+        assert_eq!(w_p, c.reciprocals_for_test(&w, Scalar::ZERO, alpha));
         verify(&proof, &c, &g, &V, &mut Replay::new(chal.clone())).unwrap();
         // the one-phase prover with the same values gives the same proof
         let mut full = w.clone();
         full.w_r = vec![Scalar::from(2u64) * w_p[0]];
         *full.w_o.last_mut().unwrap() = w_p[1] + Scalar::ONE;
-        assert!(c.is_satisfied(&full, alpha));
+        assert!(c.is_satisfied(&full, Scalar::ZERO, alpha));
         let one = prove(&c, &g, &V, &full, &mut Replay::new(chal.clone()), &mut ChaCha20Rng::seed_from_u64(7)).unwrap();
         assert_eq!(one, proof);
         // values that ignore alpha do not satisfy the circuit: the prover refuses
@@ -1005,12 +1180,218 @@ mod tests {
         }
     }
 
+    /// A lookup of 2-tuples (spec §4.1 tuple poles): `n_q` private tuples `(x_q0, x_q1)` in
+    /// `w_O`, a public table `rows` with multiplicities in `w_O`; poles `w_D,q = x_q0 + eta x_q1`,
+    /// public poles `(r_0, r_1)` as polynomials in `eta`. One reciprocal row:
+    /// `sum_q 1/(X + w_D,q) - sum_r m_r/(X + r_0 + eta r_1) = 0`.
+    fn tuple_lookup(tuples: &[(Scalar, Scalar)], rows: &[(u64, u64)], mult: &[u64]) -> (ReciprocalCircuit, ReciprocalWitness) {
+        let n_p = tuples.len();
+        let n_m = 0;
+        let n_mm = n_p + n_m;
+        let n_o = 2 * n_p + rows.len();
+        let n_lin = n_o.saturating_sub(n_mm);
+        let n_w = 2 * n_mm + n_o;
+        let col_o = |e: usize| 2 * n_mm + e;
+        let mut w_n = SparseMatrix::new(n_w);
+        (0..n_p).for_each(|_| w_n.push_row(vec![]));
+        let mut terms: Vec<(usize, Scalar, Option<Pole>)> = (0..n_p).map(|q| (n_mm + q, Scalar::ONE, None)).collect();
+        for (r, &(a, b)) in rows.iter().enumerate() {
+            terms.push((col_o(2 * n_p + r), -Scalar::ONE, Some(Pole(vec![Scalar::from(a), Scalar::from(b)]))));
+        }
+        let comp = |e: usize| Component { terms: vec![(col_o(e), Scalar::ONE)], constant: Scalar::ZERO };
+        let c = ReciprocalCircuit {
+            n_p,
+            n_m,
+            n_o,
+            n_v: 1,
+            n_lin,
+            k: 0,
+            w_n,
+            a_n: vec![Scalar::ONE; n_p],
+            w_m: SparseMatrix::new(n_w),
+            a_m: vec![],
+            w_l: SparseMatrix::new(n_w),
+            a_l: vec![],
+            recip: vec![ReciprocalRow { terms, consts: vec![] }],
+            tuples: (0..n_p).map(|q| TuplePole { pole: q, components: vec![comp(2 * q), comp(2 * q + 1)] }).collect(),
+            f_l: false,
+            f_m: false,
+            partition: (0..n_o).map(|e| if e < n_mm { (Slot::NormO, e) } else { (Slot::LinO, e - n_mm) }).collect(),
+        };
+        let w_o = tuples.iter().flat_map(|(a, b)| [*a, *b]).chain(mult.iter().map(|m| Scalar::from(*m))).collect();
+        // the witness's tuple poles are placeholders (ignored)
+        let w = ReciprocalWitness { w_d: (0..n_p).map(|q| Scalar::from(1000 + q as u64)).collect(), w_l: vec![], w_r: vec![], w_o, v: vec![], s: vec![] };
+        (c, w)
+    }
+
+    fn rows16() -> Vec<(u64, u64)> {
+        (0..16u64).map(|i| (i, (i * 7) % 16)).collect()
+    }
+
+    fn tuple_gens(c: &ReciprocalCircuit) -> (PedersenGens, BulletproofGens) {
+        setup(c)
+    }
+
+    /// Tuple poles prove and verify with protocol v2; the transcript is `C_O`, `eta`, `C_L`,
+    /// `alpha`, `C_R`; the witness's values of the tuple poles are ignored.
+    #[test]
+    fn tuple_poles_prove_with_protocol_v2() {
+        let rows = rows16();
+        let s = |x: u64| Scalar::from(x);
+        let (c, w) = tuple_lookup(&[(s(3), s(5)), (s(9), s(15)), (s(3), s(5))], &rows, &{
+            let mut m = vec![0u64; 16];
+            m[3] = 2;
+            m[9] = 1;
+            m
+        });
+        c.check().unwrap();
+        assert!(c.uses_eta());
+        let (pc, bp) = tuple_gens(&c);
+        let g = BpppGens::new(&pc, &bp, c.n_lin, c.n_p + c.n_m).unwrap();
+        let chal: Vec<Scalar> = (5..40u64).map(Scalar::from).collect();
+        let eta = chal[0];
+        assert!(c.is_satisfied(&w, eta, chal[1]));
+        let mut t = Replay::new(chal.clone());
+        let proof = prove(&c, &g, &[], &w, &mut t, &mut ChaCha20Rng::seed_from_u64(1)).unwrap();
+        let labels: Vec<&[u8]> = t.log.iter().map(|(l, _)| *l).collect();
+        let pos = |l: &[u8]| labels.iter().position(|x| *x == l).unwrap();
+        assert_eq!(labels[0], &b"bppp-reciprocal v2"[..]);
+        assert!(pos(b"N_t") < pos(b"G") && pos(b"circuit") < pos(b"C_O"));
+        assert!(pos(b"C_O") < pos(b"eta") && pos(b"eta") < pos(b"C_L") && pos(b"C_L") < pos(b"alpha"));
+        assert!(pos(b"alpha") < pos(b"C_R") && pos(b"C_R") < pos(b"rho"));
+        assert_eq!(t.log[pos(b"C_O")].1, proof.C_O.as_bytes().to_vec());
+        assert_eq!(t.log[pos(b"C_L")].1, proof.C_L.as_bytes().to_vec());
+        let mut tv = Replay::new(chal.clone());
+        verify(&proof, &c, &g, &[], &mut tv).unwrap();
+        assert_eq!(tv.log, t.log);
+        // w_D at eta
+        assert_eq!(c.poles_for_test(&w, eta)[1], s(9) + eta * s(15));
+        // other placeholders: the same proof
+        let mut w2 = w.clone();
+        w2.w_d = vec![Scalar::ZERO; 3];
+        assert_eq!(prove(&c, &g, &[], &w2, &mut Replay::new(chal.clone()), &mut ChaCha20Rng::seed_from_u64(1)).unwrap(), proof);
+        // real transcripts
+        let p = prove(&c, &g, &[], &w, &mut Transcript::new(b"tp"), &mut ChaCha20Rng::seed_from_u64(2)).unwrap();
+        verify(&p, &c, &g, &[], &mut Transcript::new(b"tp")).unwrap();
+        assert!(verify(&p, &c, &g, &[], &mut Transcript::new(b"other")).is_err());
+        assert_eq!(proof_from_bytes(&p.to_bytes(), &c).unwrap(), p);
+    }
+
+    /// Components are arbitrary field elements: a tuple that packs (base 16) to a table row but
+    /// is not one — `(x_0 + 16, x_1 - 1)` — and a tuple with a huge component are not satisfied,
+    /// the prover refuses and an unchecked proof does not verify. With packing and no bounds
+    /// (phase 6 without the bound rule) the first would pass.
+    #[test]
+    fn tuples_are_compared_component_by_component() {
+        let rows = rows16();
+        let s = |x: u64| Scalar::from(x);
+        let mut m = vec![0u64; 16];
+        m[3] = 1; // row (3, 5)
+        let cheats = [(s(3 + 16), s(5) - Scalar::ONE), (s(3) + Scalar::from(1u64 << 63) * s(4), s(5)), (s(5), s(3))];
+        for (i, &cheat) in cheats.iter().enumerate() {
+            let (c, w) = tuple_lookup(&[cheat], &rows, &m);
+            let (pc, bp) = tuple_gens(&c);
+            let g = BpppGens::new(&pc, &bp, c.n_lin, c.n_p + c.n_m).unwrap();
+            assert!(!c.is_satisfied(&w, Scalar::from(77u64), Scalar::from(5u64)), "cheat {}", i);
+            let mut rng = ChaCha20Rng::seed_from_u64(3);
+            assert!(prove(&c, &g, &[], &w, &mut Transcript::new(b"tp"), &mut rng).is_err(), "cheat {}", i);
+            let proof = prove_impl(&c, &g, &[], &w, &mut Transcript::new(b"tp"), &mut rng, false).unwrap();
+            assert!(verify(&proof, &c, &g, &[], &mut Transcript::new(b"tp")).is_err(), "cheat {}", i);
+        }
+        // at eta = 16 the compression is the packing: the first cheat collides there (a bad
+        // challenge, spec §4.7), as it would for every eta with packing
+        let (c, w) = tuple_lookup(&[cheats[0]], &rows, &m);
+        assert!(c.is_satisfied(&w, Scalar::from(16u64), Scalar::from(5u64)));
+        let (ac, aw) = c.compiled_for_test(&w, Scalar::from(16u64), Scalar::from(5u64));
+        assert!(ac.is_satisfied(&aw));
+    }
+
+    /// The rules of spec §4.1 for tuple poles: components on early columns only (not `C_L`:
+    /// `w_D`, `w_L`, `LinL`; not `C_R`: `w_P`, `w_R`, `LinR`), poles increasing and in range, at
+    /// least one component, pole polynomials not empty.
+    #[test]
+    fn tuple_pole_rules() {
+        let s = |x: u64| Scalar::from(x);
+        let (c, _) = tuple_lookup(&[(s(3), s(5)), (s(9), s(15))], &rows16(), &[0; 16]);
+        c.check().unwrap();
+        let n_mm = c.n_p + c.n_m;
+        let on = |col: usize| {
+            let mut x = c.clone();
+            x.tuples[0].components[1].terms.push((col, Scalar::ONE));
+            x
+        };
+        assert!(on(0).check().is_err(), "w_D");
+        assert!(on(n_mm).check().is_err(), "w_P");
+        assert!(on(2 * n_mm + 1).check().is_ok(), "NormO");
+        assert!(on(2 * n_mm + 10).check().is_ok(), "LinO");
+        assert!(on(2 * n_mm + c.n_o).check().is_err(), "out of range");
+        for slot in [Slot::LinL, Slot::LinR] {
+            let mut x = on(2 * n_mm + 10);
+            x.partition[10] = (slot, 9);
+            assert!(x.check().is_err(), "{:?}", slot as u8);
+        }
+        let mut x = c.clone();
+        x.tuples.swap(0, 1);
+        assert!(x.check().is_err(), "order");
+        let mut x = c.clone();
+        x.tuples[1].pole = 0;
+        assert!(x.check().is_err(), "twice");
+        let mut x = c.clone();
+        x.tuples[1].pole = 2;
+        assert!(x.check().is_err(), "range");
+        let mut x = c.clone();
+        x.tuples[0].components.clear();
+        assert!(x.check().is_err(), "no component");
+        let mut x = c.clone();
+        x.recip[0].terms[2].2 = Some(Pole(vec![]));
+        assert!(x.check().is_err(), "empty pole");
+        let mut x = c.clone();
+        x.recip[0].consts.push((Scalar::ONE, Some(Pole(vec![]))));
+        assert!(x.check().is_err(), "empty constant pole");
+        // a free pole may sit next to tuple poles
+        let mut x = c.clone();
+        x.tuples.remove(0);
+        assert!(x.check().is_ok() && x.uses_eta());
+        // without tuple poles and long poles the circuit is v1
+        let mut x = c.clone();
+        x.tuples.clear();
+        x.recip[0].terms.iter_mut().for_each(|t| t.2 = t.2.take().map(|p| Pole(p.0[..1].to_vec())));
+        assert!(!x.uses_eta());
+    }
+
+    /// The v2 digest covers the tuple poles and the pole polynomials; v1 circuits keep the v1
+    /// digest (regression pins and vectors), and a length-1 pole hashes differently in v2.
+    #[test]
+    fn digest_v2_covers_tuple_poles() {
+        let s = |x: u64| Scalar::from(x);
+        let (c, _) = tuple_lookup(&[(s(3), s(5)), (s(9), s(15))], &rows16(), &[0; 16]);
+        let d = c.digest();
+        let mut x = c.clone();
+        x.tuples[1].components[0].constant = Scalar::ONE;
+        assert_ne!(x.digest(), d, "constant");
+        let mut x = c.clone();
+        x.tuples[1].components[0].terms[0].1 = s(2);
+        assert_ne!(x.digest(), d, "coefficient");
+        let mut x = c.clone();
+        x.tuples[1].components.swap(0, 1);
+        assert_ne!(x.digest(), d, "component order");
+        let mut x = c.clone();
+        x.tuples[1].components.push(Component { terms: vec![], constant: Scalar::ZERO });
+        assert_ne!(x.digest(), d, "a zero component");
+        let mut x = c.clone();
+        x.recip[0].terms[2].2.as_mut().unwrap().0.push(Scalar::ZERO);
+        assert_ne!(x.digest(), d, "a zero coefficient of a pole");
+        let mut x = c.clone();
+        x.tuples.remove(0);
+        assert_ne!(x.digest(), d, "number of tuple poles");
+    }
+
     #[test]
     fn digest_covers_reciprocal_rows() {
         let (c, _) = range_proof(4, 3, &digits_of(37, 4, 3), true);
         let d = c.digest();
         let mut x = c.clone();
-        x.recip[0].terms[3].2 = Some(Scalar::from(9u64));
+        x.recip[0].terms[3].2 = Some(Scalar::from(9u64).into());
         assert_ne!(x.digest(), d);
         let mut x = c.clone();
         x.recip[0].consts.push((Scalar::ONE, None));

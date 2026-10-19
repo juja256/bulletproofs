@@ -140,6 +140,7 @@ impl MactStatement {
             w_l,
             a_l: vec![Scalar::ZERO; 2 * k + self.n_out],
             recip,
+            tuples: vec![],
             f_l: true,
             f_m: false,
             partition,
@@ -366,7 +367,7 @@ mod tests {
         let mut w = info.witness(&entries, &digits);
         w.v[2][0] = -Scalar::from(5u64); // the output commits to -5 (10 = 15 - 5)
         w.w_o[2] = -Scalar::from(5u64);
-        assert!(!c.is_satisfied(&w, Scalar::from(99u64)));
+        assert!(!c.is_satisfied(&w, Scalar::ZERO, Scalar::from(99u64)));
         let V: Vec<CompressedRistretto> = w.v.iter().zip(&w.s).map(|(v, s)| g.commit_input(v, *s).compress()).collect();
         let mut tr = Transcript::new(b"m");
         tr.append_message(b"dom-sep", b"bppp-mact v1");
@@ -390,7 +391,7 @@ mod tests {
         d2[0] = 16;
         let digits = vec![decompose(30, &info.layout), d2];
         let w = info.witness(&entries, &digits);
-        assert!(!c.is_satisfied(&w, Scalar::from(99u64)));
+        assert!(!c.is_satisfied(&w, Scalar::ZERO, Scalar::from(99u64)));
         let V: Vec<CompressedRistretto> =
             entries.iter().map(|e| g.commit_input(&[Scalar::from(e.amount), e.asset], e.blinding).compress()).collect();
         let mut t = Transcript::new(b"m");

@@ -1559,7 +1559,7 @@ class Builder:
         self.tables = []                        # rows (m = len(rows[0]))
         self.lookups = []                       # (table id, tuple), in call order
         self.args = []                          # (m, [(num, tuple)], [(coeff, row)])
-        self.builder_mode = False
+        self.has_builder_ops = False            # a builder operation was recorded (7.2)
 
     k = property(lambda self: len(self.v))
     n = property(lambda self: len(self.aL))
@@ -1637,19 +1637,18 @@ class Builder:
 
     # -- builder operations (7.2)
     def witness(self, v):
-        self.builder_mode = True
         self.wit.append(v % L)
+        self.has_builder_ops = True
         return ("W", self.n_w - 1)
 
     def product(self, l, r, out):
-        self.builder_mode = True
         for lc in (l, r, out):
             self.check_lc(lc)
         self.products.append((list(l), list(r), list(out)))
+        self.has_builder_ops = True
 
     def table(self, rows):
         """table(rows): at least one row, the first row has m >= 1 entries, every row m."""
-        self.builder_mode = True
         if not isinstance(rows, list) or not all(bld_is_row(r) for r in rows):
             raise ValueError("malformed table rows")
         if not rows:
@@ -1660,6 +1659,7 @@ class Builder:
         if any(len(r) != m for r in rows):
             raise BuilderError("row length differs from the first row's")
         self.tables.append([list(r) for r in rows])
+        self.has_builder_ops = True
         return len(self.tables) - 1
 
     def table_m(self, t):
@@ -1674,12 +1674,11 @@ class Builder:
             self.check_lc(lc)
 
     def lookup(self, t, tup):
-        self.builder_mode = True
         self._check_lookup(t, tup)
         self.lookups.append((t, [list(lc) for lc in tup]))
+        self.has_builder_ops = True
 
     def lookup_value(self, t, v):
-        self.builder_mode = True
         if not (isinstance(t, int) and 0 <= t < len(self.tables)) or self.table_m(t) != 1:
             raise BuilderError("lookup_value needs an existing one-column table")
         x = self.witness(v)
@@ -1690,7 +1689,6 @@ class Builder:
     def reciprocal(self, m, terms, public):
         """reciprocal(m), the terms (private first, then public, in order), then
         finish_reciprocal; any failure fails the whole call."""
-        self.builder_mode = True
         if not isinstance(m, int) or isinstance(m, bool) or m < 0:
             raise ValueError("malformed m")
         if not all(bld_is_row(row) for _, row in public):
@@ -1711,6 +1709,7 @@ class Builder:
             return  # an argument without terms is dropped
         self.args.append((m, [(list(n), [list(x) for x in t]) for n, t in terms],
                           [(list(c), list(r)) for c, r in public]))
+        self.has_builder_ops = True
 
 
 def bld_apply(b, op):
@@ -1947,8 +1946,12 @@ def r1cs_plain_circuit(b):
     a_l = [0] * k
     for lc in b.r1cs:
         for x, _ in lc:
-            if x != ONE and x[1] >= (k if x[0] == "V" else n):
-                raise BuilderError("unallocated variable")
+            if x == ONE:
+                continue
+            if x[0] == "W":  # a plain program has no builder witnesses
+                raise BuilderError(f"constraint names unallocated variable {x}")
+            if x[1] >= (k if x[0] == "V" else n):
+                raise BuilderError(f"constraint names unallocated variable {x}")
         w_l.append([(col[x[0]](x[1]), c % L) for x, c in lc if x != ONE])
         a_l.append(sum(c for x, c in lc if x == ONE) % L)
     c = {"n_m": nm, "n_o": nm + k, "n_v": 1, "n_lin": k, "k": k, "n_l": len(w_l),
@@ -2109,6 +2112,15 @@ def r1cs_random_plain_check(rng, count=150):
                     lc.append((ONE, -b.eval(lc) % L))
                 b.constrain(lc)
         r1cs_plain_self_check(b, rng)
+    # a Witness term in a plain program is an unallocated variable (there are no witnesses)
+    b = Builder()
+    b.commit(1, 1)
+    b.r1cs.append([(("W", 0), 1), (("V", 0), L - 1)])  # past constrain's own check
+    try:
+        r1cs_plain_circuit(b)
+        raise AssertionError("Witness term accepted in a plain program")
+    except BuilderError:
+        pass
 
 
 def bld_agreement_check(b, rng):

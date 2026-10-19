@@ -1096,7 +1096,7 @@ def builder_case(rng, name, P, expect=True, uses_eta=None):
     rc_p, _ = bld_lower(b, fin, prover_constants=True)
     r1cs_ok = all(b.eval(lc, fin["wit"]) == 0 for lc in b.r1cs)
     assert (rc_p == rc_v) == r1cs_ok, name
-    if not b.builder_mode:  # a plain R1CS: spec 6.1 built directly
+    if not b.has_builder_ops:  # a plain R1CS: spec 6.1 built directly
         r1cs_plain_self_check(b, random.Random(name + "/6.1"))
     v2 = recip_uses_eta(rc)
     if uses_eta is None:
@@ -1131,7 +1131,7 @@ def builder_cases(rng):
         return P.table([[i] for i in range(2**w)])
 
     # -- satisfied programs
-    # builder mode without any gate: n = n_prod = N_p = 0, so n_r = 1 (one zero multiplier)
+    # builder operations without any gate: n = n_prod = N_p = 0, so n_r = 1 (one zero multiplier)
     P = Prog()
     x1, x2 = s(), s()
     a, b = P.witness(x1), P.witness(x2)

@@ -613,6 +613,33 @@ pub fn prove<T: BpppTranscript, R: RngCore + CryptoRng>(
     prove_with(c, gens, V, w, fixed, transcript, Randomness::Derived(rng), true)
 }
 
+/// [`prove`] without the refusal of an unsatisfied witness (feature `cheats`: the proof must
+/// not verify).
+#[cfg(feature = "cheats")]
+pub(crate) fn prove_unsatisfied<T: BpppTranscript, R: RngCore + CryptoRng>(
+    c: &ReciprocalCircuit,
+    gens: &BpppGens,
+    V: &[CompressedRistretto],
+    w: &ReciprocalWitness,
+    transcript: &mut T,
+    rng: &mut R,
+) -> Result<CircuitProof, ProofError> {
+    let fixed = |_: Scalar, _: &[Scalar]| Ok(LateWitness { w_r: w.w_r.clone(), w_o_late: c.late_elements(&w.w_o) });
+    prove_with(c, gens, V, w, fixed, transcript, Randomness::Derived(rng), false)
+}
+
+#[cfg(not(feature = "cheats"))]
+pub(crate) fn prove_unsatisfied<T: BpppTranscript, R: RngCore + CryptoRng>(
+    c: &ReciprocalCircuit,
+    gens: &BpppGens,
+    V: &[CompressedRistretto],
+    w: &ReciprocalWitness,
+    transcript: &mut T,
+    rng: &mut R,
+) -> Result<CircuitProof, ProofError> {
+    prove(c, gens, V, w, transcript, rng)
+}
+
 /// The prover's RNG from the transcript, the digest and the initial witness (spec §1; the late
 /// values are not known to the two-phase prover before `alpha`, and both provers must agree).
 fn rekeyed<T: BpppTranscript, R: RngCore + CryptoRng>(t: &T, c: &ReciprocalCircuit, w: &ReciprocalWitness, rng: &mut R) -> merlin::TranscriptRng {

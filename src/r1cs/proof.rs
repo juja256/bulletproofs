@@ -63,6 +63,16 @@ pub(super) struct BpppProof {
 const BPPP_V2: u8 = 4;
 
 impl R1CSProof {
+    /// The backend that produced this proof; a verifier must use the same one
+    /// ([`Verifier::set_backend`](super::Verifier::set_backend)).
+    pub fn backend(&self) -> super::Backend {
+        match &self.0 {
+            ProofKind::Bp(_) => super::Backend::Bp,
+            #[cfg(feature = "bppp")]
+            ProofKind::Bppp(_) => super::Backend::Bppp,
+        }
+    }
+
     /// Serializes the proof. A BP proof keeps the upstream encoding (see the BP layout below);
     /// a BP++ proof is the byte 4, `N'_m` and `N_lin` as `u64` little-endian, then the proof
     /// (spec §6.2).

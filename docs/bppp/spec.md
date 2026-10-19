@@ -600,9 +600,14 @@ written against `ConstraintSystem` run unchanged.
 
 ### 6.1 Translation
 
+Every constraint system proven with BP++ is lowered by §7.6 to a reciprocal form circuit, whether
+or not it uses builder operations (§7); there is one BP++ lowering and one encoding. A plain
+R1CS (no builder operation) has no poles, products or witnesses, so it lowers to the reciprocal
+form circuit with $N_p = 0$ and no reciprocal rows — in effect an arithmetic circuit (§3):
+
 An R1CS with $n$ multipliers $(a_L, a_R, a_O)$, $k$ committed inputs $V_j = v_j B + s_j \tilde B$ and
-linear constraints $\sum c\, x + c_0 = 0$ becomes the arithmetic circuit (§3) with $N_m = \max(1, n)$
-(missing gates are zero), $N_O = N_m + k$, $N_v = 1$, $N_{lin} = k$, $f_l = [k > 0]$, $f_m = 0$:
+linear constraints $\sum c\, x + c_0 = 0$ gives $N_m = \max(1, n)$ (missing gates are zero),
+$N_O = N_m + k$, $N_v = 1$, $N_{lin} = k$, $f_l = [k > 0]$, $f_m = 0$:
 
 - $w_L = a_L$, $w_R = a_R$, $w_O = a_O \| c$ with $c_j$ a copy of $v_j$; partition: $a_{O,i}$ in
   $(n_O, i)$, $c_j$ in $(l_O, j)$;
@@ -614,17 +619,23 @@ linear constraints $\sum c\, x + c_0 = 0$ becomes the arithmetic circuit (§3) w
 
 The copies are the price of the R1CS interface (paper §5.1: inputs used in several constraints
 are copied into $w_O$); the native circuit API avoids them. Generators: §3.2 with
-$N_{lin} = k$, $N_m$, from the same `PedersenGens`/`BulletproofGens` as the BP backend (capacity at
-least $\max(N_m, k + 6)$, where BP needs $n$ rounded up to a power of two), so the input
-commitments have the same form in both backends. As for every BP++ input (§3.2), the proof binds
-the committed values but not that a commitment has exactly the form $v B + s \tilde B$.
+$N_{lin}$ and $N'_m$ of the lowered circuit (for a plain R1CS $k$ and $N_m$), from the same
+`PedersenGens`/`BulletproofGens` as the BP backend (capacity at least $\max(N'_m, N_{lin} + 6)$,
+where BP needs its multipliers rounded up to a power of two), so the input commitments have the
+same form in both backends. As for every BP++ input (§3.2), the proof binds the committed values
+but not that a commitment has exactly the form $v B + s \tilde B$.
+
+(Before option B, a plain R1CS was proven with the arithmetic circuit protocol §3 under
+`"bppp-r1cs v1"` and tag 2 with $(N_m, k)$, a builder circuit under `"bppp-builder v1"` and tag 3.
+Both are gone; the circuits are the same, the protocol is now §4 for both.)
 
 ### 6.2 Protocol and encoding
 
-The prover absorbs `domain_sep("bppp-r1cs v1")` after the transcript of the constraint system
-(the BP prover's domain separator and the `V` absorbed by `commit`) and runs §3 (`prove`, with
-the circuit digest). The prover's randomness is drawn from a transcript RNG rekeyed with the
-input blindings and the caller's RNG, and then rekeyed again by `prove` (§1).
+The prover absorbs `domain_sep("bppp-r1cs v2")` after the transcript of the constraint system
+(the BP prover's domain separator and the `V` absorbed by `commit`) and runs the reciprocal form
+protocol §4 (v1 or v2 as §4.1 decides; its digest binds the lowered circuit). The prover's
+randomness is drawn from a transcript RNG rekeyed with the input blindings and the caller's RNG,
+and then rekeyed again by `prove` (§1).
 
 The prover's constraint store drops constants (as for BP, so the BP backend pays nothing for
 BP++): it recomputes each constant as $-\sum c\, x$ over its witness. For a satisfying witness these
@@ -637,9 +648,10 @@ verifier return a `GadgetError`. A challenge between the commitments would have 
 $C_L, C_O$ and before $C_R$ (the reciprocal form's slot), where variables on the right wire are
 not yet bound.
 
-Encoding: the byte 2 (BP proofs start with 0 or 1), $N_m$ and $k$ as `u64` little-endian, then
-the circuit proof (§3.10). The verifier rejects a proof whose dimensions differ from its own
-constraint system, and a proof of the other backend.
+Encoding: the byte 2 (BP proofs start with 0 or 1), $N'_m = N_p + N_m$ and $N_{lin}$ as `u64`
+little-endian, then the proof (§4.6). Any other first byte is a format error (3 was the builder
+encoding before option B). The verifier rejects a proof whose dimensions differ from its own
+lowering, and a proof of the other backend.
 
 ## 7. The circuit builder (both backends)
 
@@ -701,10 +713,8 @@ or bound (§7.3).
 - `finish_reciprocal(r)` validates and records the argument (in call order): every tuple and
   row has $m$ entries and every variable exists. An argument without terms is dropped.
 
-Errors are `GadgetError`; a failed operation records nothing. The first successful builder
-operation (other than `reciprocal`, which records nothing) puts the constraint system in
-*builder mode*, which selects §7.6 instead of §6 for BP++ (§6 is used
-when only `ConstraintSystem` methods were called).
+Errors are `GadgetError`; a failed operation records nothing. Without builder operations the
+record is empty: BP (§7.5) adds nothing, BP++ (§7.6) lowers the plain R1CS of §6.1.
 
 ### 7.3 Tuples
 
@@ -837,14 +847,8 @@ columns $m$ (a component is a row term; one that reads $w_L$ or $w_R$ costs a co
 
 ### 7.7 Protocol and encoding
 
-BP: the R1CS of §7.5 is proven as usual (unchanged encoding).
-
-BP++: after the transcript of the constraint system (the R1CS domain separator and the `V`
-absorbed by `commit`), `domain_sep("bppp-builder v1")`, then the reciprocal form protocol §4.5
-(v1 or v2 as §7.6 says; its digest binds the lowered circuit) with generators §3.2 for $N_{lin}$ and $N'_m$ (capacity at
-least $\max(N'_m, N_{lin} + 6)$). Prover randomness as in §6.2. Encoding: the byte 3, $N'_m$ and
-$N_{lin}$ as `u64` little-endian, then the proof (§4.6). The verifier rejects a proof whose
-dimensions differ from its own lowering, and proofs of §6 or BP.
+BP: the R1CS of §7.5 is proven as usual (unchanged encoding). BP++: §6.2 (one protocol and one
+encoding for every constraint system).
 
 ### 7.8 Cost summary
 

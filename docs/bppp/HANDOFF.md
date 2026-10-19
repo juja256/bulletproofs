@@ -24,7 +24,8 @@ then the zkVM `bpvm` (github.com/juja256/bpvm, a separate repository) on BP++.
 | 5 | R1CS front end on BP++ | `src/r1cs/backend.rs`, `proof.rs`, `prover.rs`, `verifier.rs`, spec §6 | branch `bppp-r1cs` (this one) |
 | 6 | `CircuitBuilder` | `src/r1cs/builder.rs`, `backend.rs`, `prover.rs`, `verifier.rs`, `compact.rs`, spec §7 | branch `claude/beautiful-goodall-m369g7` (local commits, not pushed) |
 | 7 | performance and hardening | `wnla.rs`, `batch.rs`, `oblivious.rs`, spec §2.6, §3.11 | branch `bppp-perf` (pushed); format changes held |
-| 7b | tuple poles (option F): lookups of tuples without the bound rule | `reciprocal.rs`, `builder.rs`, `backend.rs`, spec §4.1–4.7, §7.2–7.6 | branch `bppp-tuples` (pushed); reviewed, done; next: option B |
+| 7b | tuple poles (option F): lookups of tuples without the bound rule | `reciprocal.rs`, `builder.rs`, `backend.rs`, spec §4.1–4.7, §7.2–7.6 | branch `bppp-tuples` (pushed); reviewed, done |
+| 7c | option B: one BP++ lowering and encoding for every constraint system | `prover.rs`, `verifier.rs`, `proof.rs`, `backend.rs`, spec §6, §7.7 | branch `bppp-one-proof` (local), in progress |
 | 8 | bpvm on BP++ | other repository | open |
 
 The branches are stacked: `main` ⊂ `bppp-circuit` ⊂ `bppp-reciprocal` ⊂ `bppp-range` ⊂
@@ -286,3 +287,8 @@ DESIGN (milestone M6). bpvm depends on this fork by git revision.
   unsatisfied circuits anyway), caching `uses_eta`. Mutants of phase 7b: 20 of 20 killed.
   Tests: 149 (bppp parallel yoloproofs, also bppp-vartime), 70 (yoloproofs), 34 (default);
   vectors regenerate unchanged; xcheck 13/13. Phase 7b done.
+- 2026-10-19 — phase 7c (option B, owner: "one proof") started on branch `bppp-one-proof` (from
+  `bppp-tuples`). Spec first: §6.1 every constraint system on BP++ is lowered by §7.6 (a plain
+  R1CS is the case $N_p = 0$, the same circuit as the old §6 translation); §6.2 one protocol (§4,
+  `"bppp-r1cs v2"`) and one encoding (byte 2, $N'_m$, $N_{lin}$; tag 3 gone); §7.2 no builder mode;
+  §7.7 points to §6.2. Changes the BP++ proofs of plain constraint systems (pins).

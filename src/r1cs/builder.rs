@@ -340,7 +340,7 @@ impl Builder {
                     lookups.iter_mut().flatten().for_each(|b| *b = 0);
                     out
                 };
-                if !bool::from(all_found) {
+                if !bool::from(all_found) && !super::cheats::unchecked() {
                     return Err(gadget_error("lookup query is not a table row"));
                 }
                 values.extend(m.into_iter().map(Scalar::from));

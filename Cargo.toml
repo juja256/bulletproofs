@@ -50,6 +50,10 @@ bppp = []
 # uniformly random given the transcript, spec §2.6); the commitments to the witness stay
 # constant time. Same proofs. Off by default.
 bppp-vartime = ["bppp"]
+# Testing only: `r1cs::cheats::set_unchecked_prover` makes the prover skip its own checks
+# (lookups equal to no row, unsatisfied BP++ circuits), so that downstream soundness tests can
+# check that the verifier rejects the result. Never enable it in a prover that matters.
+cheats = ["std"]
 # Multi-threaded proving and verification (rayon): multiscalar multiplications, the
 # inner-product folding and generator derivation. Results are identical to the serial code.
 parallel = ["std", "rayon"]

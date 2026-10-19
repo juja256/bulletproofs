@@ -31,7 +31,7 @@ mod bppp_backend {
     use super::super::compact::ConstraintStore;
     use super::super::{LinearCombination, Variable};
     use crate::bppp::{
-        ArithmeticCircuit, CircuitProof, CircuitWitness, ReciprocalCircuit, ReciprocalRow, ReciprocalWitness, Slot,
+        ArithmeticCircuit, CircuitProof, CircuitWitness, Pole, ReciprocalCircuit, ReciprocalRow, ReciprocalWitness, Slot,
         SparseMatrix,
     };
     use crate::errors::R1CSError;
@@ -378,12 +378,12 @@ mod bppp_backend {
                 pole += 1;
             }
             for ((coeff, row), copy) in a.public.iter().zip(pc) {
-                let t = Some(pack_row(row, &a.widths));
+                let t = Some(Pole::from(pack_row(row, &a.widths)));
                 match copy {
                     Some(q) => terms.push((col_copy(*q), Scalar::ONE, t)),
                     None => {
                         let (lt, c) = lower(coeff, Scalar::ONE)?;
-                        terms.extend(lt.into_iter().map(|(col, v)| (col, v, t)));
+                        terms.extend(lt.into_iter().map(|(col, v)| (col, v, t.clone())));
                         if coeff.terms.iter().any(|(x, _)| *x == Variable::One()) {
                             consts.push((c, t));
                         }
@@ -408,6 +408,7 @@ mod bppp_backend {
             w_l,
             a_l,
             recip,
+            tuples: vec![],
             f_l: k > 0,
             f_m: false,
             partition,

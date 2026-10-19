@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use super::circuit::{CircuitProof, Slot};
 use super::gens::BpppGens;
-use super::reciprocal::{self, ReciprocalCircuit, ReciprocalRow, ReciprocalWitness};
+use super::reciprocal::{self, Component, Pole, ReciprocalCircuit, ReciprocalRow, ReciprocalWitness, TuplePole};
 use super::sparse::SparseMatrix;
 use super::transcript::Replay;
 use crate::{BulletproofGens, PedersenGens};
@@ -73,12 +73,35 @@ fn sparse_from(v: &Value, cols: usize) -> SparseMatrix {
     m
 }
 
-fn pole(v: &Value) -> Option<Scalar> {
-    if v.is_null() {
-        None
-    } else {
-        Some(sc(v))
+/// `null`, one scalar (a constant pole, v1 cases) or a list of scalars (a pole polynomial).
+fn pole(v: &Value) -> Option<Pole> {
+    match v {
+        Value::Null => None,
+        Value::Array(_) => Some(Pole(scs(v))),
+        _ => Some(sc(v).into()),
     }
+}
+
+/// The tuple poles of a case (`[[i, [[terms, const], ...]], ...]`; absent: none).
+fn tuples(v: &Value) -> Vec<TuplePole> {
+    v.as_array()
+        .map(|a| {
+            a.iter()
+                .map(|e| TuplePole {
+                    pole: e[0].as_u64().unwrap() as usize,
+                    components: e[1]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|x| Component {
+                            terms: x[0].as_array().unwrap().iter().map(|t| (t[0].as_u64().unwrap() as usize, sc(&t[1]))).collect(),
+                            constant: sc(&x[1]),
+                        })
+                        .collect(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn slot(s: &str) -> Slot {
@@ -123,6 +146,7 @@ pub fn recip_circuit(case: &Value) -> ReciprocalCircuit {
                 consts: r["consts"].as_array().unwrap().iter().map(|t| (sc(&t[0]), pole(&t[1]))).collect(),
             })
             .collect(),
+        tuples: tuples(&case["tuples"]),
         f_l: u("f_l") == 1,
         f_m: u("f_m") == 1,
         partition: case["partition"]
@@ -153,9 +177,18 @@ pub fn run_recip_case(case: &Value, c: &ReciprocalCircuit, w: &ReciprocalWitness
     let name = case["name"].as_str().unwrap();
     let ch = &case["chal"];
     let alpha = sc(&ch["alpha"]);
+    let uses_eta = case["uses_eta"].as_bool().unwrap_or(false);
+    assert_eq!(c.uses_eta(), uses_eta, "{}: uses eta", name);
+    let eta = if uses_eta { sc(&ch["eta"]) } else { Scalar::ZERO };
+    if !case["digest"].is_null() {
+        assert_eq!(hex::encode(c.digest()), case["digest"].as_str().unwrap(), "{}: digest", name);
+    }
+    if uses_eta {
+        assert_eq!(c.poles_for_test(w, eta), scs(&case["w_D_eta"]), "{}: w_D at eta", name);
+    }
     let satisfied = case["satisfied"].as_bool().unwrap();
-    assert_eq!(c.is_satisfied(w, alpha), satisfied, "{}: satisfied", name);
-    assert_eq!(c.reciprocals_for_test(w, alpha), scs(&case["w_P"]), "{}: w_P", name);
+    assert_eq!(c.is_satisfied(w, eta, alpha), satisfied, "{}: satisfied", name);
+    assert_eq!(c.reciprocals_for_test(w, eta, alpha), scs(&case["w_P"]), "{}: w_P", name);
     let (n_mm, n_lin) = (c.n_p + c.n_m, c.n_lin);
     let pc = PedersenGens::default();
     let bp = BulletproofGens::new(n_mm.max(n_lin + 6), 1);
@@ -170,8 +203,8 @@ pub fn run_recip_case(case: &Value, c: &ReciprocalCircuit, w: &ReciprocalWitness
     }
     let r = &case["rand"];
     let randomness: Vec<Scalar> = ["r_O", "r_L", "r_R", "l_S", "n_S"].iter().flat_map(|k| scs(&r[*k])).collect();
-    let challenges: Vec<Scalar> =
-        ["alpha", "rho", "lambda", "beta", "delta", "tau"].iter().map(|k| sc(&ch[*k])).chain(scs(&case["gammas"])).collect();
+    let names: &[&str] = if uses_eta { &["eta", "alpha", "rho", "lambda", "beta", "delta", "tau"] } else { &["alpha", "rho", "lambda", "beta", "delta", "tau"] };
+    let challenges: Vec<Scalar> = names.iter().map(|k| sc(&ch[*k])).chain(scs(&case["gammas"])).collect();
     let proof = reciprocal::prove_impl(c, &g, &V, w, &mut Replay::new(challenges.clone()), &mut ScalarRng::new(&randomness), false)
         .unwrap();
     let checked = reciprocal::prove(c, &g, &V, w, &mut Replay::new(challenges.clone()), &mut ScalarRng::new(&randomness));

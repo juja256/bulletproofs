@@ -2,7 +2,8 @@
 //!
 //! Proves knowledge of `l`, `n` with `C = v*G + <l, H> + <n, N>` and
 //! `v = <c, l> + |n|^2_mu`, `mu = rho^2`, for public `c` and `rho`. Vectors are split into
-//! even and odd components and folded until `|l| + |n| < 6`; the rest is sent in the clear.
+//! even and odd components and folded while a round removes at least three scalars; the rest
+//! is sent in the clear. Algebra, length-1 rule and layout follow secp256k1-zkp (spec §2).
 //!
 //! The argument is **not zero-knowledge**: the final vectors are combinations of the witness.
 //! Hiding comes from the blinding of the circuit protocol built on top of it. [`prove`] and
@@ -61,10 +62,16 @@ pub struct WnlaScalars {
     pub gammas: Vec<Scalar>,
 }
 
-/// `(rounds, final |l|, final |n|)` for `|l| = a`, `|n| = b`: fold while `a + b >= 6`.
+/// Whether one more round pays off: it costs two points and removes `a/2 + b/2` scalars
+/// (spec §2.2, the optimal layout of secp256k1-zkp PR #352).
+fn more(a: usize, b: usize) -> bool {
+    a / 2 + b / 2 >= 3
+}
+
+/// `(rounds, final |l|, final |n|)` for `|l| = a`, `|n| = b`.
 pub fn rounds(mut a: usize, mut b: usize) -> (usize, usize, usize) {
     let mut k = 0;
-    while a + b >= 6 {
+    while more(a, b) {
         a = (a + 1) / 2;
         b = (b + 1) / 2;
         k += 1;
@@ -172,7 +179,7 @@ pub(crate) fn prove_unbound<T: BpppTranscript>(
     let (mut c, mut h, mut g) = (st.c.to_vec(), st.h_vec.to_vec(), st.n_vec.to_vec());
     let (mut rho, mut mu) = (st.rho, st.rho * st.rho);
     let (mut xs, mut rs) = (Vec::new(), Vec::new());
-    while l.len() + n.len() >= 6 {
+    while more(l.len(), n.len()) {
         let rho_inv = rho.invert();
         let mu2 = mu * mu;
         let (l0, l1) = split(&l);
@@ -193,13 +200,18 @@ pub(crate) fn prove_unbound<T: BpppTranscript>(
         let gamma = transcript.challenge(b"gamma");
         xs.push(X);
         rs.push(R);
-        c = fold(&c, Scalar::ONE, gamma);
-        l = fold(&l, Scalar::ONE, gamma);
-        n = fold(&n, rho_inv, gamma);
-        h = fold_points(&h, Scalar::ONE, gamma);
-        g = fold_points(&g, rho, gamma);
-        rho = mu;
-        mu = mu2;
+        if l.len() > 1 {
+            c = fold(&c, Scalar::ONE, gamma);
+            l = fold(&l, Scalar::ONE, gamma);
+            h = fold_points(&h, Scalar::ONE, gamma);
+        }
+        // A norm vector of length 1 stays as it is, and so do rho and mu (spec §2.1).
+        if n.len() > 1 {
+            n = fold(&n, rho_inv, gamma);
+            g = fold_points(&g, rho, gamma);
+            rho = mu;
+            mu = mu2;
+        }
     }
     Ok(WnlaProof { X: xs, R: rs, l, n })
 }
@@ -231,18 +243,25 @@ impl WnlaProof {
             gammas.push(transcript.challenge(b"gamma"));
         }
 
+        // rho advances only in rounds that fold the norm vector (|n| > 1); a frozen round
+        // contributes the factor 1.
         let mut c_f = c.to_vec();
         let mut rhos = Vec::with_capacity(k);
-        let mut rho_r = rho;
+        let (mut rho_r, mut b_r) = (rho, b);
         for &gamma in &gammas {
             c_f = fold(&c_f, Scalar::ONE, gamma);
-            rhos.push(rho_r);
-            rho_r = rho_r * rho_r;
+            if b_r > 1 {
+                rhos.push(rho_r);
+                rho_r = rho_r * rho_r;
+            } else {
+                rhos.push(Scalar::ONE);
+            }
+            b_r = (b_r + 1) / 2;
         }
         let v = ip(&c_f, &self.l) + wip(&self.n, &self.n, rho_r * rho_r);
 
         // Coefficient of index i after k rounds: prod_r (bit r of i ? gamma_r : e_r), with
-        // e_r = 1 for H and rho^(2^r) for N; i maps to final index i >> k.
+        // e_r = 1 for H and the round's rho for N; i maps to final index i >> k.
         let tensor = |e: &dyn Fn(usize) -> Scalar| {
             let mut t = vec![Scalar::ONE];
             for (r, gamma) in gammas.iter().enumerate() {
@@ -346,6 +365,23 @@ mod tests {
 
     fn scs(v: &serde_json::Value) -> Vec<Scalar> {
         v.as_array().unwrap().iter().map(sc).collect()
+    }
+
+    /// The stop rule is secp256k1-zkp's size-optimal layout (PR #352): its closed form, ported.
+    #[test]
+    fn rounds_match_secp256k1_zkp_optimal_layout() {
+        fn log2_ceil(n: usize) -> usize {
+            if n <= 1 { 0 } else { (usize::BITS - (n - 1).leading_zeros()) as usize }
+        }
+        let rounds_to_fit = |n: usize, limit: usize| log2_ceil(1 + (n - 1) / limit);
+        for g in 1..300 {
+            for h in 1..300 {
+                let (mx, mn) = (g.max(h), g.min(h));
+                let both3 = rounds_to_fit(mx, 3).max(rounds_to_fit(mn, 3));
+                let max5 = rounds_to_fit(mx, 5).max(log2_ceil(mn));
+                assert_eq!(rounds(h, g).0, both3.min(max5), "|l| = {}, |n| = {}", h, g);
+            }
+        }
     }
 
     #[test]

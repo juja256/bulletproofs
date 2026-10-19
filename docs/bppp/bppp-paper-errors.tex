@@ -66,8 +66,9 @@ eq.~(49)). Only the constraint vectors, the affine terms and the input scalings 
 13 & \S4 (before \S4.1) & ``not the case that $x' \ne y'$'' & typo\\
 14 & \S6.2--6.3, eq.\ (70) & dimensions of $W_p(X)$, $a_d$, $W'_l$ & Noted\\
 15 & \S6.3, steps 6--7 & $W_p(\alpha)w$, $w_R = w'_L$ & Noted\\
-16 & \S6.4.1, Case 1 & missing parentheses in $b_{n-1}$ & Noted\\
+16 & \S6.4.1, Case 1 & missing parentheses in $b_{n-1}$ & Verified\\
 17 & \S6.2--6.3 & values committed after $\alpha$ readable by $W_n$, $W_p$ & Observed\\
+18 & \S6.4.1, Case 3, eq.\ (73) & ranges smaller than the base & Verified\\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -307,6 +308,9 @@ vectors; their verify vector 6 fails if $\rho$ advances in a frozen round.}
 $[0, b)$ with bases $1, b, \dots, b^{n-2}$ the requirement
 $(b-1)\, b_{n-1} + b^{n-1} - 1 = B - 1$ gives $b_{n-1} = (B - b^{n-1})/(b - 1)$, which for $b = 2$
 is the usual $B - 2^{n-1}$; the printed formula is presumably missing parentheses.
+\status{Verified: for bases 2, 3, 4, 16 and all $B < 1200$ (resp.\ 700) in Case 1, the corrected
+formula always gives an exact layout (the digit sums are exactly $[0, B)$); the printed one only
+by coincidence (2 of 698 cases for $b = 2$, none otherwise).}
 
 \subsection*{17. Values committed after $\alpha$ in numerators and reciprocal rows}
 \loc{\S6.2 (``$w_I = w_O \| w_L \| w_D$ \dots\ the portion of the witness committed before the
@@ -334,6 +338,22 @@ ordinary constraints only. (Restricting only the pole terms, as an earlier versi
 said, is not enough.)
 \status{Observed (by analysis and review; our implementation rejects such circuits, and tests
 check each case).}
+
+\subsection*{18. Ranges smaller than the base}
+\loc{\S6.4.1, Case 3, eq.~(73).}
+
+\noindent\textbf{Problem.} The three cases assume $n = \lceil \log_b B \rceil \ge 2$. For $B < b$ ($n = 1$)
+Case 3 applies (unless $b - 1 \mid B - 1$ or $B \le 2$) and eq.~(73) gives a negative binary weight,
+e.g.\ $b = 16$, $B = 10$: $b_0 = 1$, $b_1 = -6$. For $n \ge 2$, eq.~(73) is correct (checked for
+all $B < 1200$ in base 16 and $B < 700$ in bases 3 and 4).
+
+\noindent\textbf{Fix.} A single digit of radix $B$ for $B < b$ (its own table of $B - 1$
+multiplicities), or, more uniformly, a greedy layout that covers all cases: powers of $b$ while
+they fit, one more base-$b$ digit of weight $\lfloor R/(b-1)\rfloor$ for the remainder $R$, then a
+binary digit of weight $R' $ (or the radix-$B$ digit when $B < b$); see \texttt{docs/bppp/spec.md}
+\S5.1.
+\status{Verified numerically; the greedy layout is exact for all $B < 300$ in bases 2, 3, 4, 7, 16,
+256 and for $B = 2^{64}$ and other large $B$.}
 
 \section*{Remarks for implementers (not errors in the paper)}
 

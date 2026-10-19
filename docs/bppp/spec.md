@@ -378,3 +378,77 @@ digest, inputs — is not absorbed again: the reciprocal statement above covers 
 ### 4.6 Encoding
 
 As §3.10, for the compiled dimensions ($|n| = N_p + N_m$).
+
+## 5. Range proofs and multi-asset transactions (paper §6.4–6.5)
+
+Front ends that build reciprocal form circuits (§4) from a statement. The circuit layout below is
+normative: prover, verifier and reference build the same circuit, column for column.
+
+### 5.1 Digit layout for a range $[0, B)$
+
+For $B \ge 2$ and a base $b \ge 2$, a layout is a list of digits $(g_j, r_j)$ (weight, radix) such that
+the sums $\sum_j g_j d_j$ with $d_j \in [0, r_j)$ are exactly $[0, B)$. It is built greedily
+(this covers the paper's Cases 1–3 and ranges smaller than the base, where the paper's eq. (73)
+fails):
+
+1. $S = 0$, $p = 1$; while $S + (b-1)p \le B - 1$: append $(p, b)$, $S \mathrel{+}= (b-1)p$, $p \mathrel{*}= b$.
+2. $R = B - 1 - S$. If $R \ge b - 1$: append $(g, b)$ with $g = \lfloor R/(b-1)\rfloor$, $S \mathrel{+}= (b-1)g$,
+   $R \mathrel{-}= (b-1)g$.
+3. If $R > 0$: append $(R, 2)$ if $R \le S + 1$, else $(1, R + 1)$ (only when $S = 0$, i.e. $B < b$).
+
+Every prefix of the layout sorted by weight satisfies $g_j \le 1 + \sum_{i<j}(r_i - 1)g_i$, so the sums are
+contiguous, and $\sum_j (r_j - 1) g_j = B - 1$. A value $x \in [0, B)$ is decomposed from the largest
+weight down: with $M_j$ the maximum of the digits of smaller weight,
+$d_j = \max(0, \lceil (x - M_j)/g_j \rceil)$ and $x \mathrel{-}= d_j g_j$ (ties in weight: the later
+digit counts as larger). The prover computes this in constant time with respect to $x$.
+
+### 5.2 Range proof circuit
+
+Statement: base $b$ ($2 \le b \le 256$) and $m \ge 1$ ranges $[A_i, B_i)$ with $B_i - A_i \in [2, 2^{64}]$;
+inputs $V_i = v_i G + s_i H_0$ ($N_v = 1$, $k = m$) with $v_i \in [A_i, B_i)$. Let $L_i$ be the layout of
+$B_i - A_i$ (§5.1, in construction order).
+
+- **Poles**: the digits of $L_0$, then of $L_1$, …; $N_p = \sum_i |L_i|$, $N_m = 0$; numerators 1
+  ($W_n = 0$, $a_n = 1$).
+- **Tables**: one per distinct radix $r$ among the digits, in ascending order of $r$. Table $r$ has
+  the multiplicities $m_{r,s}$ ($s = 1..r-1$) of the digit values among the digits of radix $r$
+  (value 0 is implicit, paper eq. (75)). $w_O$ is the concatenation of the tables' multiplicities,
+  $N_O = \sum_r (r - 1)$. They go to slots $(n_O, t)$, $t = 0..N_O - 1$, if $N_O \le N_p$
+  (inline); otherwise to $(l_L, t)$ with $N_{lin} = N_O$ (shared). Otherwise $N_{lin} = 0$.
+- **Linear rows** ($f_l = 1$, $f_m = 0$): row $i$ has $-g_j$ on the pole column of each digit $j$ of
+  $L_i$ and $a_{l,i} = -A_i$, so the row is $v_i - A_i - \sum_j g_j d_j = 0$.
+- **Reciprocal rows**, one per table $r$: the terms $(w_{P,p}, 1)$ for every pole $p$ of radix $r$, in
+  pole order; then for $s = 1..r-1$ the terms $(m_{r,s}, 1, \text{pole } 0)$ and
+  $(m_{r,s}, -1, \text{pole } s)$; and the constant $(-N_r, \text{pole } 0)$, $N_r$ the number of
+  digits of radix $r$. That is
+  $\sum_p \frac{1}{X + d_p} = \frac{N_r - \sum_s m_{r,s}}{X} + \sum_{s \ge 1} \frac{m_{r,s}}{X + s}$.
+
+The transcript is `domain_sep("bppp-range v1")` followed by §4.5 (whose digest binds the
+circuit, hence the ranges and the base). Soundness: a digit outside $[0, r)$ leaves a pole at
+$-d$ with multiplicity between 1 and the number of digits, non-zero in $\mathbb F$; then
+$v_i - A_i = \sum g_j d_j \in [0, B_i - A_i)$.
+
+### 5.3 Multi-asset transaction circuit
+
+Statement: $n_{in}$ inputs and $n_{out}$ outputs ($k = n_{in} + n_{out} \ge 1$), base $b$. Entry $i$
+(inputs first) is an amount $a_i \in [0, 2^{64})$, an asset type $t_i \in \mathbb F$ and a blinding
+$s_i$, committed as $V_i = a_i G + s_i H_0 + t_i H_7$ ($N_v = 2$). The relation: for every asset type,
+inputs and outputs balance, and every output amount is in $[0, 2^{64})$. (Input amounts are
+assumed in range — they are earlier outputs; then $k\,2^{64} < \ell$ makes the balance in
+$\mathbb F$ a balance in $\mathbb Z$, paper Theorem 5.) Asset types are scalars (for example a
+hash of the asset id), as in the paper; this is not the asset-generator construction of
+confidential assets. Let $L$ be the layout of $2^{64}$ in base $b$.
+
+- **Poles**: the asset types $w_{D,i} = t_i$ for $i < k$, then the digits of each output (output 0
+  first) in layout order. Numerators: pole $i < k$ has $W_n$ row $\pm 1$ on the amount copy
+  $c_i$ ($+$ for inputs, $-$ for outputs), $a_{n,i} = 0$; digit poles have $a_n = 1$. $N_m = 0$.
+- **$w_O$**: the amount copies $c_0..c_{k-1}$ in slots $(l_O, i)$, then the table multiplicities as in
+  §5.2, inline in $(n_O, t)$ if they fit in $N_p$, else shared in $(l_L, t)$.
+  $N_{lin} = \max(1, k, \text{shared multiplicities})$.
+- **Linear rows** ($f_l = 1$, $f_m = 0$; $w_V = (a_0, t_0, a_1, t_1, \dots)$): row $2i$ is $-c_i$ (so
+  $a_i - c_i = 0$), row $2i+1$ is $-w_{D,i}$ (so $t_i - w_{D,i} = 0$), with $a_l = 0$; then for each
+  output $j$ a row with $-g$ on its digit poles and $+1$ on $c_{n_{in}+j}$, $a_l = 0$.
+- **Reciprocal rows**: first the balance row $\sum_{i<k} w_{P,i} = 0$, i.e.
+  $\sum_i \frac{\pm c_i}{X + t_i} = 0$; then the table rows of §5.2.
+
+The transcript is `domain_sep("bppp-mact v1")` followed by §4.5.

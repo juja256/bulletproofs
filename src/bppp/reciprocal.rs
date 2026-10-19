@@ -424,7 +424,7 @@ pub fn prove<T: BpppTranscript, R: RngCore + CryptoRng>(
     prove_impl(c, gens, V, w, transcript, rng, true)
 }
 
-fn prove_impl<T: BpppTranscript, R: RngCore + CryptoRng>(
+pub(crate) fn prove_impl<T: BpppTranscript, R: RngCore + CryptoRng>(
     c: &ReciprocalCircuit,
     gens: &BpppGens,
     V: &[CompressedRistretto],

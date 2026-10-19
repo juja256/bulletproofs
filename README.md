@@ -232,19 +232,25 @@ Status:
   Numerators and multiplicities may only read columns committed before `alpha`. A reciprocal
   range proof (paper §6.4) is a small instance of it.
 
-Range-proof and MACT front ends and a BP++ backend for the R1CS front end follow.
+- `bppp::RangeProof`, range proofs for several values with arbitrary ranges `[A, B)`, `B - A`
+  up to `2^64`, in any base `2..=256` (paper §6.4, spec §5.1–5.2). The digit layout is greedy and
+  exact for every range (the paper's case analysis misses ranges smaller than the base); digits
+  are computed in constant time.
+- `bppp::MactProof`, multi-asset transactions (paper §6.5, spec §5.3): per asset type the
+  inputs and outputs balance, and every output is in `[0, 2^64)`. Asset types are scalars
+  committed with the amount (`amount B + blinding B_blinding + asset H_7`).
 
-A 64-bit range proof (base 16, shared multiplicities, as a reciprocal form circuit) against the
-BP `RangeProof` (`cargo bench --features bppp --bench bppp -- range`):
+A BP++ backend for the R1CS front end follows.
+
+`cargo bench --features bppp --bench bppp -- "range|mact"`:
 
 | | proof | prove | verify |
 |---|---|---|---|
-| BP++ | 480 B | 3.27 ms | 0.41 ms |
-| BP | 672 B | 4.34 ms | 0.59 ms |
+| 64-bit range proof, BP++ (base 16) | 416 B | 2.55 ms | 0.48 ms |
+| 64-bit range proof, BP `RangeProof` | 672 B | 4.39 ms | 0.61 ms |
+| BP++ transaction, 2 inputs, 2 outputs, 2 asset types | 512 B | 4.76 ms | 0.64 ms |
 
-With inline multiplicities (in the norm part) the same proof is 416 B, the paper's figure; the
-shared variant also drops the empty `C_O` in the paper (32 B), which the range-proof front end
-will do. The inaccuracies found in the paper are collected in
+The inaccuracies found in the paper are collected in
 [`docs/bppp/bppp-paper-errors.tex`](docs/bppp/bppp-paper-errors.tex).
 
 ```sh

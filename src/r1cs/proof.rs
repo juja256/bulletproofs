@@ -21,15 +21,15 @@ const TWO_PHASE_COMMITMENTS: u8 = 1;
 /// Statements are specified by writing gadget functions which add
 /// constraints to a [`ConstraintSystem`](::r1cs::ConstraintSystem)
 /// implementation.  To construct an [`R1CSProof`], a prover constructs
-/// a [`ProverCS`](::r1cs::ProverCS), then passes it to gadget
+/// a [`Prover`](crate::r1cs::Prover), then passes it to gadget
 /// functions to build the constraint system, then consumes the
 /// constraint system using
-/// [`ProverCS::prove`](::r1cs::ProverCS::prove) to produce an
+/// [`Prover::prove`](crate::r1cs::Prover::prove) to produce an
 /// [`R1CSProof`].  To verify an [`R1CSProof`], a verifier constructs a
-/// [`VerifierCS`](::r1cs::VerifierCS), then passes it to the same
+/// [`Verifier`](crate::r1cs::Verifier), then passes it to the same
 /// gadget functions to (re)build the constraint system, then consumes
 /// the constraint system using
-/// [`VerifierCS::verify`](::r1cs::VerifierCS::verify) to verify the
+/// [`Verifier::verify`](crate::r1cs::Verifier::verify) to verify the
 /// proof.
 #[derive(Clone, Debug)]
 pub struct R1CSProof(pub(super) ProofKind);
@@ -56,11 +56,10 @@ pub(super) struct BpppProof {
     pub(super) proof: crate::bppp::CircuitProof,
 }
 
-/// Version tag of a BP++ proof (spec §6.2). BP proofs use 0 and 1; 2 and 3 were the BP++
-/// encodings before option B (a tag-2 proof had the same header and body layout, so the tag
-/// changes to make old proofs format errors).
+/// Tag of a BP++ proof (spec §6.2). BP proofs use 0 and 1; 2 and 3 are retired encodings
+/// (format errors).
 #[cfg(feature = "bppp")]
-const BPPP_V2: u8 = 4;
+const BPPP_TAG: u8 = 4;
 
 impl R1CSProof {
     /// The backend that produced this proof; a verifier must use the same one
@@ -81,7 +80,7 @@ impl R1CSProof {
             ProofKind::Bp(p) => p.to_bytes(),
             #[cfg(feature = "bppp")]
             ProofKind::Bppp(p) => {
-                let mut out = alloc::vec![BPPP_V2];
+                let mut out = alloc::vec![BPPP_TAG];
                 out.extend_from_slice(&(p.n_mm as u64).to_le_bytes());
                 out.extend_from_slice(&(p.n_lin as u64).to_le_bytes());
                 out.extend(p.proof.to_bytes());
@@ -104,7 +103,7 @@ impl R1CSProof {
         #[cfg(feature = "bppp")]
         {
             let tag = slice.first().copied();
-            if tag == Some(BPPP_V2) {
+            if tag == Some(BPPP_TAG) {
                 if slice.len() < 17 {
                     return Err(R1CSError::FormatError);
                 }

@@ -131,6 +131,17 @@ pub struct ReciprocalWitness {
     pub s: Vec<Scalar>,
 }
 
+impl ReciprocalWitness {
+    /// Overwrite every value with zero (the secrets of a prover that is done with them).
+    pub(crate) fn clear(&mut self) {
+        use clear_on_drop::clear::Clear;
+        for x in self.w_d.iter_mut().chain(&mut self.w_l).chain(&mut self.w_r).chain(&mut self.w_o).chain(&mut self.s) {
+            x.clear();
+        }
+        self.v.iter_mut().flatten().for_each(Clear::clear);
+    }
+}
+
 impl core::fmt::Debug for ReciprocalWitness {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "ReciprocalWitness {{ n_p: {}, n_m: {}, n_o: {} }}", self.w_d.len(), self.w_l.len(), self.w_o.len())

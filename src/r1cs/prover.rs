@@ -353,10 +353,10 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
     /// be added into the constraint system.
     ///
     /// The `transcript` parameter is a Merlin proof transcript.  The
-    /// `ProverCS` holds onto the `&mut Transcript` until it consumes
-    /// itself during [`ProverCS::prove`], releasing its borrow of the
+    /// `Prover` holds onto the `&mut Transcript` until it consumes
+    /// itself during [`Prover::prove`], releasing its borrow of the
     /// transcript.  This ensures that the transcript cannot be
-    /// altered except by the `ProverCS` before proving is complete.
+    /// altered except by the `Prover` before proving is complete.
     ///
     /// # Returns
     ///
@@ -457,9 +457,7 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
     /// The BP lowering of the builder's record (spec §7.4, §7.5): multiplicities, witness
     /// multipliers, products and one randomized constraint per argument.
     fn lower_builder_bp(&mut self) -> Result<(), R1CSError> {
-        if !self.builder.active {
-            return Ok(());
-        }
+        // an empty record (a plain R1CS) adds nothing
         let secrets = &self.secrets;
         let m = self.builder.finalize(Some(&|lc: &LinearCombination| eval_with(secrets, lc)))?;
         self.secrets.w.extend(m);
@@ -907,24 +905,14 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
         external_rng: &mut R,
     ) -> Result<(R1CSProof, T), R1CSError> {
         use crate::bppp::{reciprocal, BpppGens, BpppTranscript};
-        if !self.deferred_constraints.is_empty() {
-            return Err(R1CSError::GadgetError {
-                description: "randomized constraints need the BP backend".into(),
-            });
-        }
+        super::backend::refuse_randomized(self.deferred_constraints.len())?;
         let (c, mut w) = self.lower_builder_bppp()?;
-        let clear = |w: &mut crate::bppp::ReciprocalWitness| {
-            for s in w.w_d.iter_mut().chain(w.w_l.iter_mut()).chain(w.w_r.iter_mut()).chain(w.w_o.iter_mut()).chain(w.s.iter_mut()) {
-                s.clear();
-            }
-            w.v.iter_mut().flatten().for_each(|s| s.clear());
-        };
         let a = &self.secrets;
         let n_mm = c.n_p + c.n_m;
         let gens = match BpppGens::new(self.pc_gens, bp_gens, c.n_lin, n_mm) {
             Ok(g) => g,
             Err(_) => {
-                clear(&mut w);
+                w.clear();
                 return Err(R1CSError::InvalidGeneratorsLength);
             }
         };
@@ -939,11 +927,11 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
             builder.finalize(external_rng)
         };
         let transcript = self.transcript.borrow_mut();
-        BpppTranscript::domain_sep(transcript, b"bppp-r1cs v2");
+        BpppTranscript::domain_sep(transcript, super::backend::BPPP_DOMAIN);
         // the testing feature `cheats` proves unsatisfied circuits (the proof must not verify)
         let require_satisfied = !super::cheats::unchecked();
         let proof = reciprocal::prove_checked(&c, &gens, &V, &w, transcript, &mut rng, require_satisfied).map_err(R1CSError::from);
-        clear(&mut w);
+        w.clear();
         let n_lin = c.n_lin;
         Ok((R1CSProof(ProofKind::Bppp(BpppProof { n_mm, n_lin, proof: proof? })), self.transcript))
     }

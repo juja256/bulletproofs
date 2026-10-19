@@ -154,9 +154,6 @@ pub(super) struct Counts {
 /// The backend-independent record of the builder operations (spec §7.2).
 #[derive(Default)]
 pub(super) struct Builder {
-    /// Set by the first builder operation; BP lowers the record only then (an empty record adds
-    /// nothing). BP++ lowers every constraint system the same way (spec §6.1).
-    pub(super) active: bool,
     /// Witnesses so far (multiplicities included after finalization).
     pub(super) n_w: usize,
     pub(super) products: Vec<(LinearCombination, LinearCombination, LinearCombination)>,
@@ -195,7 +192,6 @@ impl Builder {
     }
 
     pub(super) fn witness(&mut self) -> Variable {
-        self.active = true;
         self.n_w += 1;
         Variable::Witness(self.n_w - 1)
     }
@@ -204,7 +200,6 @@ impl Builder {
         for lc in [&l, &r, &out] {
             self.check_lc(lc, c)?;
         }
-        self.active = true;
         self.products.push((l, r, out));
         Ok(())
     }
@@ -218,7 +213,6 @@ impl Builder {
         if rows.iter().any(|r| r.len() != m) {
             return Err(gadget_error("table rows of different lengths"));
         }
-        self.active = true;
         self.tables.push(Table { m, rows, queries: Vec::new() });
         Ok(TableId(self.tables.len() - 1))
     }
@@ -230,7 +224,6 @@ impl Builder {
     pub(super) fn lookup(&mut self, t: TableId, tuple: &[LinearCombination], c: Counts) -> Result<(), R1CSError> {
         let m = self.get_table(t)?.m;
         self.check_tuple(tuple, m, c)?;
-        self.active = true;
         self.tables[t.0].queries.push(tuple.to_vec());
         Ok(())
     }
@@ -257,7 +250,6 @@ impl Builder {
                 return Err(gadget_error("public row length does not match the columns"));
             }
         }
-        self.active = true;
         if !r.private.is_empty() || !r.public.is_empty() {
             self.args.push(Argument { m: r.m, private: r.private, public: r.public });
         }

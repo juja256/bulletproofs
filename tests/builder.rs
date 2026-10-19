@@ -298,7 +298,7 @@ fn copies_of_right_wires() {
     }
 }
 
-/// Builder mode without gates: one padding multiplier (§7.6); witnesses and constraints only.
+/// A builder circuit without gates: one padding multiplier (§7.6); witnesses and constraints only.
 #[test]
 fn no_gates() {
     for backend in backends() {
@@ -449,7 +449,7 @@ fn constraints_on_missing_variables_are_errors() {
             assert!(matches!(verify_small(backend, &proof, V, gv), Err(R1CSError::GadgetError { .. })), "{:?} {:?}", backend, y);
         }
     }
-    // also without builder operations (BP; BP++ §6 already checked)
+    // also without builder operations
     let gp = |cs: &mut Prover<&mut Transcript>, x: Variable| {
         cs.constrain(Variable::MultiplierOutput(3) - x);
         Ok(())

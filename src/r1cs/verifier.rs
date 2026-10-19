@@ -38,7 +38,7 @@ pub struct Verifier<T: BorrowMut<Transcript>> {
     /// Records the number of low-level variables allocated in the
     /// constraint system.
     ///
-    /// Because the `VerifierCS` only keeps the constraints
+    /// Because the `Verifier` only keeps the constraints
     /// themselves, it doesn't record the assignments (they're all
     /// `Missing`), so the `num_vars` isn't kept implicitly in the
     /// variable assignments.
@@ -255,25 +255,14 @@ impl<T: BorrowMut<Transcript>> Verifier<T> {
     /// # Inputs
     ///
     /// The `transcript` parameter is a Merlin proof transcript.  The
-    /// `VerifierCS` holds onto the `&mut Transcript` until it consumes
-    /// itself during [`VerifierCS::verify`], releasing its borrow of the
+    /// `Verifier` holds onto the `&mut Transcript` until it consumes
+    /// itself during [`Verifier::verify`], releasing its borrow of the
     /// transcript.  This ensures that the transcript cannot be
-    /// altered except by the `VerifierCS` before proving is complete.
+    /// altered except by the `Verifier` before proving is complete.
     ///
-    /// The `commitments` parameter is a list of Pedersen commitments
-    /// to the external variables for the constraint system.  All
-    /// external variables must be passed up-front, so that challenges
-    /// produced by [`ConstraintSystem::challenge_scalar`] are bound
-    /// to the external variables.
-    ///
-    /// # Returns
-    ///
-    /// Returns a tuple `(cs, vars)`.
-    ///
-    /// The first element is the newly constructed constraint system.
-    ///
-    /// The second element is a list of [`Variable`]s corresponding to
-    /// the external inputs, which can be used to form constraints.
+    /// Commit the external variables with [`Verifier::commit`] before any challenge is
+    /// drawn (the randomized constraints of the second phase), so that the challenges are
+    /// bound to them.
     pub fn new(mut transcript: T) -> Self {
         transcript.borrow_mut().r1cs_domain_sep();
 
@@ -333,7 +322,7 @@ impl<T: BorrowMut<Transcript>> Verifier<T> {
     /// ```
     /// where `w{L,R,O}` is \\( z \cdot z^Q \cdot W_{L,R,O} \\).
     ///
-    /// This has the same logic as `ProverCS::flattened_constraints()`
+    /// This has the same logic as `Prover::flattened_constraints()`
     /// but also computes the constant terms (which the prover skips
     /// because they're not needed to construct the proof).
     fn flattened_constraints(&mut self, z: &Scalar) -> Flattened {
@@ -347,9 +336,7 @@ impl<T: BorrowMut<Transcript>> Verifier<T> {
 
     /// The BP lowering of the builder's record (spec §7.4, §7.5), as the prover's.
     fn lower_builder_bp(&mut self) -> Result<(), R1CSError> {
-        if !self.builder.active {
-            return Ok(());
-        }
+        // an empty record (a plain R1CS) adds nothing
         self.builder.finalize(None)?;
         self.witness_base = self.num_vars;
         self.num_vars += (self.builder.n_w + 1) / 2;
@@ -386,7 +373,7 @@ impl<T: BorrowMut<Transcript>> Verifier<T> {
         }
     }
 
-    /// Consume this `VerifierCS` and attempt to verify the supplied `proof`.
+    /// Consume this `Verifier` and attempt to verify the supplied `proof`.
     /// The `pc_gens` and `bp_gens` are generators for Pedersen commitments and
     /// Bulletproofs vector commitments, respectively.  The
     /// [`BulletproofGens`] should have `gens_capacity` greater than
@@ -420,18 +407,14 @@ impl<T: BorrowMut<Transcript>> Verifier<T> {
     #[cfg(feature = "bppp")]
     fn verify_bppp(mut self, p: &BpppProof, pc_gens: &PedersenGens, bp_gens: &BulletproofGens) -> Result<T, R1CSError> {
         use crate::bppp::{reciprocal, BpppGens, BpppTranscript};
-        if !self.deferred_constraints.is_empty() {
-            return Err(R1CSError::GadgetError {
-                description: "randomized constraints need the BP backend".into(),
-            });
-        }
+        super::backend::refuse_randomized(self.deferred_constraints.len())?;
         let c = self.lower_builder_bppp()?;
         if p.n_mm != c.n_p + c.n_m || p.n_lin != c.n_lin {
             return Err(R1CSError::VerificationError);
         }
         let gens = BpppGens::new(pc_gens, bp_gens, c.n_lin, p.n_mm).map_err(|_| R1CSError::InvalidGeneratorsLength)?;
         let transcript = self.transcript.borrow_mut();
-        BpppTranscript::domain_sep(transcript, b"bppp-r1cs v2");
+        BpppTranscript::domain_sep(transcript, super::backend::BPPP_DOMAIN);
         reciprocal::verify(&p.proof, &c, &gens, &self.V, transcript).map_err(|_| R1CSError::VerificationError)?;
         Ok(self.transcript)
     }
@@ -443,19 +426,11 @@ impl<T: BorrowMut<Transcript>> Verifier<T> {
         pc_gens: &PedersenGens,
         bp_gens: &BulletproofGens,
     ) -> Result<T, R1CSError> {
-        #[cfg(feature = "bppp")]
-        {
-            match &proof.0 {
-                ProofKind::Bppp(_) if self.backend != super::Backend::Bppp => return Err(R1CSError::VerificationError),
-                ProofKind::Bppp(p) => return self.verify_bppp(p, pc_gens, bp_gens),
-                _ => {}
-            }
-            if self.backend == super::Backend::Bppp {
-                return Err(R1CSError::VerificationError);
-            }
-        }
-        let proof = match &proof.0 {
-            ProofKind::Bp(p) => p,
+        // a proof of the other backend is rejected
+        let proof = match (self.backend, &proof.0) {
+            (super::Backend::Bp, ProofKind::Bp(p)) => p,
+            #[cfg(feature = "bppp")]
+            (super::Backend::Bppp, ProofKind::Bppp(p)) => return self.verify_bppp(p, pc_gens, bp_gens),
             #[allow(unreachable_patterns)]
             _ => return Err(R1CSError::VerificationError),
         };

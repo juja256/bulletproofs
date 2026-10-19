@@ -55,10 +55,22 @@ pub fn vartime_msm_index<'a, F>(len: usize, chunk: usize, term: F) -> RistrettoP
 where
     F: Fn(usize) -> (Scalar, &'a RistrettoPoint) + Sync,
 {
+    msm_index(len, chunk, true, term)
+}
+
+/// [`vartime_msm_index`], constant time unless `vartime`.
+pub fn msm_index<'a, F>(len: usize, chunk: usize, vartime: bool, term: F) -> RistrettoPoint
+where
+    F: Fn(usize) -> (Scalar, &'a RistrettoPoint) + Sync,
+{
     let run = |c: usize| {
         let (start, end) = (c * chunk, ((c + 1) * chunk).min(len));
         let (s, p): (Vec<Scalar>, Vec<&RistrettoPoint>) = (start..end).map(&term).unzip();
-        RistrettoPoint::vartime_multiscalar_mul(s, p)
+        if vartime {
+            RistrettoPoint::vartime_multiscalar_mul(s, p)
+        } else {
+            RistrettoPoint::multiscalar_mul(s, p)
+        }
     };
     let chunks = (len + chunk - 1) / chunk;
     #[cfg(feature = "parallel")]

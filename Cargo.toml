@@ -46,6 +46,10 @@ yoloproofs = []
 # Bulletproofs++ (ePrint 2022/510): norm linear argument, arithmetic circuits, reciprocal
 # arguments. Experimental, not audited.
 bppp = []
+# BP++: the norm argument inside the circuit protocol in variable time (its inputs are
+# uniformly random given the transcript, spec §2.6); the commitments to the witness stay
+# constant time. Same proofs. Off by default.
+bppp-vartime = ["bppp"]
 # Multi-threaded proving and verification (rayon): multiscalar multiplications, the
 # inner-product folding and generator derivation. Results are identical to the serial code.
 parallel = ["std", "rayon"]

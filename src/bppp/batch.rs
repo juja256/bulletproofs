@@ -3,11 +3,8 @@
 //! weights into one multiscalar multiplication. A batch that fails says only that some proof
 //! is invalid; verify the proofs one by one to find which.
 
-use alloc::vec::Vec;
-
-use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
+use curve25519_dalek::ristretto::CompressedRistretto;
 use curve25519_dalek::scalar::Scalar;
-use curve25519_dalek::traits::{IsIdentity, VartimeMultiscalarMul};
 use rand_core::{CryptoRng, RngCore};
 
 use super::circuit::{ArithmeticCircuit, CircuitProof, Terms};
@@ -17,7 +14,6 @@ use super::range::{RangeProof, RangeStatement};
 use super::reciprocal::{self, ReciprocalCircuit};
 use super::transcript::BpppTranscript;
 use crate::errors::ProofError;
-use crate::util;
 use crate::{BulletproofGens, PedersenGens};
 
 /// Accumulates proofs; [`BatchVerifier::verify`] checks them all at once. Each `add_*` replays
@@ -27,31 +23,19 @@ pub struct BatchVerifier<'a, R: RngCore + CryptoRng> {
     pc: &'a PedersenGens,
     bp: &'a BulletproofGens,
     rng: R,
-    g: Scalar,
-    h: Vec<Scalar>,
-    n: Vec<Scalar>,
-    points: Vec<(Scalar, RistrettoPoint)>,
+    acc: Terms,
 }
 
 impl<'a, R: RngCore + CryptoRng> BatchVerifier<'a, R> {
     /// An empty batch for proofs over these generators; `rng` draws the weights and must be
     /// unpredictable to the provers (a cryptographic RNG of the verifier, never a transcript).
     pub fn new(pc: &'a PedersenGens, bp: &'a BulletproofGens, rng: R) -> Self {
-        BatchVerifier { pc, bp, rng, g: Scalar::ZERO, h: Vec::new(), n: Vec::new(), points: Vec::new() }
+        BatchVerifier { pc, bp, rng, acc: Terms::default() }
     }
 
     fn add(&mut self, t: Terms) {
         let w = Scalar::random(&mut self.rng);
-        self.g += w * t.g;
-        for (v, x) in [(&mut self.h, &t.h), (&mut self.n, &t.n)] {
-            if v.len() < x.len() {
-                v.resize(x.len(), Scalar::ZERO);
-            }
-            for (a, b) in v.iter_mut().zip(x) {
-                *a += w * b;
-            }
-        }
-        self.points.extend(t.points.into_iter().map(|(k, p)| (w * k, p)));
+        self.acc.add_scaled(w, t);
     }
 
     /// Add an arithmetic circuit proof ([`CircuitProof::verify`]); `gens` must come from this
@@ -63,7 +47,7 @@ impl<'a, R: RngCore + CryptoRng> BatchVerifier<'a, R> {
         V: &[CompressedRistretto],
         transcript: &mut T,
     ) -> Result<(), ProofError> {
-        let gens = BpppGens::new(self.pc, self.bp, c.n_lin, c.n_m)?;
+        let gens = c.gens(self.pc, self.bp)?;
         let t = proof.terms(c, &gens, V, transcript)?;
         self.add(t);
         Ok(())
@@ -77,8 +61,7 @@ impl<'a, R: RngCore + CryptoRng> BatchVerifier<'a, R> {
         V: &[CompressedRistretto],
         transcript: &mut T,
     ) -> Result<(), ProofError> {
-        let n_mm = c.n_p.checked_add(c.n_m).ok_or(ProofError::FormatError)?;
-        let gens = BpppGens::new(self.pc, self.bp, c.n_lin, n_mm)?;
+        let gens = c.gens(self.pc, self.bp)?;
         let t = reciprocal::terms(proof, c, &gens, V, transcript)?;
         self.add(t);
         Ok(())
@@ -112,23 +95,12 @@ impl<'a, R: RngCore + CryptoRng> BatchVerifier<'a, R> {
 
     /// Check all the proofs added (an empty batch verifies).
     pub fn verify(self) -> Result<(), ProofError> {
-        if self.points.is_empty() && self.h.is_empty() && self.n.is_empty() {
+        if self.acc.is_empty() {
             return Ok(());
         }
         // Every proof added had generators of at most these sizes from the same setup.
-        let gens = BpppGens::new(self.pc, self.bp, self.h.len().saturating_sub(7), self.n.len())?;
-        let small = RistrettoPoint::vartime_multiscalar_mul(
-            core::iter::once(self.g).chain(self.points.iter().map(|(k, _)| *k)),
-            core::iter::once(&gens.g).chain(self.points.iter().map(|(_, p)| p)),
-        );
-        let check = small
-            + util::vartime_msm_slices(&self.h, &gens.h[..self.h.len()], util::MSM_CHUNK_VT)
-            + util::vartime_msm_slices(&self.n, &gens.n[..self.n.len()], util::MSM_CHUNK_VT);
-        if check.is_identity() {
-            Ok(())
-        } else {
-            Err(ProofError::VerificationError)
-        }
+        let gens = BpppGens::new(self.pc, self.bp, self.acc.h.len().saturating_sub(super::gens::H_FIXED), self.acc.n.len())?;
+        self.acc.check(&gens)
     }
 }
 

@@ -16,8 +16,9 @@ use core::iter::once;
 
 use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
 use curve25519_dalek::scalar::Scalar;
-use curve25519_dalek::traits::{IsIdentity, VartimeMultiscalarMul};
+use curve25519_dalek::traits::VartimeMultiscalarMul;
 
+use super::terms::Terms;
 use super::transcript::BpppTranscript;
 use crate::errors::ProofError;
 use crate::util;
@@ -418,21 +419,12 @@ impl WnlaProof {
         let decompress = |p: &CompressedRistretto| p.decompress().ok_or(ProofError::VerificationError);
         let xs = self.X.iter().map(decompress).collect::<Result<Vec<_>, _>>()?;
         let rs = self.R.iter().map(decompress).collect::<Result<Vec<_>, _>>()?;
-        let small = RistrettoPoint::vartime_multiscalar_mul(
-            once(s.g)
-                .chain(once(-Scalar::ONE))
-                .chain(s.gammas.iter().map(|g| -g))
-                .chain(s.gammas.iter().map(|g| Scalar::ONE - g * g)),
-            once(st.g).chain(once(C)).chain(xs.iter()).chain(rs.iter()),
-        );
-        let check = small
-            + util::vartime_msm_slices(&s.h, st.h_vec, util::MSM_CHUNK_VT)
-            + util::vartime_msm_slices(&s.n, st.n_vec, util::MSM_CHUNK_VT);
-        if check.is_identity() {
-            Ok(())
-        } else {
-            Err(ProofError::VerificationError)
-        }
+        // g G + <h, H> + <n, N> - C - sum gamma_i X_i + sum (1 - gamma_i^2) R_i = 0
+        let points = once((-Scalar::ONE, *C))
+            .chain(s.gammas.iter().zip(xs).map(|(g, x)| (-g, x)))
+            .chain(s.gammas.iter().zip(rs).map(|(g, r)| (Scalar::ONE - g * g, r)))
+            .collect();
+        Terms { g: s.g, h: s.h, n: s.n, points }.check_with(st.g, st.h_vec, st.n_vec)
     }
 
     /// `X_0 R_0 ... X_{k-1} R_{k-1} l n`, 32 bytes each.

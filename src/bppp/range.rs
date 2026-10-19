@@ -232,7 +232,7 @@ impl RangeStatement {
     /// The `BulletproofGens` capacity the proof needs.
     pub fn generators_capacity(&self) -> usize {
         let (c, _) = self.circuit();
-        (c.n_p + c.n_m).max(c.n_lin + 6)
+        c.gens_capacity()
     }
 
     pub(crate) fn gens<'a>(&self, pc: &PedersenGens, bp: &'a BulletproofGens) -> Result<BpppGens<'a>, ProofError> {

@@ -31,32 +31,17 @@ mod bppp_backend {
     use super::super::compact::ConstraintStore;
     use super::super::{LinearCombination, Variable};
     use crate::bppp::{
-        ArithmeticCircuit, CircuitProof, Component, Pole, ReciprocalCircuit, ReciprocalRow, ReciprocalWitness, Slot,
+        CircuitProof, Component, Pole, ReciprocalCircuit, ReciprocalRow, ReciprocalWitness, Slot,
         SparseMatrix, TuplePole,
     };
     use crate::errors::R1CSError;
 
     /// Parse a proof for `|n| = n_m` (`N'_m`), `|l| = 7 + n_lin` (spec §6.2).
     pub(crate) fn proof_from_bytes_shape(bytes: &[u8], n_m: usize, n_lin: usize) -> Result<CircuitProof, R1CSError> {
-        let k = n_lin;
         if n_m == 0 {
             return Err(R1CSError::FormatError);
         }
-        let shape = ArithmeticCircuit {
-            n_m,
-            n_o: 0,
-            n_v: 1,
-            n_lin: k,
-            k,
-            w_l: SparseMatrix::new(0),
-            a_l: vec![],
-            w_m: SparseMatrix::new(0),
-            a_m: vec![],
-            f_l: true,
-            f_m: false,
-            partition: vec![],
-        };
-        CircuitProof::from_bytes(bytes, &shape).map_err(|_| R1CSError::FormatError)
+        CircuitProof::from_bytes_dims(bytes, n_lin, n_m).map_err(|_| R1CSError::FormatError)
     }
 
     /// The prover's values of the variables (spec §7.6).

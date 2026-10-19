@@ -191,7 +191,7 @@ pub fn run_recip_case(case: &Value, c: &ReciprocalCircuit, w: &ReciprocalWitness
     assert_eq!(c.reciprocals_for_test(w, eta, alpha), scs(&case["w_P"]), "{}: w_P", name);
     let (n_mm, n_lin) = (c.n_p + c.n_m, c.n_lin);
     let pc = PedersenGens::default();
-    let bp = BulletproofGens::new(n_mm.max(n_lin + 6), 1);
+    let bp = BulletproofGens::new(BpppGens::capacity(n_lin, n_mm), 1);
     let g = BpppGens::new(&pc, &bp, n_lin, n_mm).unwrap();
     let point = |p: &Value| {
         (g.g * sc(&p["g"]) + RistrettoPoint::multiscalar_mul(scs(&p["h"]), &g.h) + RistrettoPoint::multiscalar_mul(scs(&p["n"]), g.n))

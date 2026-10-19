@@ -68,7 +68,7 @@ fn gens(c: &ReciprocalCircuit) -> (PedersenGens, BulletproofGens) {
     (PedersenGens::default(), BulletproofGens::new(64, 1))
 }
 fn mk<'a>(c: &ReciprocalCircuit, g: &'a (PedersenGens, BulletproofGens)) -> BpppGens<'a> {
-    BpppGens::new(&g.0, &g.1, c.n_lin, c.n_p + c.n_m).unwrap()
+    c.gens(&g.0, &g.1).unwrap()
 }
 
 #[test]

@@ -9,7 +9,7 @@ use rand_chacha::ChaCha20Rng;
 
 use super::builder::cheat::{self, Cheat};
 use super::builder::CircuitBuilder;
-use super::{Backend, ConstraintSystem, Prover, R1CSError, Verifier};
+use super::{Backend, Prover, R1CSError, Verifier};
 use crate::{BulletproofGens, PedersenGens};
 
 /// Prove `gadget` (prover values `Some`) with the cheat in place, then verify; `true` iff the

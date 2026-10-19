@@ -37,12 +37,12 @@ pub struct Cost {
 impl Cost {
     /// The `BulletproofGens` capacity the backend needs: BP the multipliers rounded up to a
     /// power of two (plus the gadget's own randomized multipliers, not counted here), BP++
-    /// `max(N_p + N_m, N_lin + 6)`.
+    /// `max(N_p + N_m, N_lin + 6)` ([`BpppGens::capacity`](crate::bppp::BpppGens::capacity)).
     pub fn gens_capacity(&self, backend: super::Backend) -> usize {
         match backend {
             super::Backend::Bp => (self.bp_phase1 + self.bp_phase2).next_power_of_two(),
-            #[allow(unreachable_patterns)]
-            _ => self.bppp_gates.max(self.bppp_lin + 6),
+            #[cfg(feature = "bppp")]
+            super::Backend::Bppp => crate::bppp::BpppGens::capacity(self.bppp_lin, self.bppp_gates),
         }
     }
 }

@@ -15,17 +15,19 @@ pub trait BpppTranscript {
     fn append_u64(&mut self, label: &'static [u8], x: u64);
     /// Absorb a public scalar.
     fn append_scalar(&mut self, label: &'static [u8], s: &Scalar);
+    /// Absorb public bytes (a digest).
+    fn append_message(&mut self, label: &'static [u8], m: &[u8]);
     /// Squeeze a challenge.
     fn challenge(&mut self, label: &'static [u8]) -> Scalar;
 }
 
 impl BpppTranscript for Transcript {
     fn domain_sep(&mut self, label: &'static [u8]) {
-        self.append_message(b"dom-sep", label);
+        Transcript::append_message(self, b"dom-sep", label);
     }
 
     fn append_point(&mut self, label: &'static [u8], p: &CompressedRistretto) {
-        self.append_message(label, p.as_bytes());
+        Transcript::append_message(self, label, p.as_bytes());
     }
 
     fn append_u64(&mut self, label: &'static [u8], x: u64) {
@@ -33,7 +35,11 @@ impl BpppTranscript for Transcript {
     }
 
     fn append_scalar(&mut self, label: &'static [u8], s: &Scalar) {
-        self.append_message(label, s.as_bytes());
+        Transcript::append_message(self, label, s.as_bytes());
+    }
+
+    fn append_message(&mut self, label: &'static [u8], m: &[u8]) {
+        Transcript::append_message(self, label, m);
     }
 
     fn challenge(&mut self, label: &'static [u8]) -> Scalar {
@@ -72,6 +78,9 @@ impl BpppTranscript for Replay {
     }
     fn append_scalar(&mut self, label: &'static [u8], s: &Scalar) {
         self.log.push((label, s.as_bytes().to_vec()));
+    }
+    fn append_message(&mut self, label: &'static [u8], m: &[u8]) {
+        self.log.push((label, m.to_vec()));
     }
     fn challenge(&mut self, label: &'static [u8]) -> Scalar {
         self.log.push((label, alloc::vec::Vec::new()));

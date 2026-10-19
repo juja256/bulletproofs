@@ -116,3 +116,15 @@ fn the_flag_is_per_thread_and_resets() {
         assert!(prove(backend, Fault::Lookup).is_err());
     }
 }
+
+#[test]
+fn the_scoped_flag_resets_even_after_a_panic() {
+    for backend in backends() {
+        let proof = cheats::with_unchecked_prover(|| prove(backend, Fault::Lookup)).unwrap();
+        assert!(verify(backend, &proof).is_err());
+        assert!(prove(backend, Fault::Lookup).is_err(), "reset after the closure");
+        let r = std::panic::catch_unwind(|| cheats::with_unchecked_prover(|| panic!("inside")));
+        assert!(r.is_err());
+        assert!(prove(backend, Fault::Lookup).is_err(), "reset after a panic");
+    }
+}

@@ -17,6 +17,47 @@ pub enum Backend {
     Bppp,
 }
 
+impl Backend {
+    /// The name used by [`Display`](core::fmt::Display) and [`FromStr`](core::str::FromStr):
+    /// `"bp"` or `"bppp"`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Backend::Bp => "bp",
+            #[cfg(feature = "bppp")]
+            Backend::Bppp => "bppp",
+        }
+    }
+}
+
+impl core::fmt::Display for Backend {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// A backend name other than `"bp"` or (with the `bppp` feature) `"bppp"`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnknownBackend;
+
+impl core::fmt::Display for UnknownBackend {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("unknown backend (bp or bppp)")
+    }
+}
+
+impl core::str::FromStr for Backend {
+    type Err = UnknownBackend;
+
+    fn from_str(s: &str) -> Result<Self, UnknownBackend> {
+        match s {
+            "bp" => Ok(Backend::Bp),
+            #[cfg(feature = "bppp")]
+            "bppp" => Ok(Backend::Bppp),
+            _ => Err(UnknownBackend),
+        }
+    }
+}
+
 #[cfg(feature = "bppp")]
 pub(super) use self::bppp_backend::*;
 

@@ -31,10 +31,28 @@ pub struct Cost {
     pub bppp_gates: usize,
     /// Length of the linear part of the BP++ commitments, `N_lin` (witnesses, multiplicities,
     /// input copies and copies beyond the `N_p + N_m` norm slots).
-    pub bppp_lin: usize,
+    pub bppp_linear: usize,
 }
 
 impl Cost {
+    /// BP: multipliers of both phases; BP++: gates `N_p + N_m`.
+    pub fn gates(&self, backend: super::Backend) -> usize {
+        match backend {
+            super::Backend::Bp => self.bp_phase1 + self.bp_phase2,
+            #[cfg(feature = "bppp")]
+            super::Backend::Bppp => self.bppp_gates,
+        }
+    }
+
+    /// BP++: the linear slots `N_lin`; BP: 0.
+    pub fn linear(&self, backend: super::Backend) -> usize {
+        match backend {
+            super::Backend::Bp => 0,
+            #[cfg(feature = "bppp")]
+            super::Backend::Bppp => self.bppp_linear,
+        }
+    }
+
     /// The `BulletproofGens` capacity the backend needs: BP the multipliers rounded up to a
     /// power of two (plus the gadget's own randomized multipliers, not counted here), BP++
     /// `max(N_p + N_m, N_lin + 6)` ([`BpppGens::capacity`](crate::bppp::BpppGens::capacity)).
@@ -42,7 +60,7 @@ impl Cost {
         match backend {
             super::Backend::Bp => (self.bp_phase1 + self.bp_phase2).next_power_of_two(),
             #[cfg(feature = "bppp")]
-            super::Backend::Bppp => crate::bppp::BpppGens::capacity(self.bppp_lin, self.bppp_gates),
+            super::Backend::Bppp => crate::bppp::BpppGens::capacity(self.bppp_linear, self.bppp_gates),
         }
     }
 }
@@ -284,7 +302,7 @@ impl Builder {
             bp_phase1: n + (n_w + 1) / 2 + n_prod,
             bp_phase2: n_p,
             bppp_gates: gates,
-            bppp_lin: (n_r + k + n_w + copies).saturating_sub(gates),
+            bppp_linear: (n_r + k + n_w + copies).saturating_sub(gates),
         }
     }
 
@@ -562,7 +580,7 @@ mod tests {
         assert_eq!(b.n_w, 6, "multiplicities of used tables only");
         assert_eq!(b.args.len(), 1);
         assert_eq!(b.args[0].public[0].0, LinearCombination::from(Variable::Witness(3)) * (-Scalar::ONE));
-        assert_eq!(cost, Cost { bp_phase1: 3, bp_phase2: 3, bppp_gates: 3, bppp_lin: 3 });
+        assert_eq!(cost, Cost { bp_phase1: 3, bp_phase2: 3, bppp_gates: 3, bppp_linear: 3 });
         // a query equal to no row
         let mut b = Builder::default();
         let x = b.witness();
@@ -586,13 +604,13 @@ mod tests {
         let one = b.cost(2, 1);
         // + 1 pole, + 1 multiplicity, + 1 copy (l); o needs none
         assert_eq!(one.bppp_gates, base.bppp_gates + 1);
-        assert_eq!(one.bppp_lin, base.bppp_lin + 1 + 1 - 1);
+        assert_eq!(one.bppp_linear, base.bppp_linear + 1 + 1 - 1);
         let x = b.reciprocal(2).unwrap();
         b.reciprocal_term(x, r.into(), &[r.into(), l + r], C).unwrap();
         let two = b.cost(2, 1);
         // + 1 pole, + 3 copies (numerator r, both components)
         assert_eq!(two.bppp_gates, one.bppp_gates + 1);
-        assert_eq!(two.bppp_lin, one.bppp_lin + 3 - 1);
+        assert_eq!(two.bppp_linear, one.bppp_linear + 3 - 1);
     }
 
     /// The oblivious sort gives the multiplicities of the direct count (duplicate rows, a

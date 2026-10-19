@@ -23,7 +23,8 @@ then the zkVM `bpvm` (github.com/juja256/bpvm, a separate repository) on BP++.
 | 4 | range proofs, MACT (§6.4–6.5) | `src/bppp/range.rs`, `mact.rs`, spec §5 | branch `bppp-range` |
 | 5 | R1CS front end on BP++ | `src/r1cs/backend.rs`, `proof.rs`, `prover.rs`, `verifier.rs`, spec §6 | branch `bppp-r1cs` (this one) |
 | 6 | `CircuitBuilder` | `src/r1cs/builder.rs`, `backend.rs`, `prover.rs`, `verifier.rs`, `compact.rs`, spec §7 | branch `claude/beautiful-goodall-m369g7` (local commits, not pushed) |
-| 7 | performance and hardening | — | open |
+| 7 | performance and hardening | `wnla.rs`, `batch.rs`, `oblivious.rs`, spec §2.6, §3.11 | branch `bppp-perf` (pushed); format changes held |
+| 7b | tuple poles (option F): lookups of tuples without the bound rule | `reciprocal.rs`, `builder.rs`, `backend.rs`, spec §4.1–4.7, §7.2–7.6 | branch `bppp-tuples` (local), in progress |
 | 8 | bpvm on BP++ | other repository | open |
 
 The branches are stacked: `main` ⊂ `bppp-circuit` ⊂ `bppp-reciprocal` ⊂ `bppp-range` ⊂
@@ -248,3 +249,13 @@ DESIGN (milestone M6). bpvm depends on this fork by git revision.
   phase 7: 19 of 20 killed, the survivor (materialising one round later) is equivalent.
   Tests: 139 (bppp parallel yoloproofs, also bppp-vartime), 70 (yoloproofs, golden unchanged),
   34 (default). Phase 7 done except the format changes held for the owner's discussion.
+- 2026-10-19 — phase 7b (option F, owner's decision after the API discussion: bpvm relies on
+  lookups bounding tuple components) started on branch `bppp-tuples` (from `bppp-perf`, which
+  is pushed). Spec first: §4.1 tuple poles $w_{D,i} = \sum_j \eta^j x_{i,j}$ over early columns
+  ($C_O$), public poles as polynomials in $\eta$; §4.3 protocol v2 $C_O, \eta, C_L, \alpha, C_R$
+  only for circuits that use $\eta$ (v1 unchanged: range, MACT, all existing vectors); §4.4/4.5
+  digest and transcript v2; §4.7 soundness argument (Schwartz–Zippel over $\eta$, rows must
+  not mix free and tuple poles); §7.2/7.3 widths and the bound rule removed (`table(rows)`,
+  `reciprocal(m)`), §7.6 tuple poles for $m \ge 2$ with copies of components that read $w_L$,
+  $w_R$. The challenge is called $\eta$ (label `"eta"`): $\gamma$ is taken by the WNLA rounds.
+  Errata remark "Lookups of tuples" updated.

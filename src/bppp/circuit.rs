@@ -351,11 +351,16 @@ fn absorb_statement<T: BpppTranscript>(t: &mut T, c: &ArithmeticCircuit, gens: &
     for (label, x) in labels.iter().zip(c.dims()) {
         t.append_u64(label, x);
     }
-    // The value and blinding generators may be application-specific (asset generators), so
-    // they are part of the statement; the others are the fixed setup.
+    absorb_tail(t, gens, c.digest(), V)
+}
+
+/// The end of the statement of circuits and reciprocal form circuits (spec §3.8, §4.4): the
+/// generators `G`, `H_0`, the circuit digest and the inputs; returns the digest. The value and
+/// blinding generators may be application-specific (asset generators), so they are part of
+/// the statement; the others are the fixed setup.
+pub(crate) fn absorb_tail<T: BpppTranscript>(t: &mut T, gens: &BpppGens, digest: [u8; 32], V: &[CompressedRistretto]) -> [u8; 32] {
     t.append_point(b"G", &gens.g.compress());
     t.append_point(b"H_0", &gens.h[0].compress());
-    let digest = c.digest();
     t.append_message(b"circuit", &digest);
     for v in V {
         t.append_point(b"V", v);
@@ -414,25 +419,21 @@ where
     }
     let digest = absorb_statement(transcript, c, gens, V);
     let rng = &mut rng_for(&*transcript, &digest);
-    let ol = commit_ol(gens, c.n_lin, &c.partition, &w.w_l, &w.w_o, rng);
+    let o = commit_o(gens, c.n_lin, w.w_l.len(), &c.partition, &w.w_o, rng);
+    let ol = commit_l(gens, o, &w.w_l, rng);
     let r = commit_r(gens, &ol, &w.w_r, rng);
     transcript.append_point(b"C_L", &ol.C_L);
     transcript.append_point(b"C_R", &r.C_R);
-    transcript.append_point(b"C_O", &ol.C_O);
+    transcript.append_point(b"C_O", &ol.o.C_O);
     prove_inner(c, gens, w, &ol, &r, transcript, rng, require_satisfied)
 }
 
 /// The prover's commitments to the initial witness (spec §3.3, CommitOL): `w_L` and the
 /// `LinL` slots in `C_L`, the `NormO` and `LinO` slots in `C_O`.
 pub(crate) struct CommittedOL {
-    n_o: Vec<Scalar>,
-    l_o: Vec<Scalar>,
-    l_l: Vec<Scalar>,
-    l_r: Vec<Scalar>,
-    r_o: [Scalar; 8],
+    pub(crate) o: CommittedO,
     r_l: [Scalar; 8],
     pub C_L: CompressedRistretto,
-    pub C_O: CompressedRistretto,
 }
 
 impl CommittedOL {
@@ -440,10 +441,22 @@ impl CommittedOL {
     pub(crate) fn set_late(&mut self, partition: &[(Slot, usize)], w_o: &[Scalar]) {
         for (x, &(slot, t)) in w_o.iter().zip(partition) {
             if slot == Slot::LinR {
-                self.l_r[t] = *x;
+                self.o.l_r[t] = *x;
             }
         }
     }
+}
+
+/// The zero patterns of the blinding vectors `r_O`, `r_L`, `r_R` (spec §3.3): with them the
+/// blinding polynomial has no `T^3` term (spec §3.6). The non-zero entries are drawn in index
+/// order.
+const R_O: [bool; 8] = [true, true, true, true, false, true, true, false];
+const R_L: [bool; 8] = [true, true, true, false, true, true, false, false];
+const R_R: [bool; 8] = [true, true, false, true, true, false, false, false];
+
+/// A blinding vector with the zero pattern `mask`.
+fn draw_r<R: RngCore + CryptoRng>(rng: &mut R, mask: [bool; 8]) -> [Scalar; 8] {
+    mask.map(|m| if m { Scalar::random(rng) } else { Scalar::ZERO })
 }
 
 /// The commitment to `w_R` and the `LinR` slots (spec §3.3, CommitR).
@@ -483,32 +496,16 @@ pub(crate) fn commit_o<R: RngCore + CryptoRng>(
             Slot::LinR => l_r[t] = *x,
         }
     }
-    let ro = draw(rng, 6);
-    let r_o = [ro[0], ro[1], ro[2], ro[3], zero, ro[4], ro[5], zero];
+    let r_o = draw_r(rng, R_O);
     let C_O = commit(gens, &r_o, &l_o, &n_o).compress();
     CommittedO { n_o, l_o, l_l, l_r, r_o, C_O }
 }
 
 /// CommitOL, second half: draws `r'_L` and commits `C_L` (`w_l` and the `LinL` slots).
 pub(crate) fn commit_l<R: RngCore + CryptoRng>(gens: &BpppGens, o: CommittedO, w_l: &[Scalar], rng: &mut R) -> CommittedOL {
-    let zero = Scalar::ZERO;
-    let rl = draw(rng, 5);
-    let r_l = [rl[0], rl[1], rl[2], zero, rl[3], rl[4], zero, zero];
+    let r_l = draw_r(rng, R_L);
     let C_L = commit(gens, &r_l, &o.l_l, w_l).compress();
-    CommittedOL { n_o: o.n_o, l_o: o.l_o, l_l: o.l_l, l_r: o.l_r, r_o: o.r_o, r_l, C_L, C_O: o.C_O }
-}
-
-/// CommitOL: draws `r'_O`, `r'_L` and commits. `w_l` has length `n_m`.
-pub(crate) fn commit_ol<R: RngCore + CryptoRng>(
-    gens: &BpppGens,
-    n_lin: usize,
-    partition: &[(Slot, usize)],
-    w_l: &[Scalar],
-    w_o: &[Scalar],
-    rng: &mut R,
-) -> CommittedOL {
-    let o = commit_o(gens, n_lin, w_l.len(), partition, w_o, rng);
-    commit_l(gens, o, w_l, rng)
+    CommittedOL { o, r_l, C_L }
 }
 
 /// CommitR: draws `r'_R` and commits `w_r` with the `LinR` slots.
@@ -518,10 +515,8 @@ pub(crate) fn commit_r<R: RngCore + CryptoRng>(
     w_r: &[Scalar],
     rng: &mut R,
 ) -> CommittedR {
-    let zero = Scalar::ZERO;
-    let rr = draw(rng, 4);
-    let r_r = [rr[0], rr[1], zero, rr[2], rr[3], zero, zero, zero];
-    let C_R = commit(gens, &r_r, &ol.l_r, w_r).compress();
+    let r_r = draw_r(rng, R_R);
+    let C_R = commit(gens, &r_r, &ol.o.l_r, w_r).compress();
     CommittedR { r_r, C_R }
 }
 
@@ -539,7 +534,7 @@ pub(crate) fn prove_inner<T: BpppTranscript, R: RngCore + CryptoRng>(
 ) -> Result<CircuitProof, ProofError> {
     let (n_m, n_lin) = (c.n_m, c.n_lin);
     let zero = Scalar::ZERO;
-    let (r_o, r_l, r_r) = (ol.r_o, ol.r_l, cr.r_r);
+    let (r_o, r_l, r_r) = (ol.o.r_o, ol.r_l, cr.r_r);
     let rho = nonzero(transcript, b"rho")?;
     let lambda = transcript.challenge(b"lambda");
     let beta = nonzero(transcript, b"beta")?;
@@ -562,16 +557,16 @@ pub(crate) fn prove_inner<T: BpppTranscript, R: RngCore + CryptoRng>(
     let p_n = wt.p_n(delta_inv);
     let n_t = VecPoly(vec![
         (-1, n_s.clone()),
-        (0, scaled(&ol.n_o, delta)),
+        (0, scaled(&ol.o.n_o, delta)),
         (1, added(&w.w_l, &wt.c_nr)),
         (2, added(&w.w_r, &wt.c_nl)),
         (3, scaled(&wt.c_no, delta_inv)),
     ]);
     let l_hat = VecPoly(vec![
         (-1, l_s.clone()),
-        (0, scaled(&ol.l_o, delta)),
-        (1, ol.l_l.clone()),
-        (2, ol.l_r.clone()),
+        (0, scaled(&ol.o.l_o, delta)),
+        (1, ol.o.l_l.clone()),
+        (2, ol.o.l_r.clone()),
         (3, l_v),
     ]);
     let c_l = wt.c_l(delta_inv);
@@ -613,7 +608,7 @@ pub(crate) fn prove_inner<T: BpppTranscript, R: RngCore + CryptoRng>(
     let cvec: Vec<Scalar> = c_r(beta, tau, tau_inv).chain(c_l.eval(tau, tau_inv, n_lin)).collect();
     let st = WnlaStatement { g: &gens.g, h_vec: &gens.h, n_vec: gens.n, c: &cvec, rho };
     let wnla = wnla::prove_unbound(&st, transcript, l, n, cfg!(feature = "bppp-vartime"))?;
-    Ok(CircuitProof { C_L: ol.C_L, C_R: cr.C_R, C_O: ol.C_O, C_S, wnla })
+    Ok(CircuitProof { C_L: ol.C_L, C_R: cr.C_R, C_O: ol.o.C_O, C_S, wnla })
 }
 
 impl CircuitProof {

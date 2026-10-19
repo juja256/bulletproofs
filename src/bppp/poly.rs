@@ -4,10 +4,10 @@ use alloc::vec::Vec;
 
 use curve25519_dalek::scalar::Scalar;
 
-/// Lowest degree held by [`Poly`].
-pub(crate) const MIN_DEG: i32 = -2;
-/// Highest degree held by [`Poly`].
-pub(crate) const MAX_DEG: i32 = 10;
+/// Lowest degree held by [`Poly`]: `n(T)` reaches `T^-1`, so `<n, n>` reaches `T^-2`.
+const MIN_DEG: i32 = -2;
+/// Highest degree held by [`Poly`]: the blinding polynomial reaches `T^{3+7}` (spec §3.6).
+const MAX_DEG: i32 = 10;
 const LEN: usize = (MAX_DEG - MIN_DEG + 1) as usize;
 
 /// A scalar Laurent polynomial with degrees `MIN_DEG..=MAX_DEG`.

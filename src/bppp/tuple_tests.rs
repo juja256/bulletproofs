@@ -1,4 +1,4 @@
-//! Tuple poles (spec §4.1–4.7), from the review of phase 7b: numerators and ordinary rows
+//! Tuple poles (spec §4.1–4.7): numerators and ordinary rows
 //! that read a tuple pole, the two-phase prover with tuple poles, v2 from long public poles
 //! alone, and malformed v2 circuits (errors, no panics).
 use alloc::vec;

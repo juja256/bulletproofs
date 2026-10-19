@@ -33,6 +33,15 @@ impl SparseMatrix {
         self.start.push(self.cols.len());
     }
 
+    /// Append the rows of `other` (same number of columns).
+    pub(crate) fn extend_rows(&mut self, other: &SparseMatrix) {
+        assert_eq!(self.n_cols, other.n_cols, "column counts differ");
+        let base = self.cols.len();
+        self.cols.extend_from_slice(&other.cols);
+        self.vals.extend_from_slice(&other.vals);
+        self.start.extend(other.start[1..].iter().map(|s| base + s));
+    }
+
     /// Number of rows.
     pub fn n_rows(&self) -> usize {
         self.start.len() - 1
@@ -72,5 +81,27 @@ impl SparseMatrix {
                 h.update(v.as_bytes());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extend_rows_appends_rows() {
+        let s = |x: u64| Scalar::from(x);
+        let mut a = SparseMatrix::new(3);
+        a.push_row(vec![(0, s(1)), (2, s(2))]);
+        let mut b = SparseMatrix::new(3);
+        b.push_row(vec![]);
+        b.push_row(vec![(1, s(3))]);
+        let mut direct = a.clone();
+        for r in 0..b.n_rows() {
+            direct.push_row(b.row(r).map(|(c, v)| (c, *v)));
+        }
+        a.extend_rows(&b);
+        assert_eq!(a, direct);
+        assert_eq!(a.n_rows(), 3);
     }
 }

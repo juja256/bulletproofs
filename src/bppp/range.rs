@@ -103,14 +103,13 @@ pub struct RangeStatement {
 }
 
 /// The layout of a built range circuit.
-pub(crate) struct RangeInfo {
+pub(crate) struct RangeLayout {
     pub layouts: Vec<Vec<(u128, u64)>>,
     /// Distinct radices, ascending.
     tables: Vec<u64>,
-    n_p: usize,
 }
 
-impl RangeInfo {
+impl RangeLayout {
     /// The reciprocal witness for `values` with the given digits (one vector per value).
     pub fn witness(&self, values: &[u64], blindings: &[Scalar], digits: &[Vec<u64>]) -> ReciprocalWitness {
         let tagged: Vec<(u64, u64)> = digits
@@ -181,7 +180,7 @@ impl RangeStatement {
     }
 
     /// The circuit of spec §5.2.
-    pub(crate) fn circuit(&self) -> (ReciprocalCircuit, RangeInfo) {
+    pub(crate) fn circuit(&self) -> (ReciprocalCircuit, RangeLayout) {
         let layouts: Vec<Vec<(u128, u64)>> =
             self.ranges.iter().map(|&(a, b)| layout(b - a as u128, self.base)).collect();
         let radices: Vec<u64> = layouts.iter().flatten().map(|(_, r)| *r).collect();
@@ -226,7 +225,7 @@ impl RangeStatement {
             f_m: false,
             partition: (0..n_o).map(|t| (slot, t)).collect(),
         };
-        (c, RangeInfo { layouts, tables, n_p })
+        (c, RangeLayout { layouts, tables })
     }
 
     /// The `BulletproofGens` capacity the proof needs.
@@ -235,9 +234,17 @@ impl RangeStatement {
         c.gens_capacity()
     }
 
+    #[cfg(test)]
     pub(crate) fn gens<'a>(&self, pc: &PedersenGens, bp: &'a BulletproofGens) -> Result<BpppGens<'a>, ProofError> {
-        let (c, info) = self.circuit();
-        BpppGens::new(pc, bp, c.n_lin, info.n_p)
+        self.circuit().0.gens(pc, bp)
+    }
+
+    /// The circuit and generators for verification, with the domain separator absorbed.
+    fn setup<'a, T: BpppTranscript>(&self, pc: &PedersenGens, bp: &'a BulletproofGens, t: &mut T) -> Result<(ReciprocalCircuit, BpppGens<'a>), ProofError> {
+        let (c, _) = self.circuit();
+        let g = c.gens(pc, bp)?;
+        t.domain_sep(b"bppp-range v1");
+        Ok((c, g))
     }
 }
 
@@ -264,7 +271,7 @@ impl RangeProof {
             return Err(ProofError::FormatError);
         }
         let (c, info) = st.circuit();
-        let g = st.gens(pc, bp)?;
+        let g = c.gens(pc, bp)?;
         let digits: Vec<Vec<u64>> =
             values.iter().zip(&st.ranges).zip(&info.layouts).map(|((&v, &(a, _)), l)| decompose((v - a) as u128, l)).collect();
         let w = info.witness(values, blindings, &digits);
@@ -283,9 +290,7 @@ impl RangeProof {
         V: &[CompressedRistretto],
         transcript: &mut T,
     ) -> Result<(), ProofError> {
-        let (c, _) = st.circuit();
-        let g = st.gens(pc, bp)?;
-        transcript.domain_sep(b"bppp-range v1");
+        let (c, g) = st.setup(pc, bp, transcript)?;
         reciprocal::verify(&self.0, &c, &g, V, transcript)
     }
 
@@ -298,9 +303,7 @@ impl RangeProof {
         V: &[CompressedRistretto],
         transcript: &mut T,
     ) -> Result<super::circuit::Terms, ProofError> {
-        let (c, _) = st.circuit();
-        let g = st.gens(pc, bp)?;
-        transcript.domain_sep(b"bppp-range v1");
+        let (c, g) = st.setup(pc, bp, transcript)?;
         reciprocal::terms(&self.0, &c, &g, V, transcript)
     }
 

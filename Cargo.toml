@@ -81,3 +81,8 @@ required-features = ["yoloproofs"]
 [[bench]]
 name = "linear_proof"
 harness = false
+
+[[bench]]
+name = "bppp"
+harness = false
+required-features = ["bppp"]

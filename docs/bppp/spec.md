@@ -376,6 +376,11 @@ $w_P$.
 The circuit **uses $\eta$** if it has a tuple pole or a public pole of length at least 2; only then
 is $\eta$ drawn (§4.3). For a circuit that does not, $\eta$ plays no role below.
 
+A reciprocal row is an **$\eta$-row** if it has a term on the reciprocal column $w_{P,i}$ of a tuple
+pole, or a term or constant whose pole has length at least 2. In an $\eta$-row every term on a
+reciprocal column must be on a tuple pole: free poles (committed in $C_L$, after $\eta$) and tuple
+poles do not mix (§4.7). Other rows are unrestricted, as in v1.
+
 It is satisfied for $(\eta, \alpha)$ if, with the tuple poles set to $w_{D,i} = \sum_j \eta^j x_{i,j}$ and every
 public pole $t$ replaced by $t(\eta)$: for every $i < N_p$,
 $(X + w_{D,i})\, w_{P,i}(X) = (W_n w' + f_m w_V + a_n)_i$
@@ -481,14 +486,19 @@ identity per tuple follows. For two distinct tuples the difference $\sum_j \eta^
 a non-zero polynomial of degree $\le m - 1$, so (Schwartz–Zippel, union bound) injectivity fails
 with probability at most $\binom{|S|}{2}(m-1)/\ell$ over $\eta$; summed over the rows, at most
 $(N_p + T)^2 (m-1)/(2\ell)$ with $T$ public terms. This needs every private pole of the row to be
-a tuple pole: a free pole ($w_{D,i}$ in $C_L$, after $\eta$) can take the compressed value of any
-tuple, so a row that mixes free and tuple poles only has the identity over pole values (as in v1),
-which is all a row of free poles needs: its poles are fixed before $\alpha$. The builder (§7.6)
-never mixes them (an argument has one $m$).
+a tuple pole: a free pole ($w_{D,i}$ in $C_L$, after $\eta$) could take the compressed value of any
+tuple and cancel it, which is why §4.1 forbids free poles in $\eta$-rows. A row of free poles only
+has the identity over pole values, which is all it needs: its poles are fixed before $\alpha$.
+The builder (§7.6) never mixes them (an argument has one $m$).
+
+The numerators need not be fixed before $\eta$: $W_n$ may read $w_L$ and $w_D$ (in $C_L$, after
+$\eta$), and the relation is the identity for the extracted numerators at that $\eta$ — only the
+set of tuples must be fixed before $\eta$ for grouping by pole value to be grouping by tuple.
 
 So the extra round adds one challenge with a bad-challenge probability as above (round-by-round
-soundness); the Fiat–Shamir loss for multi-round special-sound protocols is linear in the number
-of random-oracle queries (Attema, Fehr, Klooß 2022), so with $Q$ queries the added term is
+soundness); assuming the §3 protocol is $(k_1, \dots, k_\mu)$-special-sound, the Fiat–Shamir loss
+for multi-round special-sound protocols is linear in the number of random-oracle queries
+(Attema, Fehr, Klooß 2022), so with $Q$ queries the added term is
 $Q (N_p + T)^2 (m-1)/(2\ell)$. Zero knowledge is unaffected: the commitments, their randomness and
 the openings are those of v1, only the order of the public challenges differs (§3's simulator
 does not depend on it).

@@ -20,6 +20,21 @@ pub enum Backend {
 #[cfg(feature = "bppp")]
 pub(super) use self::bppp_backend::*;
 
+/// The domain separator of the R1CS front end on BP++ (spec §6.2).
+#[cfg(feature = "bppp")]
+pub(super) const BPPP_DOMAIN: &[u8] = b"bppp-r1cs v2";
+
+/// BP++ has no second phase of arbitrary randomized constraints (spec §6.1): a gadget that
+/// specified any gets a `GadgetError` (lookups and permutations go through `CircuitBuilder`).
+#[cfg(feature = "bppp")]
+pub(super) fn refuse_randomized(n_deferred: usize) -> Result<(), crate::errors::R1CSError> {
+    if n_deferred == 0 {
+        Ok(())
+    } else {
+        Err(crate::errors::R1CSError::GadgetError { description: "randomized constraints need the BP backend".into() })
+    }
+}
+
 #[cfg(feature = "bppp")]
 mod bppp_backend {
     use alloc::vec;

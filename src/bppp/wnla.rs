@@ -7,7 +7,8 @@
 //!
 //! The argument is **not zero-knowledge**: the final vectors are combinations of the witness.
 //! Hiding comes from the blinding of the circuit protocol built on top of it. [`prove`] and
-//! [`WnlaProof::verify`] absorb `C`, `rho` and `c` (spec §2.3); the generators are the setup.
+//! [`WnlaProof::verify`] absorb `G`, `C`, `rho` and `c` (spec §2.3); the vector generators are
+//! the setup.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -146,12 +147,13 @@ fn absorb_header<T: BpppTranscript>(transcript: &mut T, a: usize, b: usize) {
 /// Absorb the public input of a standalone argument (spec §2.3).
 fn absorb_statement<T: BpppTranscript>(transcript: &mut T, st: &WnlaStatement, C: &CompressedRistretto) {
     transcript.domain_sep(b"bppp-wnla-statement v1");
+    transcript.append_point(b"G", &st.g.compress());
     transcript.append_point(b"C", C);
     transcript.append_scalar(b"rho", &st.rho);
     st.c.iter().for_each(|c| transcript.append_scalar(b"c", c));
 }
 
-/// Prove knowledge of the opening `(l, n)` of `C`. Absorbs `C`, `rho` and `c` before the
+/// Prove knowledge of the opening `(l, n)` of `C`. Absorbs `G`, `C`, `rho` and `c` before the
 /// rounds, so the challenges bind the whole statement.
 pub fn prove<T: BpppTranscript>(
     st: &WnlaStatement,
@@ -279,7 +281,7 @@ impl WnlaProof {
         Ok(WnlaScalars { g: v, h, n, gammas })
     }
 
-    /// Verify against the commitment `C`; absorbs `C`, `rho` and `c` like [`prove`].
+    /// Verify against the commitment `C`; absorbs `G`, `C`, `rho` and `c` like [`prove`].
     pub fn verify<T: BpppTranscript>(
         &self,
         st: &WnlaStatement,
@@ -462,6 +464,7 @@ mod tests {
 
         let mut expected: Vec<(&[u8], Vec<u8>)> = vec![
             (b"bppp-wnla-statement v1", vec![]),
+            (b"G", G.compress().as_bytes().to_vec()),
             (b"C", C.compress().as_bytes().to_vec()),
             (b"rho", st.rho.as_bytes().to_vec()),
         ];

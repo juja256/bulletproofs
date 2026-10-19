@@ -278,6 +278,7 @@ def circuit_check_shape(c):
     assert len(c["w_l"]) == nl == len(c["a_l"]) and len(c["w_m"]) == nm == len(c["a_m"])
     assert not c["f_l"] or nl >= k * nv
     assert not c["f_m"] or nm >= k * nv
+    assert k == 0 or c["f_l"] or c["f_m"], "inputs must enter some constraint (spec 3.1)"
     assert len(c["partition"]) == no
     assert len(set(map(tuple, c["partition"]))) == no  # injective
     for slot, t in c["partition"]:

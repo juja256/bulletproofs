@@ -141,10 +141,11 @@ def circuit_case(rng, name, nm, no, nv, nlin, k, nl, fl, fm, part, violate=None)
 # (name, N_m, N_O, N_v, N_lin, k, N_l, f_l, f_m, partition[, violation])
 CIRCUITS = [
     # all four (f_l, f_m), each with k in {1, 3} and N_v in {1, 4}
-    ("f00-k1-v1-min", 1, 0, 1, 0, 1, 1, 0, 0, "none"),
-    ("f00-k1-v4", 3, 3, 4, 3, 1, 2, 0, 0, "nO"),
-    ("f00-k3-v1", 4, 5, 1, 2, 3, 3, 0, 0, "spread"),
-    ("f00-k3-v4", 5, 6, 4, 5, 3, 4, 0, 0, "spread"),
+    # Without flags the inputs enter no constraint, so k = 0 (spec 3.1).
+    ("f00-k0-v1-min", 1, 0, 1, 0, 0, 1, 0, 0, "none"),
+    ("f00-k0-v4", 3, 3, 4, 3, 0, 2, 0, 0, "nO"),
+    ("f00-k0-v1-spread", 4, 5, 1, 2, 0, 3, 0, 0, "spread"),
+    ("f00-k0-v4-spread", 5, 6, 4, 5, 0, 4, 0, 0, "spread"),
     ("f10-k1-v1", 2, 2, 1, 0, 1, 2, 1, 0, "nO"),
     ("f10-k1-v4", 3, 6, 4, 5, 1, 5, 1, 0, "spread"),
     ("f10-k3-v1", 6, 0, 1, 1, 3, 4, 1, 0, "none"),
@@ -159,7 +160,7 @@ CIRCUITS = [
     ("f11-k3-v4", 16, 8, 4, 6, 3, 14, 1, 1, "spread"),
     # sizes and layouts
     ("odd-sizes", 7, 9, 2, 5, 2, 6, 1, 1, "spread"),
-    ("nO-full", 8, 8, 1, 2, 1, 5, 0, 0, "nO"),
+    ("nO-full", 8, 8, 1, 2, 0, 5, 0, 0, "nO"),
     ("lin-heavy", 2, 10, 3, 8, 2, 7, 1, 0, "spread"),
     ("nm13-no0", 13, 0, 2, 1, 2, 4, 0, 1, "none"),
     ("nm16-no0-v1", 16, 0, 1, 0, 1, 3, 1, 1, "none"),

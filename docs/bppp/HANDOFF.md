@@ -39,7 +39,7 @@ optimised); the same circuit through the R1CS front end on BP++ 817 B at 2^10.
 - `docs/bppp/spec.md` — the normative specification (§1 conventions, §2 WNLA, §3 circuits,
   §4 reciprocal form, §5 range/MACT, §6 R1CS). The paper's typeset formulas in §5 are wrong in
   several places; the spec re-derives them. Implementations follow the spec, not the paper.
-- `docs/bppp/bppp-paper-errors.tex` — errata of the paper (18 items, each with location,
+- `docs/bppp/bppp-paper-errors.tex` — errata of the paper (19 items, each with location,
   problem, fix and status Verified/Observed/Noted). A living document: add every inaccuracy you
   find. Build with `latexmk -pdf` outside the repository (aux files are git-ignored).
 - `ref/bppp_ref.py` — spec-level Python reference (field arithmetic mod ℓ, symbolic group:
@@ -222,3 +222,11 @@ DESIGN (milestone M6). bpvm depends on this fork by git revision.
   149 MB vs BP 10.1 s, 94 MB. Micro: CT MSM 16 µs/term, VT MSM 5 µs/term, a 2-point fold
   48 µs, `P + sQ` 38 µs. The CT prover is all MSMs: commitments 4 N terms, WNLA ≈ 3 N terms
   plus N folds of the norm generators.
+- 2026-10-19 — WNLA prover: single MSMs for X and R without copies, deferred folding (2 rounds
+  CT, 3 VT), one scalar multiplication per fold; proofs unchanged. Feature `bppp-vartime`
+  (owner's choice: CT by default). Circuit 2^14: prove 2.70 → 1.72 s with `bppp-vartime`
+  (CT: WNLA −7%); peak memory −20%. Dropping `C_O`: the paper's ZK proof does not cover it
+  (errata 19); a rank computation (`ref/checks/drop_co_zk_rank.py`) says it is still HVZK.
+  The owner asked to discuss the builder's proof format and API (`BuilderProof`,
+  `CircuitBuilder` vs `ConstraintSystem`, integration with bpvm) after this phase, so the
+  format changes (drop `C_O`, builder overflow layout) wait for that discussion.

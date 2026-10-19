@@ -5,7 +5,8 @@
 Pure field arithmetic modulo the ristretto255 group order. Group elements are symbolic: a
 point is a map {generator: coefficient} over the named base generators ("G", 0), ("H", i)
 and ("N", i). Challenges are inputs, so the vectors check the protocol algebra; Fiat-Shamir
-and point encoding are checked separately (transcript tests in Rust).
+and point encoding are checked separately (transcript tests in Rust). The reciprocal-form
+circuit digest (spec 4.4, v1 and v2) is computed here (SHA3-256), the transcript is not.
 """
 
 import copy
@@ -611,10 +612,16 @@ def circuit_self_check(c, wit, chal, gammas, proof):
 #
 # A reciprocal form circuit rc has the keys of a section-3 circuit (n_m = N_m ordinary
 # multiplications, which may be 0, w_m, a_m, w_l, a_l, n_o, n_v, n_lin, k, n_l, f_l, f_m,
-# partition) plus n_p = N_p, w_n, a_n and recip: a list of rows {"terms": [(col, c, t)],
-# "consts": [(c, t)]} with t None for "no pole". Columns index
+# partition) plus n_p = N_p, w_n, a_n, recip: a list of rows {"terms": [(col, c, t)],
+# "consts": [(c, t)]}, and optionally tuples (spec 4.1, our extension): a list of tuple poles
+# (i, [(terms, a), ...]), one (terms [(col, c)] over early columns, constant a) per component,
+# in increasing i. A public pole t is None ("no pole"), a scalar (a constant pole, the form of
+# the v1 circuits) or a list of scalars (a pole polynomial (t_0, ..., t_{d-1}) with the value
+# sum_e t_e eta^e; a list of length 1 is the constant t_0). Columns index
 # w' = w_D || w_L || w_P || w_R || w_O (N'_m = N_p + N_m). A witness has w_D, w_L, w_R, w_O,
-# v, s; w_P is computed for a challenge alpha.
+# v, s; the entries of w_D at tuple poles are placeholders (ignored, spec 4.3); w_P is
+# computed for a challenge alpha. Every function that takes eta accepts None for a circuit
+# that does not use eta (then eta plays no role).
 
 
 class ReciprocalError(Exception):
@@ -628,6 +635,47 @@ def recip_dims(rc):
     return nm2, 2 * nm2 + rc["n_o"]
 
 
+def recip_tuples(rc):
+    return rc.get("tuples") or []
+
+
+def pole_poly(t):
+    """A public pole as its pole polynomial [t_0, ..., t_{d-1}] (spec 4.1); None stays None."""
+    if t is None:
+        return None
+    if isinstance(t, (list, tuple)):
+        return [x % L for x in t]
+    return [t % L]
+
+
+def pole_value(t, eta):
+    """t(eta) = sum_e t_e eta^e (eta^0 = 1, also for eta = 0)."""
+    return sum(x * pow(eta, e, L) for e, x in enumerate(pole_poly(t))) % L
+
+
+def recip_public_poles(rc):
+    for row in rc["recip"]:
+        for _, _, t in row["terms"]:
+            if t is not None:
+                yield t
+        for _, t in row["consts"]:
+            if t is not None:
+                yield t
+
+
+def recip_uses_eta(rc):
+    """Spec 4.1: a tuple pole, or a public pole of length at least 2."""
+    return bool(recip_tuples(rc)) or any(len(pole_poly(t)) >= 2 for t in recip_public_poles(rc))
+
+
+def recip_eta(rc, eta):
+    """The eta to use: required iff the circuit uses eta; otherwise irrelevant (0)."""
+    if recip_uses_eta(rc):
+        assert eta is not None, "the circuit uses eta"
+        return eta % L
+    return 0
+
+
 def recip_initial_cols(rc):
     """Columns committed before alpha (spec 4.1): all of w'_L = w_D || w_L, and the elements of
     w_O whose slot is not l_R."""
@@ -635,6 +683,12 @@ def recip_initial_cols(rc):
     cols = set(range(nm2))
     cols |= {2 * nm2 + i for i, (slot, _) in enumerate(rc["partition"]) if slot != "lR"}
     return cols
+
+
+def recip_early_cols(rc):
+    """Columns committed in C_O, before eta (spec 4.1): the elements of w_O in slots n_O, l_O."""
+    nm2, _ = recip_dims(rc)
+    return {2 * nm2 + i for i, (slot, _) in enumerate(rc["partition"]) if slot in ("nO", "lO")}
 
 
 def recip_check_shape(rc):
@@ -645,10 +699,8 @@ def recip_check_shape(rc):
     assert len(rc["w_n"]) == np_ == len(rc["a_n"])
     assert len(rc["w_m"]) == nm == len(rc["a_m"])
     assert len(rc["w_l"]) == nl == len(rc["a_l"])
-    # Inputs: f_m w_V meets the first kN_v compiled multiplicative rows (numerators first).
-    # f_l w_V: the spec (4.2) requires only N_l + N_r >= kN_v of the compiled circuit, but the
-    # relation of 4.1 adds w_V to the rows of W_l only; we require N_l >= kN_v so that the two
-    # agree (reported as an ambiguity).
+    # Inputs: f_m w_V meets the first kN_v compiled multiplicative rows (numerators first);
+    # f_l = 1 needs N_l >= kN_v (spec 4.1), so w_V never reaches the tuple or reciprocal rows.
     assert not rc["f_l"] or nl >= k * nv, "f_l = 1 needs N_l >= k N_v"
     assert not rc["f_m"] or nm2 >= k * nv, "f_m = 1 needs N_p + N_m >= k N_v"
     assert k == 0 or rc["f_l"] or rc["f_m"]
@@ -669,6 +721,17 @@ def recip_check_shape(rc):
                 assert col in init or col in recip_cols, f"pole-free term on column {col}"
             else:
                 assert col in init, f"pole term on non-initial column {col}"
+    for t in recip_public_poles(rc):
+        assert not isinstance(t, (list, tuple)) or len(t) >= 1, "a pole polynomial has d >= 1"
+    early = recip_early_cols(rc)
+    prev = -1
+    for i, comps in recip_tuples(rc):
+        assert isinstance(i, int) and prev < i < np_, "tuple poles: i < N_p, each once, increasing"
+        prev = i
+        assert len(comps) >= 1, "a tuple pole has m_i >= 1 components"
+        for terms, _ in comps:
+            for col, _ in terms:
+                assert col in early, f"tuple component reads non-early column {col}"
 
 
 def recip_wprime(rc, wit, w_P):
@@ -682,10 +745,37 @@ def recip_wv(wit):
     return [x for v in wit["v"] for x in v]
 
 
+def recip_component_values(rc, wit):
+    """[(i, [x_i,0, ...])]: the component values x_{i,j} = sum c w'_col + a (spec 4.1). Only
+    the early columns (w_O in n_O, l_O) are read: everything else is zeroed, so the values are
+    fixed by C_O (before eta)."""
+    nm2, _ = recip_dims(rc)
+    early = recip_early_cols(rc)
+    w = {col: wit["w_O"][col - 2 * nm2] for col in early}
+    return [(i, [(sum(c * w[col] for col, c in terms) + a) % L for terms, a in comps])
+            for i, comps in recip_tuples(rc)]
+
+
+def recip_compress(xs, eta):
+    """sum_j eta^j x_j."""
+    return sum(x * pow(eta, j, L) for j, x in enumerate(xs)) % L
+
+
+def recip_eta_witness(rc, wit, eta):
+    """The witness with the tuple poles set to w_D,i = sum_j eta^j x_{i,j} (spec 4.1, 4.3);
+    the given values at the tuple poles are ignored. A circuit without tuple poles: unchanged."""
+    w_D = list(wit["w_D"])
+    for i, xs in recip_component_values(rc, wit):
+        w_D[i] = recip_compress(xs, eta)
+    out = dict(wit)
+    out["w_D"] = w_D
+    return out
+
+
 def recip_numerators(rc, wit):
     """(W_n w' + f_m w_V + a_n)_i. W_n reads initial columns only, so w_P, w_R and the l_R
-    elements are replaced by zeros here: the numerators are fixed before alpha."""
-    nm2, _ = recip_dims(rc)
+    elements are replaced by zeros here: the numerators are fixed before alpha. For a circuit
+    with tuple poles, wit must be the witness at eta (recip_eta_witness)."""
     init = recip_initial_cols(rc)
     w = recip_wprime(rc, wit, [0] * rc["n_p"])
     w = [x if i in init else 0 for i, x in enumerate(w)]
@@ -695,7 +785,8 @@ def recip_numerators(rc, wit):
 
 
 def recip_reciprocals(rc, wit, alpha):
-    """Spec 4.3 step 3: w_P,i = num_i / (alpha + w_D,i); fails if alpha + w_D,i = 0."""
+    """Spec 4.3 step 3: w_P,i = num_i / (alpha + w_D,i); fails if alpha + w_D,i = 0. wit: the
+    witness at eta."""
     out = []
     for d, num in zip(wit["w_D"], recip_numerators(rc, wit)):
         if (alpha + d) % L == 0:
@@ -704,11 +795,11 @@ def recip_reciprocals(rc, wit, alpha):
     return out
 
 
-def recip_row_residual(rc, wit, row):
+def recip_row_residual(rc, wit, row, eta=0):
     """A reciprocal row as a rational function of X: ({pole value t: total multiplicity at
-    1/(X + t)}, polynomial part), with w_P,i(X) = num_i / (X + w_D,i). The row vanishes iff
-    every multiplicity and the polynomial part are zero (the 1/(X + t) for distinct t and 1 are
-    linearly independent in F(X))."""
+    1/(X + t)}, polynomial part), with w_P,i(X) = num_i / (X + w_D,i) and public poles t(eta).
+    wit: the witness at eta. The row vanishes iff every multiplicity and the polynomial part
+    are zero (the 1/(X + t) for distinct t and 1 are linearly independent in F(X))."""
     nm2, _ = recip_dims(rc)
     num = recip_numerators(rc, wit)
     w = recip_wprime(rc, wit, [None] * rc["n_p"])
@@ -719,7 +810,7 @@ def recip_row_residual(rc, wit, row):
 
     for col, c, t in row["terms"]:
         if t is not None:
-            add(t, c * w[col])
+            add(pole_value(t, eta), c * w[col])
         elif nm2 <= col < nm2 + rc["n_p"]:
             i = col - nm2
             add(wit["w_D"][i], c * num[i])
@@ -729,12 +820,12 @@ def recip_row_residual(rc, wit, row):
         if t is None:
             poly += c
         else:
-            add(t, c)
+            add(pole_value(t, eta), c)
     return {t: m for t, m in mult.items() if m}, poly % L
 
 
 def recip_ordinary_residuals(rc, wit, w_P):
-    """Residuals of the ordinary rows of 4.1 for a given w_P (= w_P(alpha)):
+    """Residuals of the ordinary rows of 4.1 for a given w_P (= w_P(alpha)), wit at eta:
     (W_l w' + f_l w_V + a_l, W_m w' + f_m w~_V + a_m - w_L o w_R)."""
     w = recip_wprime(rc, wit, w_P)
     wv = recip_wv(wit)
@@ -747,24 +838,82 @@ def recip_ordinary_residuals(rc, wit, w_P):
     return lin, mul
 
 
-def recip_satisfied(rc, wit, alpha):
-    """Spec 4.1. The reciprocal rows must vanish as rational functions of X; the ordinary rows
-    are checked with w_P = w_P(alpha) (they may read w_P, so they depend on alpha: the spec
-    does not say at which X they hold; reported). Returns (recip_ok, ordinary_ok)."""
-    recip_ok = all(recip_row_residual(rc, wit, row) == ({}, 0) for row in rc["recip"])
+def recip_satisfied(rc, wit, alpha, eta=None):
+    """Spec 4.1, for (eta, alpha): the tuple poles set at eta, public poles t(eta). The
+    reciprocal rows must vanish as rational functions of X; the ordinary rows are checked with
+    w_P = w_P(alpha) (they may read w_P, so they depend on alpha). Returns (recip_ok, ordinary_ok)."""
+    eta = recip_eta(rc, eta)
+    wit = recip_eta_witness(rc, wit, eta)
+    recip_ok = all(recip_row_residual(rc, wit, row, eta) == ({}, 0) for row in rc["recip"])
     lin, mul = recip_ordinary_residuals(rc, wit, recip_reciprocals(rc, wit, alpha))
     return recip_ok, not any(lin) and not any(mul)
 
 
-def recip_compile(rc, alpha):
-    """Spec 4.2: the section-3 circuit for a challenge alpha. Raises ReciprocalError if
-    alpha + t = 0 for a public pole t (the spec does not cover this case; reported)."""
+def recip_tuple_identity(rc, wit, eta=None):
+    """What a tuple lookup needs (spec 4.7), checked directly on tuples, independent of eta:
+    in every reciprocal row, for every distinct tuple (component lists padded with zeros), the
+    numerators of its terms sum to zero, and the polynomial part is zero. A tuple pole's tuple
+    is its component values, a free pole's the 1-tuple (w_D,i), a public pole's its pole
+    polynomial's coefficients. eta matters only where a term reads the column w_D,i of a tuple
+    pole (as a numerator or a pole-free term); None means 0."""
+    eta = 0 if eta is None else eta % L
+    wit_e = recip_eta_witness(rc, wit, eta)
+    nm2, _ = recip_dims(rc)
+    num = recip_numerators(rc, wit_e)
+    w = recip_wprime(rc, wit_e, [None] * rc["n_p"])
+    tup = {i: xs for i, xs in recip_component_values(rc, wit)}
+
+    def key(xs):
+        xs = [x % L for x in xs]
+        while xs and xs[-1] == 0:
+            xs.pop()
+        return tuple(xs)
+
+    for row in rc["recip"]:
+        tot, poly = {}, 0
+
+        def add(kk, x):
+            tot[kk] = (tot.get(kk, 0) + x) % L
+
+        for col, c, t in row["terms"]:
+            if t is not None:
+                add(key(pole_poly(t)), c * w[col])
+            elif nm2 <= col < nm2 + rc["n_p"]:
+                i = col - nm2
+                add(key(tup[i] if i in tup else [wit_e["w_D"][i]]), c * num[i])
+            else:
+                poly += c * w[col]
+        for c, t in row["consts"]:
+            if t is None:
+                poly += c
+            else:
+                add(key(pole_poly(t)), c)
+        if any(tot.values()) or poly % L:
+            return False
+    return True
+
+
+def recip_compile(rc, alpha, eta=None):
+    """Spec 4.2: the section-3 circuit for the challenges (eta, alpha). Linear rows: W_l, then
+    one row per tuple pole ([(w_D,i, 1)], the terms of x_{i,j} times -eta^j, affine term
+    -sum_j eta^j a_{i,j}), then the reciprocal rows at X = alpha with the poles t(eta). Raises
+    ReciprocalError if alpha + t(eta) = 0 for a public pole t."""
     recip_check_shape(rc)
+    eta = recip_eta(rc, eta)
     np_ = rc["n_p"]
     nm2, _ = recip_dims(rc)
     w_m = [list(row) + [(nm2 + i, -alpha % L)] for i, row in enumerate(rc["w_n"])]
     w_m += [list(row) for row in rc["w_m"]]
     w_l = [list(row) for row in rc["w_l"]]
+    a_t = []
+    for i, comps in recip_tuples(rc):
+        row, aff = [(i, 1)], 0
+        for j, (terms, a) in enumerate(comps):
+            ej = pow(eta, j, L)
+            row += [(col, -c * ej % L) for col, c in terms]
+            aff += a * ej
+        w_l.append(row)
+        a_t.append(-aff % L)
     a_r = []
     for row in rc["recip"]:
         acc = {}
@@ -772,9 +921,10 @@ def recip_compile(rc, alpha):
             if t is None:
                 x = c
             else:
-                if (alpha + t) % L == 0:
+                tv = pole_value(t, eta)
+                if (alpha + tv) % L == 0:
                     raise ReciprocalError("alpha + t = 0 for a public pole")
-                x = c * inv(alpha + t)
+                x = c * inv(alpha + tv)
             acc[col] = (acc.get(col, 0) + x) % L
         # one term per column, in the order of first appearance (any order gives the same
         # constraint; the order only matters for the section-3 digest, which is not used here)
@@ -784,57 +934,133 @@ def recip_compile(rc, alpha):
             if t is None:
                 const += c
             else:
-                if (alpha + t) % L == 0:
+                tv = pole_value(t, eta)
+                if (alpha + tv) % L == 0:
                     raise ReciprocalError("alpha + t = 0 for a public pole")
-                const += c * inv(alpha + t)
+                const += c * inv(alpha + tv)
         a_r.append(const % L)
     c = {"n_m": nm2, "n_o": rc["n_o"], "n_v": rc["n_v"], "n_lin": rc["n_lin"], "k": rc["k"],
-         "n_l": rc["n_l"] + len(rc["recip"]), "f_l": rc["f_l"], "f_m": rc["f_m"],
+         "n_l": rc["n_l"] + len(a_t) + len(rc["recip"]), "f_l": rc["f_l"], "f_m": rc["f_m"],
          "partition": [list(x) for x in rc["partition"]],
          "w_m": w_m, "a_m": [x % L for x in rc["a_n"] + rc["a_m"]],
-         "w_l": w_l, "a_l": [x % L for x in rc["a_l"]] + a_r}
+         "w_l": w_l, "a_l": [x % L for x in rc["a_l"]] + a_t + a_r}
     circuit_check_shape(c)
     assert np_ + rc["n_m"] == len(c["w_m"])
     return c
 
 
+def _u64(x):
+    assert 0 <= x < 2**64
+    return x.to_bytes(8, "little")
+
+
+def _scalar(x):
+    return (x % L).to_bytes(32, "little")
+
+
+def recip_digest(rc):
+    """Spec 4.4: SHA3-256 of the circuit, v1 for a circuit that does not use eta, else v2.
+    Partition and sparse rows as in spec 3.9 (slot byte 0 n_O, 1 l_O, 2 l_L, 3 l_R, then the
+    index; per row the number of terms, per term the column and the coefficient)."""
+    import hashlib
+    v2 = recip_uses_eta(rc)
+    h = hashlib.sha3_256()
+    h.update(b"bppp-reciprocal-digest v2" if v2 else b"bppp-reciprocal-digest v1")
+    dims = [rc[x] for x in ("n_p", "n_m", "n_o", "n_v", "n_lin", "k", "n_l")]
+    dims += [len(rc["recip"]), rc["f_l"], rc["f_m"]]
+    if v2:
+        dims.append(len(recip_tuples(rc)))
+    for d in dims:
+        h.update(_u64(d))
+    for slot, t in rc["partition"]:
+        h.update(bytes([SLOTS.index(slot)]) + _u64(t))
+    for rows in (rc["w_n"], rc["w_m"], rc["w_l"]):
+        for row in rows:
+            h.update(_u64(len(row)))
+            for col, c in row:
+                h.update(_u64(col) + _scalar(c))
+    for vec in (rc["a_n"], rc["a_m"], rc["a_l"]):
+        for x in vec:
+            h.update(_scalar(x))
+
+    def pole(t):
+        if t is None:
+            return b"\x00"
+        p = pole_poly(t)
+        if v2:
+            return b"\x01" + _u64(len(p)) + b"".join(_scalar(x) for x in p)
+        assert len(p) == 1
+        return b"\x01" + _scalar(p[0])
+
+    for row in rc["recip"]:
+        h.update(_u64(len(row["terms"])))
+        for col, c, t in row["terms"]:
+            h.update(_u64(col) + _scalar(c) + pole(t))
+        h.update(_u64(len(row["consts"])))
+        for c, t in row["consts"]:
+            h.update(_scalar(c) + pole(t))
+    if v2:
+        for i, comps in recip_tuples(rc):
+            h.update(_u64(i) + _u64(len(comps)))
+            for terms, a in comps:
+                h.update(_u64(len(terms)))
+                for col, c in terms:
+                    h.update(_u64(col) + _scalar(c))
+                h.update(_scalar(a))
+    return h.digest()
+
+
 def recip_compiled_witness(wit, w_P):
-    """(w'_L, w'_R, w_O) and the inputs, as a section-3 witness."""
+    """(w'_L, w'_R, w_O) and the inputs, as a section-3 witness (wit at eta)."""
     return {"w_L": wit["w_D"] + wit["w_L"], "w_R": w_P + wit["w_R"], "w_O": list(wit["w_O"]),
             "v": wit["v"], "s": wit["s"]}
 
 
 def recip_prove(rc, wit, rnd, chal, gammas):
-    """Prover of spec 4.3 with given randomness and challenges (alpha in chal). Steps 1-3 are
-    done explicitly (C_L, C_O from the initial witness alone, then w_P and C_R); step 4 runs the
-    section-3 prover on the compiled circuit, whose own C_L, C_R, C_O must coincide."""
+    """Prover of spec 4.3 with given randomness and challenges (alpha, and eta for v2, in chal).
+    v1: C_L, C_O from the initial witness, alpha, w_P, C_R. v2: C_O from the early columns
+    alone, eta, the tuple poles set at eta, C_L, alpha, w_P, C_R. Step 4 runs the section-3
+    prover on the compiled circuit, whose own C_L, C_R, C_O must coincide. The randomness is
+    the same in both orders (r'_O, r'_L, r'_R, l_S, n_S)."""
     recip_check_shape(rc)
     nm2, _ = recip_dims(rc)
+    v2 = recip_uses_eta(rc)
+    eta = recip_eta(rc, chal.get("eta"))
     alpha = chal["alpha"]
     G, H, _ = circuit_gens({"n_lin": rc["n_lin"], "n_m": nm2})
     V = [circuit_input_commit(G, H, v, s) for v, s in zip(wit["v"], wit["s"])]
-    # 1. the initial witness only: w_R, w_P and the l_R elements are unknown (zero) here
     shape = {"n_m": nm2, "n_lin": rc["n_lin"], "partition": rc["partition"]}
+    C_O_early = None
+    if v2:
+        # 1 (v2). C_O from the early columns only: w_D, w_L and the l_L, l_R elements unknown
+        early = {"w_L": [0] * nm2, "w_R": [0] * nm2,
+                 "w_O": [x if slot in ("nO", "lO") else 0
+                         for x, (slot, _) in zip(wit["w_O"], rc["partition"])]}
+        _, C_O_early = circuit_commit_initial(shape, early, rnd)
+        # eta; the tuple poles from the components (the witness's values are ignored)
+        wit = recip_eta_witness(rc, wit, eta)
+    # 1. the initial witness only: w_R, w_P and the l_R elements are unknown (zero) here
     pre = {"w_L": wit["w_D"] + wit["w_L"], "w_R": [0] * nm2,
            "w_O": [0 if slot == "lR" else x for x, (slot, _) in zip(wit["w_O"], rc["partition"])]}
     C_L, C_O = circuit_commit_initial(shape, pre, rnd)
+    assert C_O_early is None or C_O_early == C_O
     # 2.-3. alpha, reciprocals, C_R
     w_P = recip_reciprocals(rc, wit, alpha)
     cwit = recip_compiled_witness(wit, w_P)
     C_R = circuit_commit_right(shape, cwit, rnd)
     # 4. inner protocol on the compiled circuit
-    c = recip_compile(rc, alpha)
+    c = recip_compile(rc, alpha, eta)
     proof = circuit_prove(c, cwit, rnd, chal, gammas)
     assert proof["V"] == V and proof["C_L"] == C_L and proof["C_O"] == C_O and proof["C_R"] == C_R
-    proof.update({"w_P": w_P, "compiled": c, "compiled_wit": cwit})
+    proof.update({"w_P": w_P, "w_D_eta": list(wit["w_D"]), "compiled": c, "compiled_wit": cwit})
     return proof
 
 
 def recip_verify(rc, V, C_L, C_R, C_O, C_S, chal, rounds, l_final, n_final, gammas, single=False):
-    """Verifier of spec 4.3: compile for alpha, then the section-3 verifier (naive, or the
-    single multiscalar equation)."""
+    """Verifier of spec 4.3: compile for (eta, alpha), then the section-3 verifier (naive, or
+    the single multiscalar equation)."""
     try:
-        c = recip_compile(rc, chal["alpha"])
+        c = recip_compile(rc, chal["alpha"], recip_eta(rc, chal.get("eta")))
     except ReciprocalError:
         return False
     f = circuit_verify_msm if single else circuit_verify
@@ -843,28 +1069,41 @@ def recip_verify(rc, V, C_L, C_R, C_O, C_S, chal, rounds, l_final, n_final, gamm
 
 def recip_self_check(rc, wit, chal, gammas, proof):
     """Self-checks of a reciprocal proof: the satisfaction check against the compiled circuit,
-    the reciprocal rows at alpha, the section-3 checks (identity, opening, both verifiers) on
-    the compiled circuit, and both reciprocal verifiers. Returns (satisfied, verifies)."""
+    the tuple rows and the reciprocal rows at (eta, alpha), the section-3 checks (identity,
+    opening, both verifiers) on the compiled circuit, and both reciprocal verifiers. Returns
+    (satisfied, verifies)."""
     alpha = chal["alpha"]
-    recip_ok, ord_ok = recip_satisfied(rc, wit, alpha)
+    eta = recip_eta(rc, chal.get("eta"))
+    recip_ok, ord_ok = recip_satisfied(rc, wit, alpha, eta)
     satisfied = recip_ok and ord_ok
     c, cwit, w_P = proof["compiled"], proof["compiled_wit"], proof["w_P"]
+    wit_e = recip_eta_witness(rc, wit, eta)
+    assert proof["w_D_eta"] == wit_e["w_D"]
     # w_P is the reciprocal: (alpha + w_D,i) w_P,i = num_i
-    num = recip_numerators(rc, wit)
-    assert all((alpha + d) * p % L == x for d, p, x in zip(wit["w_D"], w_P, num))
-    # the reciprocal rows evaluated at alpha = the compiled linear rows N_l.. on w'(alpha)
-    w = recip_wprime(rc, wit, w_P)
-    nl = rc["n_l"]
-    at_alpha = [(x + c["a_l"][nl + q]) % L for q, x in enumerate(sparse_mul(c["w_l"][nl:], w))]
+    num = recip_numerators(rc, wit_e)
+    assert all((alpha + d) * p % L == x for d, p, x in zip(wit_e["w_D"], w_P, num))
+    w = recip_wprime(rc, wit_e, w_P)
+    nl, nt = rc["n_l"], len(recip_tuples(rc))
+    # the compiled tuple rows hold on the witness at eta, and pin w_D,i to the compression
+    tup_rows = [(x + c["a_l"][nl + q]) % L for q, x in enumerate(sparse_mul(c["w_l"][nl:nl + nt], w))]
+    assert not any(tup_rows)
+    for (i, xs), q in zip(recip_component_values(rc, wit), range(nt)):
+        w2 = list(w)
+        w2[i] = (w2[i] + 1) % L
+        assert sparse_mul([c["w_l"][nl + q]], w2)[0] != (-c["a_l"][nl + q]) % L
+        assert wit_e["w_D"][i] == recip_compress(xs, eta)
+    # the reciprocal rows evaluated at alpha = the compiled linear rows N_l + N_t.. on w'(alpha)
+    nr0 = nl + nt
+    at_alpha = [(x + c["a_l"][nr0 + q]) % L for q, x in enumerate(sparse_mul(c["w_l"][nr0:], w))]
     for q, row in enumerate(rc["recip"]):
-        mult, poly = recip_row_residual(rc, wit, row)
+        mult, poly = recip_row_residual(rc, wit_e, row, eta)
         direct = (poly + sum(m * inv(alpha + t) for t, m in mult.items())) % L
         assert direct == at_alpha[q], "compiled reciprocal row != rational function at alpha"
         if (mult, poly) == ({}, 0):
             assert at_alpha[q] == 0
         else:
             assert at_alpha[q] != 0, "a non-vanishing reciprocal row vanishes at alpha (unlucky alpha)"
-    # compiled circuit satisfied by (w'_L, w'_R, w_O) iff the reciprocal circuit is (at alpha)
+    # compiled circuit satisfied by (w'_L, w'_R, w_O) iff the reciprocal circuit is (at eta, alpha)
     _, csat = circuit_error(c, cwit, chal["lambda"], chal["rho"] * chal["rho"] % L)
     assert csat == satisfied
     s3, v3 = circuit_self_check(c, cwit, chal, gammas, proof)
@@ -873,7 +1112,54 @@ def recip_self_check(rc, wit, chal, gammas, proof):
             proof["rounds"], proof["l_final"], proof["n_final"], gammas)
     verifies = recip_verify(*args)
     assert recip_verify(*args, single=True) == verifies == v3
+    if recip_uses_eta(rc) and verifies:
+        # the proof is bound to eta: another eta gives another compiled circuit (unless nothing
+        # depends on it, e.g. public poles (t_0, 0) and one-component tuples only), which the
+        # proof does not verify (the column weights y of 3.4 change)
+        chal2 = dict(chal)
+        chal2["eta"] = (eta + 1) % L
+        same = recip_compile(rc, alpha, chal2["eta"]) == c
+        assert recip_verify(rc, *args[1:6], chal2, *args[7:]) == same
     return satisfied, verifies
+
+
+def recip_v2_self_check(rc, wit, rng, ident_expected=None):
+    """Checks of the tuple-pole claims of spec 4.7 on a circuit that uses eta: (1) the per-tuple
+    identity (recip_tuple_identity) holds iff the reciprocal rows vanish at random eta (two
+    draws); (2) if it holds, it breaks when any component's constant changes (unless the
+    changed tuple meets another tuple of its row: not in our cases), and the rows then fail at
+    a random eta; (3) the compiled circuit at random (eta, alpha) is satisfied iff the circuit
+    is (its tuple rows force w_D,i = sum_j eta^j x_{i,j}). Returns the identity."""
+    assert recip_uses_eta(rc)
+    ident = recip_tuple_identity(rc, wit)
+    if ident_expected is not None:
+        assert ident == ident_expected
+    for _ in range(2):
+        eta, alpha = rng.randrange(L), rng.randrange(1, L)
+        recip_ok, ord_ok = recip_satisfied(rc, wit, alpha, eta)
+        assert recip_ok == ident, "per-tuple identity != rows vanish at a random eta"
+        c = recip_compile(rc, alpha, eta)
+        wit_e = recip_eta_witness(rc, wit, eta)
+        cwit = recip_compiled_witness(wit_e, recip_reciprocals(rc, wit_e, alpha))
+        lam, rho = rng.randrange(1, L), rng.randrange(1, L)
+        assert circuit_error(c, cwit, lam, rho * rho % L)[1] == (recip_ok and ord_ok)
+        # a witness whose tuple-pole entries are not the compression violates the tuple rows
+        if recip_tuples(rc):
+            bad = dict(cwit)
+            bad["w_L"] = list(cwit["w_L"])
+            i0 = recip_tuples(rc)[0][0]
+            bad["w_L"][i0] = (bad["w_L"][i0] + 1) % L
+            assert not circuit_error(c, bad, lam, rho * rho % L)[1]
+    if ident:
+        for q, (i, comps) in enumerate(recip_tuples(rc)):
+            for j in range(len(comps)):
+                rc2 = copy.deepcopy(rc)
+                terms, a = rc2["tuples"][q][1][j]
+                rc2["tuples"][q][1][j] = (terms, (a + 1) % L)
+                assert not recip_tuple_identity(rc2, wit)
+                eta, alpha = rng.randrange(L), rng.randrange(1, L)
+                assert not recip_satisfied(rc2, wit, alpha, eta)[0]
+    return ident
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1198,81 +1484,36 @@ def range_circuit_self_check():
 # of tests/vectors/bppp/builder.json) through Builder; the prover's values are part of the
 # program. Variables are tuples ("V", j) Committed, ("L", i) / ("R", i) / ("O", i)
 # MultiplierLeft/Right/Output, ("W", i) Witness and ONE = ("1",); an LC is a list of
-# (variable, coefficient mod L), kept in the order given. Only the BP++ lowering (7.6) is
-# implemented; of the BP lowering (7.5) only its cost formula.
+# (variable, coefficient mod L), kept in the order given. A table has m >= 1 columns, a tuple
+# is a list of m LCs (private) or of m u64 entries (public); components are arbitrary field
+# elements (no widths, no bounds: spec 7.2, 7.3). Only the BP++ lowering (7.6) is implemented;
+# of the BP lowering (7.5) only its cost formula.
 
 ONE = ("1",)
 VAR_KINDS = ("V", "L", "R", "O", "W")
 
 
 class BuilderError(Exception):
-    """GadgetError of a builder operation (spec 7.1-7.3); the failed operation records nothing."""
+    """GadgetError of a builder operation (spec 7.1-7.2); the failed operation records nothing."""
 
 
 class BuilderProverError(Exception):
     """Finalization fails for the prover (spec 7.4: a lookup equal to no row)."""
 
 
-def bld_widths_valid(widths):
-    """Spec 7.2: m >= 1, every w_j >= 1, sum <= 252."""
-    return (isinstance(widths, list) and len(widths) >= 1
-            and all(isinstance(w, int) and not isinstance(w, bool) and w >= 1 for w in widths)
-            and sum(widths) <= 252)
-
-
-def bld_offsets(widths):
-    out, o = [], 0
-    for w in widths:
-        out.append(o)
-        o += w
-    return out
-
-
-def bld_pack(widths, xs):
-    """pack(x) = sum_j 2^{o_j} x_j (in F)."""
-    assert len(xs) == len(widths)
-    return sum(x * pow(2, o, L) for o, x in zip(bld_offsets(widths), xs)) % L
-
-
 def bld_is_u64(e):
     return isinstance(e, int) and not isinstance(e, bool) and 0 <= e < U64
 
 
-def bld_row_valid(widths, row):
-    """A table row / public row: m u64 entries, entry j < 2^{w_j}."""
-    return (isinstance(row, list) and len(row) == len(widths)
-            and all(bld_is_u64(e) and e < 2**w for e, w in zip(row, widths)))
+def bld_is_row(row):
+    """A well-formed public row / table row: a list of u64 (the Rust type; anything else is a
+    malformed program, not a GadgetError)."""
+    return isinstance(row, list) and all(bld_is_u64(e) for e in row)
 
 
 def bld_constant(lc):
     """The sum of the coefficients of the One terms (spec 7.1)."""
     return sum(c for x, c in lc if x == ONE) % L
-
-
-def bld_lc_bound(lc, bounds):
-    """Spec 7.3: merge the terms per variable (sum in F); the bound is defined iff the constant
-    and every non-zero merged coefficient are < 2^64 and every variable with a non-zero merged
-    coefficient has a recorded bound; then c_0 + sum_x c_x (2^{b_x} - 1). None if undefined."""
-    merged = {}
-    for x, c in lc:
-        if x != ONE:
-            merged[x] = (merged.get(x, 0) + c) % L
-    c0 = bld_constant(lc)
-    if c0 >= U64:
-        return None
-    total = c0
-    for x, c in merged.items():
-        if c == 0:
-            continue
-        if c >= U64 or x not in bounds:
-            return None
-        total += c * (2**bounds[x] - 1)
-    return total
-
-
-def bld_bound_ok(lc, bounds, w):
-    b = bld_lc_bound(lc, bounds)
-    return b is not None and b < 2**w
 
 
 def bld_parse_var(x):
@@ -1306,10 +1547,9 @@ class Builder:
         self.wit = []                           # builder witnesses, n_w = len(wit)
         self.r1cs = []                          # R1CS constraints (LC = 0), in order
         self.products = []                      # (l, r, out)
-        self.tables = []                        # (widths, rows)
+        self.tables = []                        # rows (m = len(rows[0]))
         self.lookups = []                       # (table id, tuple), in call order
-        self.args = []                          # (widths, [(num, tuple)], [(coeff, row)])
-        self.bounds = {}                        # b_x
+        self.args = []                          # (m, [(num, tuple)], [(coeff, row)])
         self.builder_mode = False
 
     k = property(lambda self: len(self.v))
@@ -1398,77 +1638,69 @@ class Builder:
             self.check_lc(lc)
         self.products.append((list(l), list(r), list(out)))
 
-    def table(self, widths, rows):
+    def table(self, rows):
+        """table(rows): at least one row, the first row has m >= 1 entries, every row m."""
         self.builder_mode = True
-        if not bld_widths_valid(widths):
-            raise BuilderError("invalid width list")
-        if not isinstance(rows, list) or not rows:
+        if not isinstance(rows, list) or not all(bld_is_row(r) for r in rows):
+            raise ValueError("malformed table rows")
+        if not rows:
             raise BuilderError("empty table")
-        for row in rows:
-            if not bld_row_valid(widths, row):
-                raise BuilderError("bad table row")
-        self.tables.append((list(widths), [list(r) for r in rows]))
+        m = len(rows[0])
+        if m < 1:
+            raise BuilderError("a table needs m >= 1 columns")
+        if any(len(r) != m for r in rows):
+            raise BuilderError("row length differs from the first row's")
+        self.tables.append([list(r) for r in rows])
         return len(self.tables) - 1
 
+    def table_m(self, t):
+        return len(self.tables[t][0])
+
     def _check_lookup(self, t, tup):
-        if not (isinstance(t, int) and 0 <= t < len(self.tables)):
+        if not (isinstance(t, int) and not isinstance(t, bool) and 0 <= t < len(self.tables)):
             raise BuilderError("unknown table")
-        widths = self.tables[t][0]
-        if len(tup) != len(widths):
+        if len(tup) != self.table_m(t):
             raise BuilderError("tuple length differs from the table's")
         for lc in tup:
             self.check_lc(lc)
-        if len(widths) >= 2:
-            for lc, w in zip(tup, widths):
-                if not bld_bound_ok(lc, self.bounds, w):
-                    raise BuilderError("tuple component breaks the bound rule")
-        return widths
-
-    def _record_lookup(self, t, tup, widths):
-        self.lookups.append((t, [list(lc) for lc in tup]))
-        if len(widths) == 1 and len(tup[0]) == 1:
-            x, c = tup[0][0]
-            if x != ONE and c % L == 1:
-                self.bounds[x] = min(self.bounds.get(x, widths[0]), widths[0])
 
     def lookup(self, t, tup):
         self.builder_mode = True
-        widths = self._check_lookup(t, tup)
-        self._record_lookup(t, tup, widths)
+        self._check_lookup(t, tup)
+        self.lookups.append((t, [list(lc) for lc in tup]))
 
     def lookup_value(self, t, v):
         self.builder_mode = True
-        if not (isinstance(t, int) and 0 <= t < len(self.tables)) or len(self.tables[t][0]) != 1:
+        if not (isinstance(t, int) and 0 <= t < len(self.tables)) or self.table_m(t) != 1:
             raise BuilderError("lookup_value needs an existing one-column table")
         x = self.witness(v)
-        widths = self._check_lookup(t, [[(x, 1)]])
-        self._record_lookup(t, [[(x, 1)]], widths)
+        self._check_lookup(t, [[(x, 1)]])
+        self.lookups.append((t, [[(x, 1)]]))
         return x
 
-    def reciprocal(self, widths, terms, public):
-        """reciprocal(widths), the terms (private first, then public, in order), then
+    def reciprocal(self, m, terms, public):
+        """reciprocal(m), the terms (private first, then public, in order), then
         finish_reciprocal; any failure fails the whole call."""
         self.builder_mode = True
-        if not bld_widths_valid(widths):
-            raise BuilderError("invalid width list")
-        m = len(widths)
+        if not isinstance(m, int) or isinstance(m, bool) or m < 0:
+            raise ValueError("malformed m")
+        if not all(bld_is_row(row) for _, row in public):
+            raise ValueError("malformed public row")
+        if m < 1:
+            raise BuilderError("an argument needs m >= 1 columns")
         for num, tup in terms:
             if len(tup) != m:
-                raise BuilderError("tuple length differs from the width list")
+                raise BuilderError("tuple length differs from m")
             self.check_lc(num)
             for lc in tup:
                 self.check_lc(lc)
-            if m >= 2:
-                for lc, w in zip(tup, widths):
-                    if not bld_bound_ok(lc, self.bounds, w):
-                        raise BuilderError("tuple component breaks the bound rule")
         for coeff, row in public:
             self.check_lc(coeff)
-            if not bld_row_valid(widths, row):
-                raise BuilderError("bad public row")
+            if len(row) != m:
+                raise BuilderError("public row length differs from m")
         if not terms and not public:
             return  # an argument without terms is dropped
-        self.args.append((list(widths), [(list(n), [list(x) for x in t]) for n, t in terms],
+        self.args.append((m, [(list(n), [list(x) for x in t]) for n, t in terms],
                           [(list(c), list(r)) for c, r in public]))
 
 
@@ -1491,15 +1723,17 @@ def bld_apply(b, op):
     if kind == "product":
         return b.product(LC(op["l"]), LC(op["r"]), LC(op["out"]))
     if kind == "table":
-        return b.table(op["widths"], op["rows"])
+        assert set(op) == {"op", "rows"}
+        return b.table(op["rows"])
     if kind == "lookup":
         return b.lookup(op["table"], [LC(x) for x in op["tuple"]])
     if kind == "lookup_value":
         assert bld_is_u64(op["v"])
         return b.lookup_value(op["table"], op["v"])
     if kind == "reciprocal":
-        return b.reciprocal(op["widths"], [(LC(t["num"]), [LC(x) for x in t["tuple"]])
-                                           for t in op["terms"]],
+        assert set(op) == {"op", "m", "terms", "public"}
+        return b.reciprocal(op["m"], [(LC(t["num"]), [LC(x) for x in t["tuple"]])
+                                      for t in op["terms"]],
                             [(LC(p["coeff"]), p["row"]) for p in op["public"]])
     raise ValueError(f"unknown operation {kind}")
 
@@ -1518,20 +1752,20 @@ def bld_run_program(ops):
 
 def bld_finalize(b, prover=True):
     """Spec 7.4. Returns {"mult": {table id: index of its first multiplicity witness},
-    "n_w": n_w with the multiplicities, "args": the list A as (widths, [(num, tuple)],
+    "n_w": n_w with the multiplicities, "args": the list A as (m, [(num, tuple)],
     [(coeff, row)]), "wit": the witness values with the multiplicities (prover only)}.
     Raises BuilderProverError (prover only) for a lookup equal to no row."""
     used = sorted({t for t, _ in b.lookups})
     mult, nw = {}, b.n_w
     for t in used:
         mult[t] = nw
-        nw += len(b.tables[t][1])
+        nw += len(b.tables[t])
     wit = None
     if prover:
-        counts = {t: [0] * len(b.tables[t][1]) for t in used}
+        counts = {t: [0] * len(b.tables[t]) for t in used}
         for t, tup in b.lookups:
             vals = [b.eval(lc) for lc in tup]
-            for r, row in enumerate(b.tables[t][1]):
+            for r, row in enumerate(b.tables[t]):
                 if all(x == e % L for x, e in zip(vals, row)):
                     counts[t][r] += 1  # the first equal row only
                     break
@@ -1540,15 +1774,24 @@ def bld_finalize(b, prover=True):
         wit = list(b.wit) + [c for t in used for c in counts[t]]
     args = list(b.args)
     for t in used:
-        widths, rows = b.tables[t]
+        rows = b.tables[t]
         priv = [([(ONE, 1)], tup) for tt, tup in b.lookups if tt == t]
         pub = [([(("W", mult[t] + r), L - 1)], row) for r, row in enumerate(rows)]
-        args.append((widths, priv, pub))
+        args.append((len(rows[0]), priv, pub))
     return {"mult": mult, "n_w": nw, "args": args, "wit": wit}
 
 
+def bld_uses_eta(fin):
+    """Spec 7.6: protocol v2 exactly when A has an argument with m >= 2. (The lowered circuit
+    uses eta by spec 4.1 in every such case but one: an m >= 2 argument without private terms
+    whose public coefficients are all the empty LC lowers to an empty reciprocal row, with no
+    pole of length >= 2; reported. We take the circuit's own rule, recip_uses_eta.)"""
+    return any(m >= 2 for m, _, _ in fin["args"])
+
+
 def bld_costs(b, fin):
-    """Spec 7.5 (BP multipliers, before BP's padding) and 7.6 (BP++ gates)."""
+    """Spec 7.5 (BP multipliers, before BP's padding) and 7.6 (BP++ gates); copies, public
+    terms and the number of columns cost no gate."""
     n_p = sum(len(priv) for _, priv, _ in fin["args"])
     n_prod = len(b.products)
     n_r = 1 if b.n == n_prod == n_p == 0 else b.n
@@ -1558,9 +1801,11 @@ def bld_costs(b, fin):
 
 def bld_lower(b, fin):
     """Spec 7.6: the reciprocal form circuit rc (format of recip_prove) and its witness
-    (w_D, w_L, w_R, w_O, v, s; prover values from fin["wit"])."""
+    (w_D, w_L, w_R, w_O, v, s; prover values from fin["wit"]). Poles of arguments with m = 1
+    are free poles with the pole row of linear-row step 4; poles of arguments with m >= 2 are
+    tuple poles (spec 4.1), public poles are the rows as pole polynomials of length m."""
     args = fin["args"]
-    poles = [(widths, num, tup) for widths, priv, _ in args for num, tup in priv]
+    poles = [(m, num, tup) for m, priv, _ in args for num, tup in priv]
     n_p, n_prod, k = len(poles), len(b.products), b.k
     n_r = 1 if b.n == n_prod == n_p == 0 else b.n
     n_m = n_r + n_prod
@@ -1574,24 +1819,22 @@ def bld_lower(b, fin):
         for x, _ in lc:
             if x != ONE and x[1] >= lim[x[0]]:
                 raise BuilderError(f"constraint names unallocated variable {x}")
-    # copies: per argument, private terms then public terms
+    # copies, per argument: per private term the numerator (MultiplierRight), then for m >= 2
+    # the components j = 0..m-1 (MultiplierLeft or MultiplierRight); then the public coeffs
     copies = []                      # the copied LCs u
-    nums, coeffs = [], []            # per pole: numerator LC; per argument: public coeffs
-    for widths, priv, pub in args:
-        for num, _ in priv:
-            if any(x[0] == "R" for x, _ in num if x != ONE):
-                copies.append(num)
-                nums.append([(("Y", len(copies) - 1), 1)])
-            else:
-                nums.append(num)
-        cs = []
-        for coeff, row in pub:
-            if any(x[0] == "R" for x, _ in coeff if x != ONE):
-                copies.append(coeff)
-                cs.append(([(("Y", len(copies) - 1), 1)], row))
-            else:
-                cs.append((coeff, row))
-        coeffs.append(cs)
+
+    def copied(lc, kinds):
+        if any(x != ONE and x[0] in kinds for x, _ in lc):
+            copies.append(lc)
+            return [(("Y", len(copies) - 1), 1)]
+        return lc
+
+    nums, comps, coeffs = [], [], []  # per pole: numerator, components; per argument: publics
+    for m, priv, pub in args:
+        for num, tup in priv:
+            nums.append(copied(num, ("R",)))
+            comps.append([copied(x, ("L", "R")) for x in tup] if m >= 2 else list(tup))
+        coeffs.append([(copied(coeff, ("R",)), row) for coeff, row in pub])
     n_o = n_r + k + nw + len(copies)
     nlin = max(0, n_o - nm2)
     partition = [["nO", e] if e < nm2 else ["lO", e - nm2] for e in range(n_o)]
@@ -1624,50 +1867,49 @@ def bld_lower(b, fin):
         w_m.append(t)
         a_m.append(c)
     w_l, a_l = [], []
-    for j in range(k):
+    for j in range(k):                                   # 1. input copies
         w_l.append([(cO(n_r + j), L - 1)])
         a_l.append(0)
-    for lc in b.r1cs:
+    for lc in b.r1cs:                                    # 2. R1CS constraints
         t, c = low(lc)
         w_l.append(t)
         a_l.append(c)
-    for g, (l, r, _) in enumerate(b.products):
+    for g, (l, r, _) in enumerate(b.products):           # 3. product inputs
         for wcol, lc in ((cL(n_r + g), l), (cR(n_r + g), r)):
             t, c = low(lc, L - 1)
             w_l.append([(wcol, 1)] + t)
             a_l.append(c)
-    for i, (widths, _, tup) in enumerate(poles):
-        row, aff = [(cD(i), 1)], 0
-        for o, lc in zip(bld_offsets(widths), tup):
-            t, c = low(lc, -pow(2, o, L) % L)
-            row += t
-            aff += c
-        w_l.append(row)
-        a_l.append(aff % L)
-    for y, u in enumerate(copies):
+    for i, (m, _, _) in enumerate(poles):                # 4. pole rows of m = 1 arguments
+        if m == 1:
+            t, c = low(comps[i][0], L - 1)
+            w_l.append([(cD(i), 1)] + t)
+            a_l.append(c)
+    for y, u in enumerate(copies):                       # 5. copies
         t, c = low(u, L - 1)
         w_l.append([(col(("Y", y)), 1)] + t)
         a_l.append(c)
+    tuples = [(i, [low(x) for x in comps[i]]) for i, (m, _, _) in enumerate(poles) if m >= 2]
     recip, p = [], 0
-    for (widths, priv, _), cs in zip(args, coeffs):
+    for (m, priv, _), cs in zip(args, coeffs):
         terms, consts = [], []
         for _ in priv:
             terms.append((cP(p), 1, None))
             p += 1
         for coeff, row in cs:
-            t = bld_pack(widths, row)
-            terms += [(cc, c, t) for cc, c in low(coeff)[0]]
+            t = [e % L for e in row]  # the pole polynomial (row_0, ..., row_{m-1})
+            terms += [(cc, c, list(t)) for cc, c in low(coeff)[0]]
             if any(x == ONE for x, _ in coeff):
-                consts.append((bld_constant(coeff), t))
+                consts.append((bld_constant(coeff), list(t)))
         recip.append({"terms": terms, "consts": consts})
     rc = {"n_p": n_p, "n_m": n_m, "n_o": n_o, "n_v": 1, "n_lin": nlin, "k": k, "n_l": len(w_l),
           "f_l": int(k > 0), "f_m": 0, "partition": partition, "w_n": w_n, "a_n": a_n,
-          "w_m": w_m, "a_m": a_m, "w_l": w_l, "a_l": a_l, "recip": recip}
+          "w_m": w_m, "a_m": a_m, "w_l": w_l, "a_l": a_l, "recip": recip, "tuples": tuples}
     recip_check_shape(rc)
     wit = None
     if W is not None:
         pad = lambda v: (v + [0] * n_r)[:n_r]  # noqa: E731
-        w_D = [bld_pack(widths, [b.eval(lc, W) for lc in tup]) for widths, _, tup in poles]
+        # w_D: the value of x_0 for m = 1, and 0 (ignored, spec 4.3) for a tuple pole
+        w_D = [b.eval(tup[0], W) if m == 1 else 0 for m, _, tup in poles]
         w_L = pad(list(b.aL)) + [b.eval(l, W) for l, _, _ in b.products]
         w_R = pad(list(b.aR)) + [b.eval(r, W) for _, r, _ in b.products]
         w_O = pad(list(b.aO)) + list(b.v) + list(W) + [b.eval(u, W) for u in copies]
@@ -1678,90 +1920,110 @@ def bld_lower(b, fin):
 
 def bld_semantic(b, fin):
     """Direct check of the program for the prover's values, independent of the lowering:
-    R1CS constraints and multipliers, products, lookups (each tuple a row; components of
-    tuples with m >= 2 in range), and every argument of A vanishing as a rational function of
-    X (terms grouped by pole value). Returns True iff all hold."""
+    R1CS constraints and multipliers, products, lookups (each tuple a row), and every argument
+    of A cancelling per tuple (spec 7.2: for every tuple value, component by component, the
+    numerators of its terms sum to zero). Returns True iff all hold."""
     W = fin["wit"]
     ok = all(b.eval(lc, W) == 0 for lc in b.r1cs)
     ok &= all(x * y % L == z for x, y, z in zip(b.aL, b.aR, b.aO))
     ok &= all(b.eval(l, W) * b.eval(r, W) % L == b.eval(o, W) for l, r, o in b.products)
     for t, tup in b.lookups:
         vals = [b.eval(lc, W) for lc in tup]
-        assert any(vals == [e % L for e in row] for row in b.tables[t][1])  # else prover error
-    for widths, priv, pub in fin["args"]:
+        assert any(vals == [e % L for e in row] for row in b.tables[t])  # else prover error
+    for m, priv, pub in fin["args"]:
         tot = {}
         for num, tup in priv:
-            vals = [b.eval(lc, W) for lc in tup]
-            if len(widths) >= 2:
-                # the bound rule (7.3) with all one-column lookups holding: in range
-                assert all(x < 2**w for x, w in zip(vals, widths)), "bound rule unsound"
-            pole = bld_pack(widths, vals)
-            tot[pole] = (tot.get(pole, 0) + b.eval(num, W)) % L
+            key = tuple(b.eval(lc, W) for lc in tup)
+            assert len(key) == m
+            tot[key] = (tot.get(key, 0) + b.eval(num, W)) % L
         for coeff, row in pub:
-            pole = bld_pack(widths, row)
-            tot[pole] = (tot.get(pole, 0) + b.eval(coeff, W)) % L
+            key = tuple(e % L for e in row)
+            tot[key] = (tot.get(key, 0) + b.eval(coeff, W)) % L
         ok &= not any(tot.values())
     return bool(ok)
 
 
+def bld_check_lowered(b, fin, rng, eta=None):
+    """The lowered circuit (spec 4.1 at (eta, alpha), eta random if None) satisfied?"""
+    rc, wit = bld_lower(b, fin)
+    if eta is None:
+        eta = rng.randrange(L)
+    recip_ok, ord_ok = recip_satisfied(rc, wit, rng.randrange(1, L), eta)
+    return recip_ok and ord_ok
+
+
 def bld_self_check():
-    """Checks of the claims of spec 7.3 on small random instances: (1) the packing is
-    injective on in-range components and below 2^{sum w}; (2) a component accepted by the bound
-    rule takes only values in [0, 2^w) when its variables are in their recorded ranges, and its
-    bound is attained (so a rejection by size is exact); (3) the rejection cases are exactly
-    those the spec lists."""
+    """Checks of the claims of spec 7.2-7.3 and 7.6 on small instances: (1) a tuple that packs
+    to a row with base 16 but is not one, (x_0 + 16, x_1 - 1), does not cancel the row: the
+    lowered circuit is unsatisfied at random eta, and satisfied exactly at the bad challenge
+    eta = 16 (the compression is sum_j eta^j x_j, component j with eta^j); (2) random small
+    arguments with m = 1..3 over a tiny value set (many equal and colliding tuples): the
+    lowered circuit is satisfied at random eta iff the terms cancel per tuple, and m = 1
+    arguments lower to v1 circuits; (3) copies: components reading MultiplierLeft/Right are
+    copied in the order of spec 7.6, numerators reading MultiplierRight too."""
     rng = random.Random(70)
-    for _ in range(200):
-        m = rng.randrange(1, 4)
-        widths = [rng.randrange(1, 4) for _ in range(m)]
-        seen = {}
-        for xs in itertools.product(*[range(2**w) for w in widths]):
-            p = bld_pack(widths, list(xs))
-            assert p < 2**sum(widths) and p not in seen
-            seen[p] = xs
-        assert len(seen) == 2**sum(widths)
+    for x0, x1 in ((3, 5), (0, 1), (15, 15), (2**63, 7)):
+        b = Builder()
+        A, B = b.witness(x0 + 16), b.witness(x1 - 1)
+        b.reciprocal(2, [([(ONE, 1)], [[(A, 1)], [(B, 1)]])], [([(ONE, L - 1)], [x0, x1])])
+        fin = bld_finalize(b)
+        assert not bld_semantic(b, fin)
+        assert not bld_check_lowered(b, fin, rng)
+        assert bld_check_lowered(b, fin, rng, eta=16)  # the packing with base 16 collides
+        assert not bld_check_lowered(b, fin, rng, eta=0)
     for _ in range(300):
-        nv = rng.randrange(1, 4)
-        xs = [("W", i) for i in range(nv)]
-        bounds = {x: rng.randrange(1, 4) for x in xs if rng.random() < 0.9}
-        lc = [(rng.choice(xs + [ONE]), rng.choice([0, 1, 2, 3, 5, L - 1, L - 2, U64 - 1, U64]))
-              for _ in range(rng.randrange(1, 5))]
-        w = rng.randrange(1, 8)
-        bd = bld_lc_bound(lc, bounds)
-        merged = {}
-        for x, c in lc:
-            merged[x] = (merged.get(x, 0) + c) % L
-        live = [x for x in xs if merged.get(x, 0)]
-        expect_defined = (merged.get(ONE, 0) < U64 and all(merged[x] < U64 for x in live)
-                          and all(x in bounds for x in live))
-        assert (bd is not None) == expect_defined
-        if bd is None:
+        b = Builder()
+        m = rng.randrange(1, 4)
+        vals = [0, 1, 2, L - 1]
+        ws = [b.witness(rng.choice(vals)) for _ in range(4)]
+        priv, pub = [], []
+        for _ in range(rng.randrange(0, 4)):
+            num = [(ONE, rng.choice([1, L - 1, 2]))]
+            tup = [[(rng.choice(ws), 1), (ONE, rng.choice([0, 1]))] for _ in range(m)]
+            priv.append((num, tup))
+        for _ in range(rng.randrange(0, 3)):
+            pub.append(([(rng.choice(ws), rng.choice([1, L - 1]))],
+                        [rng.choice([0, 1, 2, 3]) for _ in range(m)]))
+        # make it cancel sometimes: add the negated private terms as public ones if possible
+        if rng.random() < 0.5:
+            for num, tup in list(priv):
+                v = tuple(b.eval(lc) for lc in tup)
+                if all(x < U64 for x in v):
+                    pub.append(([(ONE, -num[0][1] % L)], list(v)))
+            pub = [p for p in pub if p[0][0][0] == ONE]
+        b.reciprocal(m, priv, pub)
+        if not b.args:
             continue
-        vals = []
-        for ass in itertools.product(*[range(2**bounds[x]) for x in live]):
-            env = dict(zip(live, ass))
-            vals.append(sum(c * (1 if x == ONE else env.get(x, 0)) for x, c in lc) % L)
-        assert max(vals) == bd and min(vals) >= 0
-        assert bld_bound_ok(lc, bounds, w) == all(v < 2**w for v in vals)
-    a, c, u = ("W", 0), ("W", 1), ("W", 2)
-    bounds = {a: 2, c: 2}
-    for lc, w, ok in (
-            ([(a, 1)], 2, True), ([(a, 1), (ONE, 1)], 2, False),          # bound 4 = 2^2
-            ([(a, 1), (c, 4)], 4, True), ([(a, 1), (c, 4), (ONE, 1)], 4, False),
-            ([(u, 1)], 8, False),                                          # unbounded
-            ([(a, 1), (u, 1), (u, L - 1)], 2, True),                       # merged to zero
-            ([(a, 2), (a, L - 1)], 2, True),                               # merged to 1
-            ([(a, L - 1), (ONE, 3)], 2, False),                            # -1 >= 2^64
-            ([(a, U64)], 252, False), ([(a, U64 - 1)], 66, True),
-            ([(ONE, U64)], 252, False), ([(ONE, U64 - 1)], 64, True), ([], 1, True),
-            ([(ONE, 5), (ONE, L - 3)], 2, True), ([(ONE, 1), (ONE, L - 2)], 252, False)):
-        assert bld_bound_ok(lc, bounds, w) == ok, (lc, w)
+        fin = bld_finalize(b)
+        rc, _ = bld_lower(b, fin)
+        assert recip_uses_eta(rc) == (m >= 2) == bld_uses_eta(fin)
+        assert bld_semantic(b, fin) == bld_check_lowered(b, fin, rng)
+    b = Builder()
+    Lm, Rm, Om = b.allocate_multiplier(3, 4)
+    W0 = b.witness(5)
+    b.reciprocal(2, [([(Rm, 1)], [[(Lm, 1)], [(W0, 1)]]),        # copies: num, comp 0
+                     ([(Lm, 1)], [[(W0, 1)], [(Rm, 0), (ONE, 4)]])],  # comp 1 (coefficient 0)
+                 [([(Rm, L - 1)], [3, 5]), ([(Lm, L - 1)], [5, 4])])  # copy: coeff 0
+    b.reciprocal(1, [([(Rm, 1)], [[(Lm, 1)]])], [([(ONE, L - 4)], [3])])  # copy: num only
+    fin = bld_finalize(b)
+    rc, wit = bld_lower(b, fin)
+    n_r, nw, k = 1, 1, 0
+    first = n_r + k + nw  # w_O index of copy 0
+    ys = [2 * (rc["n_p"] + rc["n_m"]) + first + y for y in range(5)]
+    assert rc["n_o"] == first + 5
+    assert rc["w_n"] == [[(ys[0], 1)], [(rc["n_p"], 1)], [(ys[4], 1)]]
+    cW0 = 2 * (rc["n_p"] + rc["n_m"]) + n_r + k  # Witness(0)
+    assert rc["tuples"][0] == (0, [([(ys[1], 1)], 0), ([(cW0, 1)], 0)])
+    assert rc["tuples"][1][1][1] == ([(ys[2], 1)], 0)
+    assert rc["recip"][0]["terms"][2] == (ys[3], 1, [3, 5])
+    assert wit["w_O"][first:] == [4, 3, 4, L - 4, 4]
+    assert bld_semantic(b, fin) == bld_check_lowered(b, fin, rng)
 
 
 def bld_agreement_check(b, rng):
     """For a program without construction error: change one prover value at a time (inputs,
     multiplier wires, witnesses) and check that the direct semantic check and the lowered
-    circuit (spec 4.1 at a random alpha) agree. Returns the number of variants compared."""
+    circuit (spec 4.1 at random (eta, alpha)) agree. Returns the number of variants compared."""
     count = 0
     for attr in ("v", "aL", "aR", "aO", "wit"):
         for i in range(len(getattr(b, attr))):
@@ -1771,8 +2033,6 @@ def bld_agreement_check(b, rng):
                 fin = bld_finalize(b2)
             except BuilderProverError:
                 continue
-            rc, wit = bld_lower(b2, fin)
-            recip_ok, ord_ok = recip_satisfied(rc, wit, rng.randrange(1, L))
-            assert bld_semantic(b2, fin) == (recip_ok and ord_ok), (attr, i)
+            assert bld_semantic(b2, fin) == bld_check_lowered(b2, fin, rng), (attr, i)
             count += 1
     return count

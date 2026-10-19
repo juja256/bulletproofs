@@ -1269,6 +1269,25 @@ mod tests {
         }
     }
 
+    /// Challenges that may be zero (lambda, the norm argument's gamma): honest proofs still
+    /// verify (spec §3.4); rho, beta, delta, tau are checked above. The verifier rejects a zero
+    /// rho/beta/delta/tau before looking at the proof, so no proof crafted for it can pass.
+    #[test]
+    fn zero_lambda_and_gamma_are_complete() {
+        let mut rng = ChaCha20Rng::seed_from_u64(16);
+        let s = Shape { n_m: 8, n_o: 3, n_v: 2, n_lin: 2, k: 2, n_l: 5, f_l: true, f_m: true, spread: false };
+        let (c, w) = instance(&mut rng, &s);
+        let (pc, bp) = gens_for(&c);
+        let g = BpppGens::new(&pc, &bp, c.n_lin, c.n_m).unwrap();
+        let V = commitments(&g, &w);
+        for zero in [1usize, 5, 6, 7] {
+            let mut chal: Vec<Scalar> = (2..20u64).map(Scalar::from).collect();
+            chal[zero] = Scalar::ZERO;
+            let proof = prove(&c, &g, &V, &w, &mut Replay::new(chal.clone()), &mut rng).unwrap();
+            proof.verify(&c, &g, &V, &mut Replay::new(chal)).unwrap_or_else(|e| panic!("challenge {}: {:?}", zero, e));
+        }
+    }
+
     #[test]
     fn malformed_inputs_are_errors() {
         let mut rng = ChaCha20Rng::seed_from_u64(15);

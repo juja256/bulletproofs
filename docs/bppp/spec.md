@@ -238,7 +238,8 @@ $d(T) = \hat f(T) - g(T)$:
 
 $$r_{S,0} = -d_{-1}, \qquad r_{S,j} = \beta^{-1} d_{e_j - 1} \quad (j = 1..7).$$
 
-These cancel every coefficient of $d$ except $d_3 = \hat f_3$. Then $C_S$ as in §3.3 with
+These cancel every coefficient of $d$ except $d_3 = \hat f_3$. The prover refuses (returns an
+error) when $\hat f_3 \ne 0$, i.e. for a witness that does not satisfy the circuit. Then $C_S$ as in §3.3 with
 $(r_S, l_S, n_S)$; absorb it; $\tau$ = challenge, non-zero.
 
 ### 3.7 Norm argument

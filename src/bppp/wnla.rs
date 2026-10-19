@@ -73,8 +73,8 @@ fn more(a: usize, b: usize) -> bool {
 pub fn rounds(mut a: usize, mut b: usize) -> (usize, usize, usize) {
     let mut k = 0;
     while more(a, b) {
-        a = (a + 1) / 2;
-        b = (b + 1) / 2;
+        a -= a / 2; // ceil(a / 2) without overflow
+        b -= b / 2;
         k += 1;
     }
     (k, a, b)
@@ -258,7 +258,7 @@ impl WnlaProof {
             } else {
                 rhos.push(Scalar::ONE);
             }
-            b_r = (b_r + 1) / 2;
+            b_r -= b_r / 2;
         }
         let v = ip(&c_f, &self.l) + wip(&self.n, &self.n, rho_r * rho_r);
 

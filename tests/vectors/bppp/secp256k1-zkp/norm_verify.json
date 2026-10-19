@@ -1,0 +1,150 @@
+{
+ "source": "BlockstreamResearch/secp256k1-zkp, src/modules/bppp/test_vectors/verify.h at commit 42ae776d (master, 2026-10)",
+ "license": "MIT (secp256k1-zkp; bppp module (c) 2020 Andrew Poelstra, 2022 Sanket Kanjalkar)",
+ "format": "as norm_prove.json; commit = 33-byte compressed commitment C (all zero = infinity); result = whether secp256k1-zkp's verifier accepts",
+ "gens": [
+  "03af2c40ad03cdc5768c071e58d68c7345baebb53f40fa8bbf736e7b4a5406ed32",
+  "03cc1119222ca10a4523af9b400da45e0624f45f078988cd71ae77c1f5874efca5",
+  "03de61b18f2cac18f5e4068f6555a1305ef5f484ed6bddc2cce85138b8a54c43bd",
+  "02a5f98c1f822dc6f30f53db7477c79104b0b1a617b291f48b933ebb73153e5ad1",
+  "0244f5c64e77608183ffc28e06fe670c9a4bf234b9eae937da30e23227f3885f2a",
+  "021d495d04ed619537dd95b14f640e1efb479fa7d7e07ab1028195d1a57eb2748f",
+  "0326a5ece9714637ac3d748426cb7ce8fe4eb06d703d00101a3a5bb8aa29599315",
+  "03e1a539447516285fba69a24a2ac35b631f401036f94cd2760fcf7f50306e2b1d"
+ ],
+ "cases": [
+  {
+   "n_len": 1,
+   "c": [
+    "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036413c"
+   ],
+   "rho": "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036413a",
+   "commit": "03d753315baa04d57c4a349498bca91ed6a3bf81fc38307c3b7cfcc6ff1a133672",
+   "proof": "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036413ffffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036413e",
+   "result": 1
+  },
+  {
+   "n_len": 1,
+   "c": [
+    "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036413c"
+   ],
+   "rho": "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036413a",
+   "commit": "026c09d7062d1c070a643482f64603eb243e540fdaaf3a695f86b6d2c206e949c7",
+   "proof": "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036413ffffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036413e",
+   "result": 0
+  },
+  {
+   "n_len": 1,
+   "c": [
+    "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036413c"
+   ],
+   "rho": "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036413a",
+   "commit": "03d753315baa04d57c4a349498bca91ed6a3bf81fc38307c3b7cfcc6ff1a133672",
+   "proof": "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036413ffffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141",
+   "result": 0
+  },
+  {
+   "n_len": 1,
+   "c": [
+    "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036413c"
+   ],
+   "rho": "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036413a",
+   "commit": "03d753315baa04d57c4a349498bca91ed6a3bf81fc38307c3b7cfcc6ff1a133672",
+   "proof": "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141",
+   "result": 0
+  },
+  {
+   "n_len": 1,
+   "c": [
+    "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036413c"
+   ],
+   "rho": "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036413a",
+   "commit": "03d753315baa04d57c4a349498bca91ed6a3bf81fc38307c3b7cfcc6ff1a133672",
+   "proof": "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036413ffffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd03641",
+   "result": 0
+  },
+  {
+   "n_len": 2,
+   "c": [
+    "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036413c"
+   ],
+   "rho": "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364136",
+   "commit": "03836ad42dd20249c86e53225324da5208c0624ccbb313d7145968475600c08dba",
+   "proof": "0000000000000000000000000000000000000000000000000000000000000000054cb9d434a2d6d54c0f2e2ce382174863e0ae6bd7649d432b6e6e1c62554bc5733d747b7843f48b7c8410008b12afa4f1f40196218be90501f8237a8f66c9dee1fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036413e",
+   "result": 0
+  },
+  {
+   "n_len": 2,
+   "c": [
+    "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036413c",
+    "0000000000000000000000000000000000000000000000000000000000000003",
+    "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364130",
+    "000000000000000000000000000000000000000000000000000000000000000d"
+   ],
+   "rho": "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036413a",
+   "commit": "03cf7f08f58a06745cdbcec651f3e5e4dcadf4403cfae678be492d90c8d0163d78",
+   "proof": "00d2ece253972868225934efe47b874de957d5b7c772f4c9ea661459e1a9d5b210dfe2fff5a4386bfe3689e49d909f7119e6a31eaaaa4efec2d337bbdedb4643c201425ffcc625a0b4f07699f47ce98382ed7c95bad0e65b88fd38ea2354d4bdd437b82b49af81fdbe88b2e53ff4305200639dae8244e962872a238910e49a649f71d932573bcbac30ae7161e9501fcb499c52ba0cc400587363d342de425ec597e5da8876496c8b9299eed0a9eb6ecae19381562ecaf38ef004d296d8dbeeee1c44",
+   "result": 1
+  },
+  {
+   "n_len": 4,
+   "c": [
+    "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036413c"
+   ],
+   "rho": "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364134",
+   "commit": "027aaab27ea55b7708e543b6227fc9ac531032617b7dacb1b6f6acde6379829c24",
+   "proof": "00bc4c42677169526a65fea0cb3f588b48486e59fc555110b9bf6a7dbf32344e7dbad5cbcc19edaa9f8d93265e3f3eaadf0b1cb3dc37b6dbae436392b5ff0d1c77027e2bb887858113701f03657dd89183e57e8b9e6f1c089c9c5fa4125fd3eee2747a2c583a294f6410e789bfb2e5d9d5c562830ca8dd1e246dd1588d8074f3d93a687bf512c6c23f7147dfcfc8e2c459df4fec86e9f931946a5fd91e6b09cdcf5dfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036413e",
+   "result": 1
+  },
+  {
+   "n_len": 4,
+   "c": [
+    "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036413c"
+   ],
+   "rho": "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364134",
+   "commit": "022d4ff9b71522bcb08bf8ba310a80767ae9a98300bc5a01cce9008356ea77eb75",
+   "proof": "00bc4c42677169526a65fea0cb3f588b48486e59fc555110b9bf6a7dbf32344e7dbad5cbcc19edaa9f8d93265e3f3eaadf0b1cb3dc37b6dbae436392b5ff0d1c77027e2bb887858113701f03657dd89183e57e8b9e6f1c089c9c5fa4125fd3eee2747a2c583a294f6410e789bfb2e5d9d5c562830ca8dd1e246dd1588d8074f3d93a687bf512c6c23f7147dfcfc8e2c459df4fec86e9f931946a5fd91e6b09cdcf5dfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036413e",
+   "result": 0
+  },
+  {
+   "n_len": 1,
+   "c": [
+    "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036413c"
+   ],
+   "rho": "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364134",
+   "commit": "000000000000000000000000000000000000000000000000000000000000000000",
+   "proof": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+   "result": 1
+  },
+  {
+   "n_len": 2,
+   "c": [
+    "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036413c"
+   ],
+   "rho": "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364134",
+   "commit": "03628ac2f1f200e081bda0a96d2553b417c10293503e91d4d13a828902247849a5",
+   "proof": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036413a",
+   "result": 1
+  },
+  {
+   "n_len": 2,
+   "c": [
+    "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036413c"
+   ],
+   "rho": "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364134",
+   "commit": "03628ac2f1f200e081bda0a96d2553b417c10293503e91d4d13a828902247849a5",
+   "proof": "01000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036413a",
+   "result": 0
+  },
+  {
+   "n_len": 0,
+   "c": [
+    "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036413c"
+   ],
+   "rho": "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364134",
+   "commit": "027d5f4b11c0e42e4c1b56aef05faad8770c9371a292f989a2b4699b468a03f150",
+   "proof": "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364134fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036413a",
+   "result": 0
+  }
+ ]
+}

@@ -129,13 +129,13 @@ fn bppp_proofs_are_pinned() {
         ("builder §7", h(&r1cs_proof(true))),
     ];
     let want: [&str; 7] = [
-        "91080da4e4d50c29fff3e01e18363ae76f57d2e81db442c414d08156f99712ec",
-        "4e0dcba54dcc55dc6b3b1722cb8b64da4b0734c32b3b9a46b933cb621735ff15",
-        "016aa2b521af9a13094d465cac4ae2f19d17b98b00da4a1f3487d62d9dcab4ee",
-        "3b61627a206703a65a48187c73559cfc02585e89a89b3672d9756a5fe7842373",
-        "cfb42059fbfa5264b6136c16d7bccb20047444825d6234f93b184466fd86b5d3",
-        "c75a29c28b2178c0de11e85941fdd26888fe9b4ddcd8f22f4d1f0f02faecde17",
-        "772b2ba4e8de836a35b57cdc079ac7d782ff7e3ab84ff734babeb98edcd3d06f",
+        "15028aab7946ac21d4b1bae04ef149261a623151293fbb1d31ca08de6f51cdd0",
+        "ebb2104f71a77d994f5127546617a38d1c8a20c3674f3f40e39038c18b82ff62",
+        "8ffe2a23d9fc9ab7a56602c7de5ef5424f1ed87db14ac7b08fecdb65d1613653",
+        "2a48d4d8030d829f69b59399816e9bad94c0723e6eb09f8ada733f04ccd1c176",
+        "c0901efd7fa5282e8e55cb0b79016df2a5b7265869b63d88b0df2d28bc4fb713",
+        "fee86b9073002e923bfa95e321e8da522fda06377b601cdadcaf9594179a4a32",
+        "fea3bc9326c3da8494bd5356c1bb0fdaca23621081cc0b403b967492fa562209",
     ];
     for (name, g) in &got {
         println!("{}: {}", name, g);
@@ -143,4 +143,63 @@ fn bppp_proofs_are_pinned() {
     for ((name, g), w) in got.iter().zip(want) {
         assert_eq!(g, w, "{}", name);
     }
+}
+
+/// An RNG that returns only zeros.
+struct ZeroRng;
+impl rand_chacha::rand_core::RngCore for ZeroRng {
+    fn next_u32(&mut self) -> u32 {
+        0
+    }
+    fn next_u64(&mut self) -> u64 {
+        0
+    }
+    fn fill_bytes(&mut self, d: &mut [u8]) {
+        d.iter_mut().for_each(|x| *x = 0)
+    }
+    fn try_fill_bytes(&mut self, d: &mut [u8]) -> Result<(), rand_chacha::rand_core::Error> {
+        self.fill_bytes(d);
+        Ok(())
+    }
+}
+impl rand_chacha::rand_core::CryptoRng for ZeroRng {}
+
+/// The prover's randomness is mixed with the circuit digest and the witness (spec §1): with
+/// a broken RNG, two witnesses with the same `w_O` (left and right inputs swapped) still get
+/// different blindings of `C_O`; the same witness gives the same proof.
+#[test]
+fn prover_randomness_depends_on_the_witness() {
+    let pc = PedersenGens::default();
+    let bp = BulletproofGens::new(16, 1);
+    let n = 8;
+    let gens = BpppGens::new(&pc, &bp, 0, n).unwrap();
+    let (mut c, w1) = circuit(n, 3);
+    c.w_l = SparseMatrix::new(3 * n);
+    c.a_l = vec![];
+    let w2 = CircuitWitness { w_l: w1.w_r.clone(), w_r: w1.w_l.clone(), ..w1.clone() };
+    let prove = |w: &CircuitWitness| bppp::circuit::prove(&c, &gens, &[], w, &mut Transcript::new(b"z"), &mut ZeroRng).unwrap();
+    let (p1, p2) = (prove(&w1), prove(&w2));
+    assert_ne!(p1.C_O, p2.C_O);
+    assert_eq!(prove(&w1), p1);
+    p2.verify(&c, &gens, &[], &mut Transcript::new(b"z")).unwrap();
+}
+
+/// The prover's randomness is bound to the live transcript (found in review): with a broken
+/// RNG, the same circuit and witness proven in two contexts must not reuse blindings (that
+/// would leak the witness through the different challenges).
+#[test]
+fn prover_randomness_binds_the_transcript_context() {
+    let pc = PedersenGens::default();
+    let bp = BulletproofGens::new(16, 1);
+    let gens = BpppGens::new(&pc, &bp, 0, 8).unwrap();
+    let (c, w) = circuit(8, 4);
+    let p1 = bppp::circuit::prove(&c, &gens, &[], &w, &mut Transcript::new(b"A"), &mut ZeroRng).unwrap();
+    let p2 = bppp::circuit::prove(&c, &gens, &[], &w, &mut Transcript::new(b"B"), &mut ZeroRng).unwrap();
+    assert_ne!(p1.C_L, p2.C_L);
+    assert_ne!(p1.C_O, p2.C_O);
+    let st = RangeStatement::new(16, vec![(0, 1 << 64)]).unwrap();
+    let bp = BulletproofGens::new(st.generators_capacity(), 1);
+    let (r1, _) = bppp::RangeProof::prove(&st, &pc, &bp, &[5], &[Scalar::ONE], &mut Transcript::new(b"A"), &mut ZeroRng).unwrap();
+    let (r2, _) = bppp::RangeProof::prove(&st, &pc, &bp, &[5], &[Scalar::ONE], &mut Transcript::new(b"B"), &mut ZeroRng).unwrap();
+    assert_ne!(r1.to_bytes()[..64], r2.to_bytes()[..64]);
 }

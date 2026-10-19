@@ -23,6 +23,16 @@ Source: Eagen, Kanjalkar, Ruffing, Nick, *Bulletproofs++*, ePrint 2022/510 (vers
   reduced modulo $\ell$ (as everywhere in this crate).
 - Prover randomness is drawn with `Scalar::random` in the order each protocol lists; the test
   vectors depend on that order.
+- The public provers (`circuit::prove`, `reciprocal::prove`, `prove_two_phase` and the front ends
+  built on them) draw it, after absorbing the statement (dimensions, `G`, `H_0`, digest, inputs),
+  from the transcript's RNG (`BpppTranscript::rng_builder`: merlin's `build_rng`, bound to
+  everything absorbed so far, including the caller's own context), rekeyed with `"protocol"`
+  (`circuit` or `reciprocal`), `"digest"` (§3.9, §4.4) and `"witness"` = SHA3-256 of the witness
+  scalars (circuit: $w_L, w_R, w_O$, the inputs, their blindings; reciprocal: $w_D, w_L$, the
+  elements of $w_O$ not in slot $l_R$, the inputs, the blindings — the late values are not known
+  before $\alpha$), then finalized with the caller's RNG, as BP's `TranscriptRng`. Defense in depth
+  against a weak RNG: the same witness proven in another context gets other blindings. The vectors
+  use the inner functions with explicit randomness.
 
 ## 2. Weighted norm linear argument (paper §4)
 
@@ -517,7 +527,7 @@ the committed values but not that a commitment has exactly the form $v B + s \ti
 The prover absorbs `domain_sep("bppp-r1cs v1")` after the transcript of the constraint system
 (the BP prover's domain separator and the `V` absorbed by `commit`) and runs §3 (`prove`, with
 the circuit digest). The prover's randomness is drawn from a transcript RNG rekeyed with the
-input blindings and the caller's RNG.
+input blindings and the caller's RNG, and then rekeyed again by `prove` (§1).
 
 The prover's constraint store drops constants (as for BP, so the BP backend pays nothing for
 BP++): it recomputes each constant as $-\sum c\, x$ over its witness. For a satisfying witness these

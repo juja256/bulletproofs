@@ -16,7 +16,7 @@ use sha3::{Digest, Sha3_256};
 use super::circuit::{self, ArithmeticCircuit, CircuitProof, CircuitWitness, Slot};
 use super::gens::BpppGens;
 use super::sparse::SparseMatrix;
-use super::transcript::BpppTranscript;
+use super::transcript::{BpppTranscript, DynRng, Randomness};
 use crate::errors::ProofError;
 
 /// A reciprocal row (spec §4.1): `sum c * w'[col] / (X + t)` over the terms (no pole: `c *
@@ -431,7 +431,16 @@ pub fn prove<T: BpppTranscript, R: RngCore + CryptoRng>(
     transcript: &mut T,
     rng: &mut R,
 ) -> Result<CircuitProof, ProofError> {
-    prove_impl(c, gens, V, w, transcript, rng, true)
+    let fixed = |_: Scalar, _: &[Scalar]| Ok(LateWitness { w_r: w.w_r.clone(), w_o_late: c.late_elements(&w.w_o) });
+    prove_with(c, gens, V, w, fixed, transcript, Randomness::Derived(rng), true)
+}
+
+/// The prover's RNG from the transcript, the digest and the initial witness (spec §1; the late
+/// values are not known to the two-phase prover before `alpha`, and both provers must agree).
+fn rekeyed<T: BpppTranscript, R: RngCore + CryptoRng>(t: &T, c: &ReciprocalCircuit, w: &ReciprocalWitness, rng: &mut R) -> merlin::TranscriptRng {
+    let early_o = w.w_o.iter().zip(&c.partition).filter(|(_, (s, _))| *s != Slot::LinR).map(|(x, _)| x);
+    let secrets = w.w_d.iter().chain(&w.w_l).chain(early_o).chain(w.v.iter().flatten()).chain(&w.s);
+    super::transcript::prover_rng(t, b"reciprocal", &c.digest(), secrets, rng)
 }
 
 pub(crate) fn prove_impl<T: BpppTranscript, R: RngCore + CryptoRng>(
@@ -446,7 +455,7 @@ pub(crate) fn prove_impl<T: BpppTranscript, R: RngCore + CryptoRng>(
     let fixed = |_: Scalar, _: &[Scalar]| {
         Ok(LateWitness { w_r: w.w_r.clone(), w_o_late: c.late_elements(&w.w_o) })
     };
-    prove_with(c, gens, V, w, fixed, transcript, rng, require_satisfied)
+    prove_with(c, gens, V, w, fixed, transcript, Randomness::Given(rng), require_satisfied)
 }
 
 /// The values committed after `alpha` (spec §4.3, two-phase prover): `w_R`, and the elements
@@ -478,7 +487,7 @@ where
     R: RngCore + CryptoRng,
     F: FnOnce(Scalar, &[Scalar]) -> Result<LateWitness, ProofError>,
 {
-    prove_with(c, gens, V, w, late, transcript, rng, true)
+    prove_with(c, gens, V, w, late, transcript, Randomness::Derived(rng), true)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -489,7 +498,7 @@ fn prove_with<T, R, F>(
     w: &ReciprocalWitness,
     late: F,
     transcript: &mut T,
-    rng: &mut R,
+    randomness: Randomness<R>,
     require_satisfied: bool,
 ) -> Result<CircuitProof, ProofError>
 where
@@ -503,9 +512,18 @@ where
     if V.len() != c.k {
         return Err(ProofError::FormatError);
     }
+    absorb_statement(transcript, c, gens, V);
+    let mut derived;
+    let rng: &mut dyn rand_core::CryptoRngCore = match randomness {
+        Randomness::Given(r) => r,
+        Randomness::Derived(r) => {
+            derived = rekeyed(&*transcript, c, w, r);
+            &mut derived
+        }
+    };
+    let rng = &mut DynRng(rng);
     let w_l: Vec<Scalar> = w.w_d.iter().chain(&w.w_l).copied().collect();
     let mut ol = circuit::commit_ol(gens, c.n_lin, &c.partition, &w_l, &w.w_o, rng);
-    absorb_statement(transcript, c, gens, V);
     transcript.append_point(b"C_L", &ol.C_L);
     transcript.append_point(b"C_O", &ol.C_O);
     let alpha = transcript.challenge(b"alpha");

@@ -305,6 +305,19 @@ lookups each; `cargo bench --features "bppp yoloproofs" --bench bppp -- builder`
 At small $n$ BP++ pays for its linear slots: witnesses and multiplicities beyond the
 $N_p + N_m$ norm slots lengthen $H$ (phase 7).
 
+Large circuits (`examples/bppp_profile.rs`, one process per row for the peak memory; Xeon
+2.1 GHz, one thread; *vt* = feature `bppp-vartime`):
+
+| circuit | proof BP / BP++ | prove BP / BP++ / BP++ vt | verify BP / BP++ | peak RSS BP / BP++ |
+|---|---|---|---|---|
+| R1CS, 2^18 multipliers | 1569 / 1329 B | 40.4 / 44.3 / 33.3 s | 3.50 / 2.68 s | 360 / 475 MB |
+| R1CS, 2^20 multipliers | 1697 / 1457 B | 176 / 171 / 129 s | 15.7 / 11.5 s | 1238 / 1819 MB |
+| builder, 2^14 × range32 | 1601 / 1201 B | 20.3 / 17.2 / 14.1 s | 1.88 / 1.20 s | 100 / 165 MB |
+| builder, 2^16 × range32 | 1729 / 1329 B | 78.2 / 70.5 / 55.4 s | 7.38 / 4.68 s | 390 / 614 MB |
+
+`BatchVerifier` checks many proofs in one multiplication (128 × 64-bit range proofs: 111 ms
+instead of 168 ms one by one).
+
 Apple M4 Pro, single-threaded, `rustc 1.99.1`, release profile.
 
 ## About

@@ -57,7 +57,7 @@ optimised); the same circuit through the R1CS front end on BP++ 817 B at 2^10.
 Commands:
 
 ```sh
-cargo test --release --features "bppp parallel yoloproofs"   # everything (100 tests)
+cargo test --release --features "bppp parallel yoloproofs"   # everything (≈150 tests)
 cargo test --release --features yoloproofs                    # BP only, incl. golden
 cargo test --release                                          # default features
 python3 -I ref/gen_vectors.py && git diff --stat tests/vectors # must be empty
@@ -230,3 +230,21 @@ DESIGN (milestone M6). bpvm depends on this fork by git revision.
   The owner asked to discuss the builder's proof format and API (`BuilderProof`,
   `CircuitBuilder` vs `ConstraintSystem`, integration with bpvm) after this phase, so the
   format changes (drop `C_O`, builder overflow layout) wait for that discussion.
+- 2026-10-19 — phase 7, continued: oblivious (bitonic) multiplicity counting for large tables
+  (2^16 rows × 2^12 lookups 0.8 s instead of 13 s, constant time); prover RNG keyed with the
+  digest and the (initial) witness (regression pins updated); `BatchVerifier` (spec §3.11);
+  fuzz-style malformed-proof tests; zero lambda/gamma completeness. Large measurements in the
+  README: at 2^20 BP++ proves in 171 s (129 s vt) vs BP 176 s, verifies in 11.5 vs 15.7 s,
+  1457 vs 1697 B, but needs 1.82 vs 1.24 GB. `docs/bppp/builder-api-notes.md` prepares the
+  owner's API/format discussion.
+- 2026-10-19 — phase 7 review (most capable model): 0 Critical, 1 Important, 7 Minor. Fixed:
+  I1 the prover RNG is now derived from the live transcript after the statement (as BP's
+  `TranscriptRng`), then rekeyed with protocol, digest and witness hash — before, the same
+  witness in two contexts reused blindings under a weak RNG (test first; pins updated); M1
+  errata 19 and its script (shared discrete logs, special challenges, caveats); M2 debug
+  assertion in the oblivious sort; M3 empty batch verifies without generators, RNG documented;
+  M4 doc references; M5 witness hash zeroed with `Clear`; M6 VT chunk size, a deferred vector
+  that stops folding is materialised at once. Not done: M7 (cosmetic duplication). Mutants of
+  phase 7: 19 of 20 killed, the survivor (materialising one round later) is equivalent.
+  Tests: 139 (bppp parallel yoloproofs, also bppp-vartime), 70 (yoloproofs, golden unchanged),
+  34 (default). Phase 7 done except the format changes held for the owner's discussion.

@@ -875,6 +875,102 @@ mod tests {
         assert!(x.check().is_ok());
     }
 
+    /// Nothing committed after `alpha` (`w_R`, `LinR` slots) may enter a numerator or a
+    /// reciprocal row, with or without a pole; the verifier rejects (without panicking) a
+    /// circuit that breaks the rules. Found in review: these rules carry soundness.
+    #[test]
+    fn late_columns_are_rejected() {
+        let (c, _) = range_proof(4, 3, &digits_of(37, 4, 3), false); // inline: n_m = 1
+        assert!(c.check().is_ok());
+        let n_mm = c.n_p + c.n_m;
+        let w_r_col = n_mm + c.n_p;
+        let numerator_on = |col: usize, c: &ReciprocalCircuit| {
+            let mut x = c.clone();
+            let mut w_n = SparseMatrix::new(x.w_n.n_cols());
+            w_n.push_row(vec![(col, Scalar::ONE)]);
+            for _ in 1..x.n_p {
+                w_n.push_row(vec![]);
+            }
+            x.w_n = w_n;
+            x
+        };
+        let mut x = c.clone();
+        x.recip[0].terms.push((w_r_col, Scalar::ONE, None));
+        assert!(x.check().is_err(), "pole-free term on w_R");
+        assert!(numerator_on(w_r_col, &c).check().is_err(), "numerator on w_R");
+        assert!(numerator_on(0, &c).check().is_ok(), "numerator on w_D");
+
+        // a LinR element: allowed in ordinary rows, not in numerators or reciprocal rows
+        let (mut s, _) = range_proof(4, 3, &digits_of(37, 4, 3), true);
+        let lin_r_col = 2 * (s.n_p + s.n_m) + 3;
+        s.recip[0].terms.retain(|t| t.0 != lin_r_col); // drop the pole on m_3
+        s.partition[3] = (Slot::LinR, 3);
+        assert!(s.check().is_ok());
+        let mut x = s.clone();
+        x.recip[0].terms.push((lin_r_col, Scalar::ONE, None));
+        assert!(x.check().is_err(), "pole-free term on a LinR element");
+        assert!(numerator_on(lin_r_col, &s).check().is_err(), "numerator on a LinR element");
+        let mut x = s.clone();
+        x.w_l.push_row(vec![(lin_r_col, Scalar::ONE)]);
+        x.a_l.push(Scalar::ZERO);
+        assert!(x.check().is_ok(), "ordinary row on a LinR element");
+
+        // the verifier checks the circuit (rules and column ranges) and fails cleanly
+        let (c, w) = range_proof(4, 3, &digits_of(37, 4, 3), false);
+        let (pc, bp) = setup(&c);
+        let g = BpppGens::new(&pc, &bp, c.n_lin, c.n_p + c.n_m).unwrap();
+        let V = inputs(&g, &w);
+        let proof = prove(&c, &g, &V, &w, &mut Transcript::new(b"t"), &mut ChaCha20Rng::seed_from_u64(1)).unwrap();
+        let mut bad = c.clone();
+        bad.recip[0].terms.push((w_r_col, Scalar::ONE, None));
+        assert!(verify(&proof, &bad, &g, &V, &mut Transcript::new(b"t")).is_err());
+        let mut oob = c.clone();
+        oob.recip[0].terms.push((10_000, Scalar::ONE, None));
+        assert!(oob.check().is_err());
+        assert!(verify(&proof, &oob, &g, &V, &mut Transcript::new(b"t")).is_err());
+        // generators of another shape
+        let bp2 = BulletproofGens::new(64, 1);
+        let g2 = BpppGens::new(&pc, &bp2, c.n_lin + 1, c.n_p + c.n_m).unwrap();
+        assert!(verify(&proof, &c, &g2, &V, &mut Transcript::new(b"t")).is_err());
+    }
+
+    /// A reciprocal row must vanish as a rational function, not just at one alpha: an
+    /// out-of-range digit with multiplicities tuned to a known alpha passes the compiled check
+    /// at that alpha but is not a satisfying witness. Found in review.
+    #[test]
+    fn satisfaction_is_identity_in_x() {
+        let (c, mut w) = range_proof(4, 3, &[1, 4, 2], true);
+        let alpha = Scalar::from(10u64);
+        let m3 = (alpha + Scalar::from(3u64)) * (alpha + Scalar::from(4u64)).invert();
+        w.w_o = vec![Scalar::ZERO, Scalar::ONE, Scalar::ONE, m3];
+        let compiled = c.compile(alpha).unwrap();
+        let w_p = c.reciprocals(&w, alpha).unwrap();
+        assert!(compiled.is_satisfied(&c.compiled_witness(&w, w_p)));
+        assert!(!c.is_satisfied(&w, alpha));
+        // multiplicities summing to the number of digits (so lumping all poles together would
+        // cancel), tuned so that f(alpha) = 0: m_0 = x, m_3 = 1 - x, x = -alpha / (3 (alpha + 4))
+        let x = -alpha * (Scalar::from(3u64) * (alpha + Scalar::from(4u64))).invert();
+        w.w_o = vec![x, Scalar::ONE, Scalar::ONE, Scalar::ONE - x];
+        let w_p = c.reciprocals(&w, alpha).unwrap();
+        assert!(compiled.is_satisfied(&c.compiled_witness(&w, w_p)));
+        assert!(!c.is_satisfied(&w, alpha));
+    }
+
+    /// A public pole at `-alpha` is undefined: the prover fails and the verifier rejects.
+    #[test]
+    fn public_pole_at_alpha_fails() {
+        let mut rng = ChaCha20Rng::seed_from_u64(34);
+        let (c, w) = range_proof(4, 3, &digits_of(37, 4, 3), true); // digits 1, 1, 2; poles 0..3
+        let (pc, bp) = setup(&c);
+        let g = BpppGens::new(&pc, &bp, c.n_lin, c.n_p + c.n_m).unwrap();
+        let V = inputs(&g, &w);
+        let mut chal: Vec<Scalar> = (5..40u64).map(Scalar::from).collect();
+        let proof = prove(&c, &g, &V, &w, &mut Replay::new(chal.clone()), &mut rng).unwrap();
+        chal[0] = -Scalar::from(3u64);
+        assert!(prove(&c, &g, &V, &w, &mut Replay::new(chal.clone()), &mut rng).is_err());
+        assert!(verify(&proof, &c, &g, &V, &mut Replay::new(chal)).is_err());
+    }
+
     #[test]
     fn digest_covers_reciprocal_rows() {
         let (c, _) = range_proof(4, 3, &digits_of(37, 4, 3), true);
@@ -888,5 +984,27 @@ mod tests {
         let mut x = c.clone();
         x.a_n[0] = Scalar::from(2u64);
         assert_ne!(x.digest(), d);
+        let mut x = c.clone();
+        x.partition.swap(0, 1);
+        assert_ne!(x.digest(), d, "partition");
+        let mut x = c.clone();
+        let mut w_l = SparseMatrix::new(c.w_l.n_cols());
+        w_l.push_row(c.w_l.row(0).map(|(col, v)| (col, v + Scalar::ONE)));
+        x.w_l = w_l;
+        assert_ne!(x.digest(), d, "W_l coefficients");
+        let mut x = c.clone();
+        x.w_m.push_row(vec![]);
+        x.a_m.push(Scalar::ZERO);
+        x.n_m += 1;
+        assert_ne!(x.digest(), d, "W_m");
+        let mut x = c.clone();
+        x.f_m = true;
+        assert_ne!(x.digest(), d, "flags");
+        let mut x = c.clone();
+        x.n_lin += 1;
+        assert_ne!(x.digest(), d, "dimensions");
+        let mut x = c.clone();
+        x.recip[0].terms[0].1 = Scalar::from(2u64);
+        assert_ne!(x.digest(), d, "coefficient");
     }
 }

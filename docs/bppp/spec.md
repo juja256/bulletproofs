@@ -267,9 +267,10 @@ application-specific); message `"circuit"` = the circuit digest (§3.9); point `
 points `"C_L"`, `"C_R"`, `"C_O"`; challenges `"rho"`, `"lambda"`, `"beta"`, `"delta"`; point
 `"C_S"`; challenge `"tau"`; then the norm argument's header and rounds (§2.3).
 
-The public `prove`/`verify` absorb the digest (strong Fiat–Shamir). Crate-internal unbound
-variants, used where the statement is bound otherwise (R1CS front end, reciprocal form), skip
-only the `"circuit"` message.
+The public `prove`/`verify` absorb the digest (strong Fiat–Shamir). Protocols built on top
+absorb their own statement and enter the inner protocol at `"rho"` (crate-internal
+`prove_inner`/`verify_inner`): the reciprocal form (§4.5) absorbs `C_L`, `C_O`, `"alpha"`, `C_R`
+before it, and skips the whole §3 statement, which its own statement covers.
 
 ### 3.9 Circuit digest
 

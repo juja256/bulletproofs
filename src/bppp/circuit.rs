@@ -174,19 +174,18 @@ impl ArithmeticCircuit {
         if self.partition.len() != self.n_o {
             return bad;
         }
-        let mut used_n = vec![false; self.n_m];
-        let mut used_l = vec![[false; 3]; self.n_lin];
+        // injective and in range; memory proportional to n_o, not to n_m or n_lin
+        let mut used: Vec<(u8, usize)> = Vec::with_capacity(self.n_o);
         for &(slot, t) in &self.partition {
-            let cell = match slot {
-                Slot::NormO => used_n.get_mut(t),
-                Slot::LinO => used_l.get_mut(t).map(|u| &mut u[0]),
-                Slot::LinL => used_l.get_mut(t).map(|u| &mut u[1]),
-                Slot::LinR => used_l.get_mut(t).map(|u| &mut u[2]),
-            };
-            match cell {
-                Some(c) if !*c => *c = true,
-                _ => return bad,
+            let bound = if slot == Slot::NormO { self.n_m } else { self.n_lin };
+            if t >= bound {
+                return bad;
             }
+            used.push((slot as u8, t));
+        }
+        used.sort_unstable();
+        if used.windows(2).any(|p| p[0] == p[1]) {
+            return bad;
         }
         Ok(())
     }
@@ -1164,6 +1163,7 @@ mod tests {
             let mut big = c.clone();
             big.n_lin = n_lin;
             big.n_m = n_m;
+            let _ = big.check(); // must not panic or allocate per slot
             assert!(proof.verify(&big, &g, &V, &mut Transcript::new(b"t")).is_err());
             assert!(prove(&big, &g, &V, &w, &mut Transcript::new(b"t"), &mut rng).is_err());
             assert!(CircuitProof::from_bytes(&proof.to_bytes(), &big).is_err());

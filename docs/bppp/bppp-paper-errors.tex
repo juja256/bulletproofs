@@ -67,7 +67,7 @@ eq.~(49)). Only the constraint vectors, the affine terms and the input scalings 
 14 & \S6.2--6.3, eq.\ (70) & dimensions of $W_p(X)$, $a_d$, $W'_l$ & Noted\\
 15 & \S6.3, steps 6--7 & $W_p(\alpha)w$, $w_R = w'_L$ & Noted\\
 16 & \S6.4.1, Case 1 & missing parentheses in $b_{n-1}$ & Noted\\
-17 & \S6.2--6.3 & $w_O$ in slot $l_R$ is committed after $\alpha$ & Observed\\
+17 & \S6.2--6.3 & values committed after $\alpha$ readable by $W_n$, $W_p$ & Observed\\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -308,23 +308,32 @@ $[0, b)$ with bases $1, b, \dots, b^{n-2}$ the requirement
 $(b-1)\, b_{n-1} + b^{n-1} - 1 = B - 1$ gives $b_{n-1} = (B - b^{n-1})/(b - 1)$, which for $b = 2$
 is the usual $B - 2^{n-1}$; the printed formula is presumably missing parentheses.
 
-\subsection*{17. The initial witness and the slot $l_R$}
+\subsection*{17. Values committed after $\alpha$ in numerators and reciprocal rows}
 \loc{\S6.2 (``$w_I = w_O \| w_L \| w_D$ \dots\ the portion of the witness committed before the
-verifier chooses $\alpha$''), \S6.3 steps 1--4.}
+verifier chooses $\alpha$''), eqs.~(64)--(66), (70); \S6.3 steps 1--4.}
 
-\noindent\textbf{Problem.} The initial witness is declared to contain all of $w_O$, and $W_n$
-(numerators) and $W_p(X)$ (multiplicities of public poles) may read it. But the partition
-$\mathcal F$ may map elements of $w_O$ to the slot $l_R$, and CommitR (step 4) commits that slot
-in $C_R$, \emph{after} $\alpha$. A prover could then choose such an element after seeing
-$\alpha$; used as a numerator or a multiplicity it breaks the reciprocal argument (Lemma~1
-needs every multiplicity fixed before $\alpha$). The paper's own uses (inline multiplicities in
-$n_O$, shared ones in $l_L$) avoid the slot, so they are not affected.
+\noindent\textbf{Problem.} Lemma~1 needs every numerator and every multiplicity fixed before
+$\alpha$. Two kinds of values are committed after $\alpha$ although the paper lets the reciprocal
+part read them:
+\begin{itemize}
+  \item the elements of $w_O$ that the partition $\mathcal F$ maps to the slot $l_R$: the initial
+    witness is declared to contain all of $w_O$, but CommitR (step 4) commits $l_R$ in $C_R$;
+  \item $w_R$: $W_p(X)$ acts on the full $w(X) = w_D \| w_L \| w_P(X) \| w_R \| w_O$ (eqs.~(66),
+    (70)), and $w_R$ is committed with $w_P(\alpha)$ after $\alpha$.
+\end{itemize}
+A prover can choose such a value after seeing $\alpha$. As a numerator, as the multiplicity of a
+public pole, or even as a pole-free term $c\, w_{R,j}$ in a reciprocal row, it can make
+$f(\alpha) = 0$ although $f(X) \ne 0$. The paper's own uses (inline multiplicities in $n_O$,
+shared ones in $l_L$, no $w_R$ in $W_p$) are not affected.
 
-\noindent\textbf{Fix.} Define the initial witness as $w'_L$ and the elements of $w_O$ whose slot
-is not $l_R$, and require $W_n$ and every pole term of $W_p(X)$ to read only those; elements in
-$l_R$ may appear in ordinary constraints. (Equivalently, forbid the slot $l_R$ in reciprocal form
-circuits.)
-\status{Observed (by analysis; our implementation rejects such circuits).}
+\noindent\textbf{Fix.} Call \emph{initial} the columns of $w'_L = w_D \| w_L$ and the elements of
+$w_O$ whose slot is not $l_R$. Require $W_n$ to read initial columns only, and every entry of
+$W_p(X)$ to be either on an initial column (with or without a pole) or a constant coefficient on a
+reciprocal column $w_{P,i}$. Values committed after $\alpha$ ($w_R$, the $l_R$ slot) may appear in
+ordinary constraints only. (Restricting only the pole terms, as an earlier version of this note
+said, is not enough.)
+\status{Observed (by analysis and review; our implementation rejects such circuits, and tests
+check each case).}
 
 \section*{Remarks for implementers (not errors in the paper)}
 

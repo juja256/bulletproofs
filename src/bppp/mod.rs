@@ -5,7 +5,9 @@
 
 pub mod circuit;
 mod gens;
+pub mod mact;
 mod poly;
+pub mod range;
 pub mod reciprocal;
 mod sparse;
 mod transcript;
@@ -13,6 +15,8 @@ pub mod wnla;
 
 pub use self::circuit::{ArithmeticCircuit, CircuitProof, CircuitWitness, Slot};
 pub use self::gens::BpppGens;
+pub use self::mact::{MactEntry, MactProof, MactStatement};
+pub use self::range::{RangeProof, RangeStatement};
 pub use self::reciprocal::{ReciprocalCircuit, ReciprocalRow, ReciprocalWitness};
 pub use self::sparse::SparseMatrix;
 pub use self::transcript::BpppTranscript;

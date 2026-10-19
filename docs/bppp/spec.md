@@ -48,7 +48,7 @@ $$R = v_r G + \langle [l]_1, [H]_1\rangle + \langle [n]_1, [N]_1\rangle$$
 Absorb $X$, $R$; $\gamma$ = challenge; $C' = C + \gamma X + (\gamma^2 - 1)R$. Then, if $a > 1$:
 $c' = [c]_0 + \gamma[c]_1$, $l' = [l]_0 + \gamma[l]_1$, $H' = [H]_0 + \gamma[H]_1$. If $b > 1$:
 $n' = \rho^{-1}[n]_0 + \gamma[n]_1$, $N' = \rho[N]_0 + \gamma[N]_1$, $\rho' = \mu$, $\mu' = \mu^2$.
-A vector of length 1 is not folded, and while $b = 1$ neither $\rho$ nor $\mu$ changes (the
+A vector of length at most 1 is not folded, and while $b \le 1$ neither $\rho$ nor $\mu$ changes (the
 norm relation is not folded); $X$ and $R$ then simply have no terms from it. An unpaired last
 element of an odd-length vector is folded as if paired with zero (and the identity).
 
@@ -66,8 +66,9 @@ for the cross-check in §2.6.)
 ### 2.3 Transcript
 
 Standalone use (`prove`, `WnlaProof::verify`) first absorbs the statement:
-`domain_sep("bppp-wnla-statement v1")`, point `"C"`, scalar `"rho"`, and every $c_i$ under
-`"c"`. The generators are the setup and are not absorbed.
+`domain_sep("bppp-wnla-statement v1")`, point `"G"`, point `"C"`, scalar `"rho"`, and every
+$c_i$ under `"c"`. The vector generators $H$, $N$ are the setup and are not absorbed; $G$ is,
+since a prover who could pick it after the challenges could solve the check for it.
 
 Then, in every use: `domain_sep("bppp-wnla v1")`, `u64 "l" = a`, `u64 "n" = b`; per round:
 point `"X"`, point `"R"`, challenge `"gamma"`. $X$ and $R$ may be the identity (it happens for
@@ -123,6 +124,7 @@ The structure is the paper's §5.3 (commitments $C_L, C_R, C_O$, challenges, bli
 commitment $C_S$, one norm argument). The paper's typeset formulas for the constraint vectors,
 the affine terms and $s_r$ contain sign and factor errors, so the signs and factors below are
 re-derived; §3.5 states the identity they satisfy, and the reference checks it numerically.
+All deviations from the paper are collected, with evidence, in `docs/bppp/bppp-paper-errors.tex`.
 The prover computes $r_S$ by solving for the coefficients of a polynomial (§3.6) instead of
 the paper's hand-expanded $s_r$; the blinding vector $c_r(T)$ and the zero pattern of the
 $r_X$ are the paper's ($c_r$ is also the one of secp256k1-zkp's range proof, PR #207).
@@ -142,7 +144,8 @@ and a partition (§3.3). The witness satisfies it iff
 $$W_l w + f_l w_V + a_l = 0, \qquad w_L \circ w_R = W_m w + f_m w_V + a_m,$$
 
 where $w_V$ is zero-padded to the number of rows; $f_l = 1$ requires $N_l \ge kN_v$ and
-$f_m = 1$ requires $N_m \ge kN_v$. A row of $W_l$ or $W_m$ is a list of (column, coefficient)
+$f_m = 1$ requires $N_m \ge kN_v$, and $k > 0$ requires $f_l = 1$ or $f_m = 1$ (otherwise the
+inputs would enter no check at all). A row of $W_l$ or $W_m$ is a list of (column, coefficient)
 terms; a column may repeat (the terms add up) and need not be sorted.
 
 ### 3.2 Generators and inputs
@@ -154,6 +157,15 @@ capacity must be at least $\max(N_m, N_{lin} + 6)$.
 
 Input commitments: $V_i = v_{i,0} G + s_i H_0 + \sum_{j=1}^{N_v - 1} v_{i,j} H_{6+j}$. For
 $N_v = 1$ this is `PedersenGens::commit(v, s)`, the same commitment as in the BP backend.
+
+**What is proven about the inputs.** The protocol binds the coordinates of $V_i$ that enter the
+constraints — $v_{i,0}$ on $G$ and $v_{i,1..}$ on $H_{7..}$ — and the prover knows the rest of an
+opening. It does not prove that $V_i$ has exactly the form above: components on
+$H_1, \dots, H_6$, on linear slots beyond $N_v - 1$, or on $N$ (where orthogonal to the norm
+slots in use) are absorbed by the blinding (found in review; the paper's relation (32) states the
+strict form, and its extractor has the same gap). Applications that need $V_i = v G + s H_0$
+exactly (e.g. homomorphic balance checks with a signature on the excess over $H_0$) get it from
+their own equations.
 
 ### 3.3 Commitments
 
@@ -180,8 +192,10 @@ $t = N_v i + j$ with $i < k$ and $1 \le j < N_v$:
 
 $$\Lambda_t = \lambda^t + \mu^j \lambda^{N_v i} - \lambda^j \mu^{N_v i + 1}$$
 
-(this cancels the cross terms between the two input scalings; the $\Lambda_t$ stay linearly
-independent polynomials in $\lambda$, with leading term $\lambda^t$).
+(this cancels the cross terms between the two input scalings). The rows stay bound: the
+$\mu$-free part of $\Lambda_t$ is $\lambda^t$ (for $i = 0$, $\Lambda_j = (1 - \mu)\lambda^j + \mu^j$),
+and the multiplicative terms of $E$ contribute only monomials with $\mu^{\ge 1}$, so $E$ vanishes
+identically in $(\lambda, \mu)$ only if every residual is zero.
 
 Column weights $y = \Lambda^\top W_l - \boldsymbol\mu^\top W_m \in \mathbb F^{N_w}$, and from them:
 
@@ -247,7 +261,8 @@ $$(v' - p_s(\tau)) G + \langle h, H\rangle + \langle n' - p_n(\tau), N\rangle - 
 ### 3.8 Transcript
 
 `domain_sep("bppp-circuit v1")`; `u64` `"N_m"`, `"N_O"`, `"N_v"`, `"N_lin"`, `"k"`, `"N_l"`,
-`"f_l"`, `"f_m"`; message `"circuit"` = the circuit digest (§3.9); point `"V"` for each input;
+`"f_l"`, `"f_m"`; points `"G"` and `"H_0"` (the value and blinding generators, which may be
+application-specific); message `"circuit"` = the circuit digest (§3.9); point `"V"` for each input;
 points `"C_L"`, `"C_R"`, `"C_O"`; challenges `"rho"`, `"lambda"`, `"beta"`, `"delta"`; point
 `"C_S"`; challenge `"tau"`; then the norm argument's header and rounds (§2.3).
 

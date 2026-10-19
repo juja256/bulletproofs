@@ -522,18 +522,20 @@ impl ReciprocalCircuit {
 
     /// `w_P,i = num_i / (alpha + w_D,i)`; an error if a denominator is zero.
     fn reciprocals(&self, w: &ReciprocalWitness, alpha: Scalar) -> Result<Vec<Scalar>, ProofError> {
-        self.numerators(w)
-            .iter()
-            .zip(&w.w_d)
-            .map(|(n, d)| {
-                let den = alpha + d;
-                if den == Scalar::ZERO {
-                    Err(ProofError::VerificationError)
-                } else {
-                    Ok(n * den.invert())
-                }
-            })
-            .collect()
+        use clear_on_drop::clear::Clear;
+        use subtle::ConstantTimeEq;
+        // One inversion for all denominators (Montgomery's trick, constant time); a zero
+        // denominator would spoil the whole batch, so it is checked first.
+        let mut inv: Vec<Scalar> = w.w_d.iter().map(|d| alpha + d).collect();
+        let any_zero = inv.iter().fold(subtle::Choice::from(0u8), |acc, d| acc | d.ct_eq(&Scalar::ZERO));
+        if bool::from(any_zero) {
+            inv.iter_mut().for_each(Clear::clear);
+            return Err(ProofError::VerificationError);
+        }
+        Scalar::batch_invert(&mut inv);
+        let out = self.numerators(w).iter().zip(&inv).map(|(n, i)| n * i).collect();
+        inv.iter_mut().for_each(Clear::clear);
+        Ok(out)
     }
 
     /// The compiled circuit and witness for `(eta, alpha)` (tests).

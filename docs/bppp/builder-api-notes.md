@@ -74,6 +74,19 @@ accepted by BP is accepted by BP++. BP itself would not need it (it compresses w
 - Memory: BP++ proving uses about 1.6x BP's memory (R1CS front end, 2^16); fine at 2^20 on a
   workstation, worth a streaming prover later.
 
+### 3.1 What bpvm relies on today (found when checking the bound rule against its gadgets)
+
+bpvm has **no separate range checks** for the components of its multi-column lookups: logUp
+compresses a tuple with challenges, so a lookup proves the tuple *is* a table row and thereby
+bounds every component. `gadgets.rs` relies on it: `range_bits` queries `(d, k)` with a fresh
+digit `d` in the two-column range table; `bitop` queries `(tag, na, nb, nr)` with three fresh
+nibbles. Under the bound rule both queries are rejected. Porting: `range_bits` becomes one
+one-column table per width (free); `bitop` needs a nibble lookup for each of the three nibbles
+first (32 lookups per 32-bit operation instead of 8); bus and memory tuples pay one lookup per
+component without a recorded bound. The rule therefore costs bpvm a real part of BP++'s gain,
+which makes option F (challenge compression in BP++: C_O, gamma, C_L, alpha, C_R; same proof
+size; components in C_L copied into C_O slots) the stronger candidate.
+
 ## 4. Questions for the owner
 
 1. Builder on `Prover`/`Verifier` (A) or a separate builder type (D)?

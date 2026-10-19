@@ -23,8 +23,9 @@ use super::sparse::SparseMatrix;
 use super::transcript::{BpppTranscript, DynRng, Randomness};
 use crate::errors::ProofError;
 
-/// A public pole (spec §4.1): a polynomial in the challenge `eta`, `t(eta) = sum_e t_e eta^e`,
-/// with at least one coefficient; one coefficient is a constant pole.
+/// A public pole (spec §4.1): a polynomial in the challenge `eta`, `t(eta) = sum_e t_e eta^e`;
+/// a circuit needs at least one coefficient (`check` rejects an empty one), and one coefficient
+/// is a constant pole.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pole(pub Vec<Scalar>);
 
@@ -278,6 +279,26 @@ impl ReciprocalCircuit {
             }
             next = tp.pole + 1;
             if tp.components.iter().any(|x| x.terms.iter().any(|(c, _)| !self.is_early(*c))) {
+                return bad;
+            }
+        }
+        // free and tuple poles do not mix in an eta-row (spec §4.1); tuples are sorted
+        let is_tuple = |i: usize| self.tuples.binary_search_by_key(&i, |tp| tp.pole).is_ok();
+        let long = |p: &Option<Pole>| p.as_ref().map_or(false, |p| p.0.len() > 1);
+        for row in &self.recip {
+            let mut free = false;
+            let mut eta_row = row.consts.iter().any(|(_, p)| long(p));
+            for (c, _, p) in &row.terms {
+                eta_row |= long(p);
+                if let Col::Reciprocal(i) = self.col(*c) {
+                    if is_tuple(i) {
+                        eta_row = true;
+                    } else {
+                        free = true;
+                    }
+                }
+            }
+            if eta_row && free {
                 return bad;
             }
         }
@@ -601,7 +622,7 @@ fn rekeyed<T: BpppTranscript, R: RngCore + CryptoRng>(t: &T, c: &ReciprocalCircu
     c.tuples.iter().for_each(|tp| w_d[tp.pole] = Scalar::ZERO);
     let secrets = w_d.iter().chain(&w.w_l).chain(early_o).chain(w.v.iter().flatten()).chain(&w.s);
     let r = super::transcript::prover_rng(t, b"reciprocal", &c.digest(), secrets, rng);
-    w_d.iter_mut().for_each(|x| *x = Scalar::ZERO);
+    w_d.iter_mut().for_each(clear_on_drop::clear::Clear::clear);
     r
 }
 
@@ -885,12 +906,19 @@ mod tests {
         use crate::bppp::testutil;
         let file: serde_json::Value =
             serde_json::from_str(include_str!("../../tests/vectors/bppp/reciprocal.json")).unwrap();
+        let mut invalid = 0;
         for case in file["cases"].as_array().unwrap() {
             let c = testutil::recip_circuit(case);
             assert_eq!(c.w_l.n_rows(), case["n_l"].as_u64().unwrap() as usize);
-            c.check().unwrap();
+            if case["shape_ok"].as_bool() == Some(false) {
+                assert!(c.check().is_err(), "{}: shape", case["name"]);
+                invalid += 1;
+                continue;
+            }
+            c.check().unwrap_or_else(|e| panic!("{}: {:?}", case["name"], e));
             testutil::run_recip_case(case, &c, &testutil::recip_witness(case));
         }
+        assert!(invalid >= 2, "shape-invalid v2 cases");
     }
 
     #[test]
@@ -1348,10 +1376,10 @@ mod tests {
         let mut x = c.clone();
         x.recip[0].consts.push((Scalar::ONE, Some(Pole(vec![]))));
         assert!(x.check().is_err(), "empty constant pole");
-        // a free pole may sit next to tuple poles
+        // a free pole must not sit next to tuple poles (free_and_tuple_poles_do_not_mix)
         let mut x = c.clone();
         x.tuples.remove(0);
-        assert!(x.check().is_ok() && x.uses_eta());
+        assert!(x.check().is_err());
         // without tuple poles and long poles the circuit is v1
         let mut x = c.clone();
         x.tuples.clear();
@@ -1385,6 +1413,36 @@ mod tests {
         let mut bad = p1.clone();
         bad.C_O = p2.C_O;
         assert!(run(&bad).is_err());
+    }
+
+    /// An eta-row (a tuple pole's reciprocal, or a pole polynomial of length 2 or more) must not
+    /// read a free pole's reciprocal (spec §4.1, found in review: a free pole is committed after
+    /// eta and could cancel any tuple). Rows without them are unrestricted.
+    #[test]
+    fn free_and_tuple_poles_do_not_mix() {
+        let s = |x: u64| Scalar::from(x);
+        let (c, _) = tuple_lookup(&[(s(3), s(5)), (s(9), s(15))], &rows16(), &[0; 16]);
+        let n_mm = c.n_p + c.n_m;
+        // pole 0 free: its reciprocal sits in a row with the tuple pole 1
+        let mut x = c.clone();
+        x.tuples.remove(0);
+        assert!(x.check().is_err(), "free and tuple pole in one row");
+        // pole 0 free in a row of its own (v1-style, constant pole): fine
+        let mut y = x.clone();
+        y.recip[0].terms.remove(0);
+        y.recip.push(ReciprocalRow { terms: vec![(n_mm, Scalar::ONE, None)], consts: vec![(-Scalar::ONE, Some(s(7).into()))] });
+        assert!(y.check().is_ok());
+        // ... but not next to a pole polynomial of length 2, as a term or as a constant
+        let mut z = y.clone();
+        z.recip[1].consts.push((Scalar::ONE, Some(Pole(vec![s(1), s(2)]))));
+        assert!(z.check().is_err(), "free pole and a long constant pole");
+        let mut z = y.clone();
+        z.recip[1].terms.push((2 * n_mm, Scalar::ONE, Some(Pole(vec![s(1), s(2)]))));
+        assert!(z.check().is_err(), "free pole and a long term pole");
+        // a long pole of length 2 with zeros is still long; a row without any reciprocal is free
+        let mut z = y.clone();
+        z.recip.push(ReciprocalRow { terms: vec![], consts: vec![(Scalar::ONE, Some(Pole(vec![s(1), s(2)]))), (-Scalar::ONE, Some(Pole(vec![s(1), s(2)])))] });
+        assert!(z.check().is_ok(), "public-only eta-row");
     }
 
     /// The v2 digest covers the tuple poles and the pole polynomials; v1 circuits keep the v1

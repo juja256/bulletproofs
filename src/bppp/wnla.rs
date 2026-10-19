@@ -106,11 +106,11 @@ fn fold(v: &[Scalar], e: Scalar, g: Scalar) -> Vec<Scalar> {
     })
 }
 
-/// [`fold`] for generators (public scalars, variable time).
-fn fold_points(p: &[RistrettoPoint], e: Scalar, g: Scalar) -> Vec<RistrettoPoint> {
+/// `P_{2i} + g P_{2i+1}` (an unpaired last point stays): generators, public scalars.
+fn fold_points(p: &[RistrettoPoint], g: Scalar) -> Vec<RistrettoPoint> {
     util::map_index((p.len() + 1) / 2, |i| match p.get(2 * i + 1) {
-        Some(hi) => RistrettoPoint::vartime_multiscalar_mul([e, g], [p[2 * i], *hi]),
-        None => p[2 * i] * e,
+        Some(hi) => p[2 * i] + hi * g,
+        None => p[2 * i],
     })
 }
 
@@ -164,53 +164,181 @@ pub fn prove<T: BpppTranscript>(
 ) -> Result<WnlaProof, ProofError> {
     st.check(l.len(), n.len())?;
     absorb_statement(transcript, st, &C.compress());
-    prove_unbound(st, transcript, l, n)
+    prove_unbound(st, transcript, l, n, false)
 }
 
 /// [`prove`] without absorbing the statement, for the circuit protocol: there `C`, `c` and
 /// `rho` are functions of commitments and challenges already in the transcript, and
-/// computing `C` explicitly would cost a full multiscalar multiplication.
+/// computing `C` explicitly would cost a full multiscalar multiplication. `vartime` computes
+/// the round commitments in variable time (only for inputs that are uniformly random given
+/// the transcript, spec §2.6).
 pub(crate) fn prove_unbound<T: BpppTranscript>(
     st: &WnlaStatement,
     transcript: &mut T,
-    mut l: Vec<Scalar>,
-    mut n: Vec<Scalar>,
+    l: Vec<Scalar>,
+    n: Vec<Scalar>,
+    vartime: bool,
+) -> Result<WnlaProof, ProofError> {
+    prove_rounds(st, transcript, l, n, vartime, if vartime { DEFERRED_VT } else { DEFERRED_CT })
+}
+
+/// Rounds that compute `X`, `R` from the input generators instead of folding them: a fold
+/// costs about 2.5 constant-time or 8 variable-time multiscalar terms, a deferred round
+/// `1.5 b` terms instead of `1.5 b / 2^r` (measured best: 2 and 3).
+const DEFERRED_CT: usize = 2;
+const DEFERRED_VT: usize = 3;
+
+/// The generators of one vector after `r` deferred rounds: folded generator `i` is
+/// `scale * sum_t coef[t] P[i 2^r + t]` (missing indices are the identity).
+struct Deferred<'a> {
+    input: &'a [RistrettoPoint],
+    folded: Option<Vec<RistrettoPoint>>,
+    /// `2^r` coefficients while deferred.
+    coef: Vec<Scalar>,
+    shift: u32,
+}
+
+impl<'a> Deferred<'a> {
+    fn new(input: &'a [RistrettoPoint]) -> Self {
+        Deferred { input, folded: None, coef: vec![Scalar::ONE], shift: 0 }
+    }
+
+    /// Current length of the folded vector.
+    fn len(&self) -> usize {
+        match &self.folded {
+            Some(f) => f.len(),
+            None => (self.input.len() + (1 << self.shift) - 1) >> self.shift,
+        }
+    }
+
+    /// The terms of `sum_j x_j P'_j` over the current generators, all positions `j` or only
+    /// the odd ones: their number and, for a term index, `(j, k, P)` meaning `x_j k P` (a
+    /// padding term has `k = 0`).
+    fn terms<'s>(&'s self, odd_only: bool) -> (usize, Box<dyn Fn(usize) -> (usize, Scalar, &'s RistrettoPoint) + Sync + 's>) {
+        match (&self.folded, odd_only) {
+            (Some(f), false) => (f.len(), Box::new(move |v| (v, Scalar::ONE, &f[v]))),
+            (Some(f), true) => (f.len() / 2, Box::new(move |i| (2 * i + 1, Scalar::ONE, &f[2 * i + 1]))),
+            (None, false) => {
+                let mask = (1usize << self.shift) - 1;
+                (self.input.len(), Box::new(move |v| (v >> self.shift, self.coef[v & mask], &self.input[v])))
+            }
+            (None, true) => {
+                let (shift, mask) = (self.shift, (1usize << self.shift) - 1);
+                let count = (self.len() / 2) << shift;
+                (
+                    count,
+                    Box::new(move |i| {
+                        let (j, t) = (2 * (i >> shift) + 1, i & mask);
+                        let v = (j << shift) + t;
+                        match self.input.get(v) {
+                            Some(p) => (j, self.coef[t], p),
+                            None => (j, Scalar::ZERO, &self.input[0]),
+                        }
+                    }),
+                )
+            }
+        }
+    }
+
+    /// Fold: `P'_i = P_{2i} + g P_{2i+1}`; materialise after `defer` rounds.
+    fn fold(&mut self, g: Scalar, defer: usize) {
+        match &self.folded {
+            Some(f) => self.folded = Some(fold_points(f, g)),
+            None => {
+                self.coef = self.coef.iter().copied().chain(self.coef.iter().map(|c| c * g)).collect();
+                self.shift += 1;
+                // materialise after `defer` rounds, or when the vector stops folding (length 1)
+                if self.shift as usize >= defer || self.len() <= 1 {
+                    let (rows, input, coef, shift) = (1usize << self.shift, self.input, &self.coef, self.shift);
+                    let m = self.len();
+                    self.folded = Some(util::map_index(m, |i| {
+                        let lo = i << shift;
+                        let hi = (lo + rows).min(input.len());
+                        RistrettoPoint::vartime_multiscalar_mul(&coef[..hi - lo], &input[lo..hi])
+                    }));
+                }
+            }
+        }
+    }
+}
+
+fn prove_rounds<T: BpppTranscript>(
+    st: &WnlaStatement,
+    transcript: &mut T,
+    l: Vec<Scalar>,
+    n: Vec<Scalar>,
+    vartime: bool,
+    defer: usize,
 ) -> Result<WnlaProof, ProofError> {
     st.check(l.len(), n.len())?;
     absorb_header(transcript, l.len(), n.len());
-    let (mut c, mut h, mut g) = (st.c.to_vec(), st.h_vec.to_vec(), st.n_vec.to_vec());
+    let (mut l, mut n, mut c) = (l, n, st.c.to_vec());
+    // The folded generators: `H` as they are, `N` as `s * N'` (so that folding `N` costs one
+    // scalar multiplication per pair, as for `H`); the inputs are not copied.
+    let mut h = Deferred::new(st.h_vec);
+    let mut g = Deferred::new(st.n_vec);
+    let mut s = Scalar::ONE;
     let (mut rho, mut mu) = (st.rho, st.rho * st.rho);
     let (mut xs, mut rs) = (Vec::new(), Vec::new());
     while more(l.len(), n.len()) {
+        let (a, b) = (l.len(), n.len());
+        debug_assert!(h.len() == a && g.len() == b);
         let rho_inv = rho.invert();
         let mu2 = mu * mu;
-        let (l0, l1) = split(&l);
-        let (n0, n1) = split(&n);
-        let (c0, c1) = split(&c);
-        let (h0, h1) = split(&h);
-        let (g0, g1) = split(&g);
-        let vx = Scalar::from(2u64) * rho_inv * wip(&n0, &n1, mu2) + ip(&c0, &l1) + ip(&c1, &l0);
-        let vr = wip(&n1, &n1, mu2) + ip(&c1, &l1);
-        let rho_n1: Vec<Scalar> = n1.iter().map(|x| rho * x).collect();
-        let rho_inv_n0: Vec<Scalar> = n0.iter().map(|x| rho_inv * x).collect();
-        let X = (st.g * vx + ct_msm(&l1, &h0) + ct_msm(&l0, &h1) + ct_msm(&rho_n1, &g0)
-            + ct_msm(&rho_inv_n0, &g1))
-        .compress();
-        let R = (st.g * vr + ct_msm(&l1, &h1) + ct_msm(&n1, &g1)).compress();
+        // Pairs (even, odd): [v]_0 and [v]_1 of spec §2.1, without copies.
+        let mut w = mu2;
+        let (mut nn01, mut nn11) = (Scalar::ZERO, Scalar::ZERO);
+        for i in 0..b / 2 {
+            nn01 += n[2 * i] * n[2 * i + 1] * w;
+            nn11 += n[2 * i + 1] * n[2 * i + 1] * w;
+            w *= mu2;
+        }
+        let (mut cl, mut cl11) = (Scalar::ZERO, Scalar::ZERO);
+        for i in 0..a / 2 {
+            cl += c[2 * i] * l[2 * i + 1] + c[2 * i + 1] * l[2 * i];
+            cl11 += c[2 * i + 1] * l[2 * i + 1];
+        }
+        let vx = Scalar::from(2u64) * rho_inv * nn01 + cl;
+        let vr = nn11 + cl11;
+        // X: every folded generator once; an even position meets the odd entry of its pair and
+        // conversely (an unpaired last element meets zero). R: the odd positions.
+        let get = |v: &[Scalar], j: usize| v.get(j).copied().unwrap_or(Scalar::ZERO);
+        let (rs_, ris) = (rho * s, rho_inv * s);
+        let x_l = |j: usize| if j % 2 == 0 { get(&l, j + 1) } else { l[j - 1] };
+        let x_n = |j: usize| if j % 2 == 0 { rs_ * get(&n, j + 1) } else { ris * n[j - 1] };
+        let r_l = |j: usize| l[j];
+        let r_n = |j: usize| s * n[j];
+        let msm = |odd: bool, fl: &(dyn Fn(usize) -> Scalar + Sync), fnn: &(dyn Fn(usize) -> Scalar + Sync)| {
+            let ((hn, ht), (gn, gt)) = (h.terms(odd), g.terms(odd));
+            let chunk = if vartime { util::MSM_CHUNK_VT } else { util::MSM_CHUNK_CT };
+            util::msm_index(hn + gn, chunk, vartime, |v| {
+                if v < hn {
+                    let (j, k, p) = ht(v);
+                    (fl(j) * k, p)
+                } else {
+                    let (j, k, p) = gt(v - hn);
+                    (fnn(j) * k, p)
+                }
+            })
+        };
+        let X = (st.g * vx + msm(false, &x_l, &x_n)).compress();
+        let R = (st.g * vr + msm(true, &r_l, &r_n)).compress();
         transcript.append_point(b"X", &X);
         transcript.append_point(b"R", &R);
         let gamma = transcript.challenge(b"gamma");
         xs.push(X);
         rs.push(R);
-        if l.len() > 1 {
+        if a > 1 {
             c = fold(&c, Scalar::ONE, gamma);
             l = fold(&l, Scalar::ONE, gamma);
-            h = fold_points(&h, Scalar::ONE, gamma);
+            h.fold(gamma, defer);
         }
         // A norm vector of length 1 stays as it is, and so do rho and mu (spec §2.1).
-        if n.len() > 1 {
+        if b > 1 {
             n = fold(&n, rho_inv, gamma);
-            g = fold_points(&g, rho, gamma);
+            // N' = rho N_0 + gamma N_1 = s rho (N'_0 + (gamma / rho) N'_1)
+            g.fold(gamma * rho_inv, defer);
+            s *= rho;
             rho = mu;
             mu = mu2;
         }
@@ -370,6 +498,28 @@ mod tests {
     }
 
     /// The stop rule is secp256k1-zkp's size-optimal layout (PR #352): its closed form, ported.
+    /// Deferred folding and variable-time multiplications give the same proof as folding in
+    /// every round, for every number of deferred rounds and odd lengths.
+    #[test]
+    fn deferred_rounds_do_not_change_the_proof() {
+        let mut rng = rand::thread_rng();
+        for &(a, b) in &[(7usize, 1usize), (7, 2), (7, 37), (13, 64), (8, 100), (1, 9), (21, 3)] {
+            let (g, h, nv) = (gens("G", 1)[0], gens("H", a), gens("N", b));
+            let c: Vec<Scalar> = (0..a).map(|_| Scalar::random(&mut rng)).collect();
+            let st = WnlaStatement { g: &g, h_vec: &h, n_vec: &nv, c: &c, rho: Scalar::random(&mut rng) };
+            let l: Vec<Scalar> = (0..a).map(|_| Scalar::random(&mut rng)).collect();
+            let n: Vec<Scalar> = (0..b).map(|_| Scalar::random(&mut rng)).collect();
+            let gammas: Vec<Scalar> = (0..20).map(|_| Scalar::random(&mut rng)).collect();
+            let p0 = prove_rounds(&st, &mut Replay::new(gammas.clone()), l.clone(), n.clone(), false, 0).unwrap();
+            for d in 0..6 {
+                for vt in [false, true] {
+                    let p = prove_rounds(&st, &mut Replay::new(gammas.clone()), l.clone(), n.clone(), vt, d).unwrap();
+                    assert_eq!(p, p0, "a {} b {} defer {} vartime {}", a, b, d, vt);
+                }
+            }
+        }
+    }
+
     #[test]
     fn rounds_match_secp256k1_zkp_optimal_layout() {
         fn log2_ceil(n: usize) -> usize {
@@ -398,7 +548,7 @@ mod tests {
             let st = WnlaStatement { g: &G, h_vec: &H, n_vec: &N, c: &c, rho: sc(&case["rho"]) };
             let gammas = scs(&case["gammas"]);
             let (l, n) = (scs(&case["l"]), scs(&case["n"]));
-            let proof = prove_unbound(&st, &mut Replay::new(gammas.clone()), l.clone(), n.clone()).unwrap();
+            let proof = prove_unbound(&st, &mut Replay::new(gammas.clone()), l.clone(), n.clone(), false).unwrap();
             let point = |p: &serde_json::Value| {
                 (G * sc(&p["g"])
                     + RistrettoPoint::multiscalar_mul(scs(&p["h"]), &H)

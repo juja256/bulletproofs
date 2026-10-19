@@ -571,7 +571,7 @@ pub(crate) fn prove_inner<T: BpppTranscript, R: RngCore + CryptoRng>(
     let n = n_t.eval(tau, tau_inv, n_m);
     let cvec: Vec<Scalar> = c_r(beta, tau, tau_inv).chain(c_l.eval(tau, tau_inv, n_lin)).collect();
     let st = WnlaStatement { g: &gens.g, h_vec: &gens.h, n_vec: gens.n, c: &cvec, rho };
-    let wnla = wnla::prove_unbound(&st, transcript, l, n)?;
+    let wnla = wnla::prove_unbound(&st, transcript, l, n, cfg!(feature = "bppp-vartime"))?;
     Ok(CircuitProof { C_L: ol.C_L, C_R: cr.C_R, C_O: ol.C_O, C_S, wnla })
 }
 

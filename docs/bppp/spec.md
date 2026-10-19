@@ -114,9 +114,18 @@ legacy layout, and reproduces all proofs of their `test_vectors/prove.h` byte fo
 the round algebra, the weights and the length-1 rule are theirs.
 
 Note on constant time: secp256k1-zkp computes the norm argument in variable time, since inside
-the circuit protocol its inputs are uniformly distributed (paper, Theorem 2). This crate still
-uses constant-time multiscalar multiplications for $X$, $R$ and the commitment; switching is
-a performance decision deferred to phase 7.
+the circuit protocol its inputs are uniformly distributed given the transcript (paper,
+Theorem 2: $l(\tau)$, $n(\tau)$ are masked by the fresh $l_S$, $n_S$, $r_S$ of $C_S$). This crate uses
+constant-time multiscalar multiplications for $X$ and $R$ by default; the feature
+`bppp-vartime` computes them in variable time **inside the circuit protocol only** (the
+standalone argument, whose inputs are the caller's witness, and every commitment to the witness
+stay constant time). The proofs are identical.
+
+Implementation note (no effect on the proofs): the prover computes $X$ and $R$ of the first
+rounds directly from the input generators with accumulated public coefficients and folds the
+generators only afterwards (2 such rounds in constant time, 3 in variable time); a fold of the
+norm generators is one scalar multiplication per pair ($N' = s\rho(N'_0 + \gamma\rho^{-1} N'_1)$ with
+a common factor $s$).
 
 ## 3. Arithmetic circuits (paper §5)
 

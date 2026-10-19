@@ -29,9 +29,9 @@ struct Tables {
 }
 
 fn tables<CS: CircuitBuilder>(cs: &mut CS) -> Result<Tables, R1CSError> {
-    let byte = cs.table((0..256u64).map(|x| vec![x]).collect(), &[8])?;
-    let nib = cs.table((0..16u64).map(|x| vec![x]).collect(), &[4])?;
-    let xor = cs.table((0..256u64).map(|x| vec![x >> 4, x & 15, (x >> 4) ^ (x & 15)]).collect(), &[4, 4, 4])?;
+    let byte = cs.table((0..256u64).map(|x| vec![x]).collect())?;
+    let nib = cs.table((0..16u64).map(|x| vec![x]).collect())?;
+    let xor = cs.table((0..256u64).map(|x| vec![x >> 4, x & 15, (x >> 4) ^ (x & 15)]).collect())?;
     Ok(Tables { byte, nib, xor })
 }
 
@@ -48,7 +48,7 @@ fn range32<CS: CircuitBuilder>(cs: &mut CS, t: &Tables, x: Lc, value: Option<u64
     Ok(bytes)
 }
 
-/// Nibbles of a byte: lookups into the nibble table bound them.
+/// Nibbles of a byte, from the nibble table.
 fn nibbles<CS: CircuitBuilder>(cs: &mut CS, t: &Tables, byte: Variable, value: Option<u64>) -> Result<(Variable, Variable), R1CSError> {
     let nib = t.nib;
     let hi = cs.lookup_value(nib, value.map(|v| v >> 4))?;
@@ -74,7 +74,7 @@ fn xor8<CS: CircuitBuilder>(cs: &mut CS, t: &Tables, x: Variable, y: Variable, v
 /// A memory permutation: the multiset of `(address, value)` writes equals that of the reads,
 /// with addresses and values bytes.
 fn memory<CS: CircuitBuilder>(cs: &mut CS, t: &Tables, writes: &[(u64, u64)], reads: Option<&[(u64, u64)]>, n: usize) -> Result<(), R1CSError> {
-    let mut arg = cs.reciprocal(&[8, 8])?;
+    let mut arg = cs.reciprocal(2)?;
     for i in 0..n {
         let w = writes.get(i).copied();
         let a = cs.lookup_value(t.byte, w.map(|w| w.0))?;
@@ -93,7 +93,7 @@ fn memory<CS: CircuitBuilder>(cs: &mut CS, t: &Tables, writes: &[(u64, u64)], re
 /// A MACT-style balance: committed `(amount, asset type)` pairs, `sum_in a/(X + t) - sum_out
 /// a/(X + t) = 0`, every output amount below `2^32` (`range32`).
 fn balance<CS: CircuitBuilder>(cs: &mut CS, t: &Tables, ins: &[(Variable, Variable)], outs: &[(Variable, Variable)], out_amounts: Option<&[u64]>) -> Result<(), R1CSError> {
-    let mut arg = cs.reciprocal(&[252])?;
+    let mut arg = cs.reciprocal(1)?;
     for (a, ty) in ins {
         arg.add_weighted((*a).into(), vec![(*ty).into()]);
     }
@@ -234,19 +234,19 @@ fn proofs_of_one_backend_do_not_verify_with_the_other() {
 }
 
 /// A small statement exercising the copies of §7.6: numerators and public coefficients that
-/// read `MultiplierRight` (the right wire of `allocate`), constants in coefficients, a product
-/// with constants, a committed input in a tuple.
+/// read `MultiplierRight` (the right wire of `allocate`), tuple components on `w_L` and `w_R`,
+/// constants in coefficients, a product with constants.
 fn copies<CS: CircuitBuilder>(cs: &mut CS, V: &[Variable], p: Option<[u64; 3]>) -> Result<(), R1CSError> {
     let s = |x: u64| Scalar::from(x);
     let a = cs.allocate(p.map(|p| s(p[0])))?; // MultiplierLeft(0)
     let b = cs.allocate(p.map(|p| s(p[1])))?; // MultiplierRight(0)
-    let t = cs.table((0..8u64).map(|x| vec![x]).collect(), &[3])?;
+    let t = cs.table((0..8u64).map(|x| vec![x]).collect())?;
     cs.lookup(t, &[b.into()])?; // b < 8
     cs.lookup(t, &[a.into()])?;
     let w = cs.witness(p.map(|p| s(p[2])))?;
     cs.product(a + 1u64, b.into(), w - V[0] + Scalar::ONE)?; // (a + 1) b = w - v + 1
-    // b / (X + (a + 8 b)) - b / (X + (a + 8 b)) with the second written as public poles
-    let mut r = cs.reciprocal(&[3, 3])?;
+    // b / (X + (a, b)) - b / (X + (a, b)) + (2b - 10) / (X + (1, 2))
+    let mut r = cs.reciprocal(2)?;
     r.add_weighted(b + 0u64, vec![a.into(), b.into()]);
     r.add_weighted(-Lc::from(b), vec![a.into(), b.into()]);
     r.add_public(b * Scalar::from(2u64) - Scalar::from(10u64), vec![1, 2]); // 0 for b = 5
@@ -287,8 +287,10 @@ fn copies_of_right_wires() {
     // a = 2, b = 5, w = (a + 1) b + v - 1 with v = 4: 18; the public coefficient 2b - 10 = 0
     for backend in backends() {
         let (proof, V, cost) = prove_small(backend, 4, |cs, x| copies(cs, &[x], Some([2, 5, 18]))).unwrap();
-        // BP++: w_O = 1 output + 1 input copy + 9 witnesses + 3 copies of right wires, 6 in n_O
-        assert_eq!(cost, Cost { bp_phase1: 1 + 5 + 1, bp_phase2: 4, bppp_gates: 4 + 1 + 1, bppp_lin: 8 });
+        // BP++: w_O = 1 output + 1 input copy + 9 witnesses + 3 copies of right wires (two
+        // numerators, one coefficient) + 4 copies of tuple components (a, b twice: w_L, w_R are
+        // committed after eta), 6 in n_O
+        assert_eq!(cost, Cost { bp_phase1: 1 + 5 + 1, bp_phase2: 4, bppp_gates: 4 + 1 + 1, bppp_lin: 12 });
         verify_small(backend, &proof, V, |cs, x| copies(cs, &[x], None)).unwrap();
         // a wrong w: refused or rejected
         let bad = prove_small(backend, 4, |cs, x| copies(cs, &[x], Some([2, 5, 19])));
@@ -406,8 +408,8 @@ fn failed_operations_record_nothing() {
     let mut t2 = Transcript::new(b"x");
     let mut v = Verifier::new(&mut t2);
     fn go<CS: CircuitBuilder>(cs: &mut CS, val: Option<u64>) {
-        let two = cs.table(vec![vec![0, 0]], &[1, 1]).unwrap();
-        let one = cs.table(vec![vec![0]], &[1]).unwrap();
+        let two = cs.table(vec![vec![0, 0]]).unwrap();
+        let one = cs.table(vec![vec![0]]).unwrap();
         let before = cs.cost();
         assert!(cs.lookup_value(two, val).is_err());
         assert!(cs.lookup(one, &[Variable::Witness(0).into()]).is_err(), "no witness 0");
@@ -461,9 +463,9 @@ fn constraints_on_missing_variables_are_errors() {
 #[test]
 fn failed_operations_do_not_enter_builder_mode() {
     let g = |cs: &mut Prover<&mut Transcript>, x: Variable| {
-        assert!(cs.table(vec![vec![5]], &[2]).is_err());
+        assert!(cs.table(vec![vec![]]).is_err());
         assert!(cs.product(Variable::Witness(3).into(), x.into(), x.into()).is_err());
-        let r = cs.reciprocal(&[4])?;
+        let r = cs.reciprocal(1)?;
         let mut r2 = r.clone();
         r2.add(vec![Variable::Witness(9).into()]);
         assert!(cs.finish_reciprocal(r2).is_err());
@@ -471,9 +473,9 @@ fn failed_operations_do_not_enter_builder_mode() {
         Ok(())
     };
     let gv = |cs: &mut Verifier<&mut Transcript>, x: Variable| {
-        assert!(cs.table(vec![vec![5]], &[2]).is_err());
+        assert!(cs.table(vec![vec![]]).is_err());
         assert!(cs.product(Variable::Witness(3).into(), x.into(), x.into()).is_err());
-        let r = cs.reciprocal(&[4])?;
+        let r = cs.reciprocal(1)?;
         let mut r2 = r.clone();
         r2.add(vec![Variable::Witness(9).into()]);
         assert!(cs.finish_reciprocal(r2).is_err());
@@ -489,7 +491,7 @@ fn failed_operations_do_not_enter_builder_mode() {
 #[test]
 fn object_safe() {
     fn gadget(cs: &mut dyn CircuitBuilder, v: Option<u64>) -> Result<Variable, R1CSError> {
-        let t = cs.table((0..4u64).map(|x| vec![x]).collect(), &[2])?;
+        let t = cs.table((0..4u64).map(|x| vec![x]).collect())?;
         cs.lookup_value(t, v)
     }
     for backend in backends() {
@@ -505,5 +507,71 @@ fn object_safe() {
         };
         let (proof, V, _) = prove_small(backend, 3, p).unwrap();
         verify_small(backend, &proof, V, v).unwrap();
+    }
+}
+
+/// bpvm's `bitop` pattern (spec §7.3): a 32-bit XOR as 8 lookups of fresh nibbles
+/// `(a_i, b_i, a_i ^ b_i)` into one table, with no range checks on the nibbles — the lookup
+/// bounds them. Costs 8 BP++ gates. A decomposition that only packs right (a nibble of 16 and
+/// a borrow from the next one) is not a row: the prover refuses.
+#[test]
+fn xor32_with_unbounded_nibbles() {
+    fn xor32<CS: CircuitBuilder>(cs: &mut CS, x: Variable, y: Variable, nibbles: Option<[(u64, u64); 8]>) -> Result<Variable, R1CSError> {
+        let t = cs.table((0..256u64).map(|v| vec![v >> 4, v & 15, (v >> 4) ^ (v & 15)]).collect())?;
+        let (mut sx, mut sy, mut sz) = (Lc::default(), Lc::default(), Lc::default());
+        for i in 0..8 {
+            let n = nibbles.map(|n| n[i]);
+            let a = cs.witness(n.map(|n| Scalar::from(n.0)))?;
+            let b = cs.witness(n.map(|n| Scalar::from(n.1)))?;
+            // the honest output nibble; with a cheating decomposition no row matches anyway
+            let r = cs.witness(n.map(|n| Scalar::from((n.0 ^ n.1) & 15)))?;
+            cs.lookup(t, &[a.into(), b.into(), r.into()])?;
+            let w = Scalar::from(1u64 << (4 * i));
+            sx = sx + a * w;
+            sy = sy + b * w;
+            sz = sz + r * w;
+        }
+        cs.constrain(sx - x);
+        cs.constrain(sy - y);
+        let z = cs.witness(nibbles.map(|n| Scalar::from((0..8).map(|i| ((n[i].0 ^ n[i].1) & 15) << (4 * i)).sum::<u64>())))?;
+        cs.constrain(sz - z);
+        Ok(z)
+    }
+    let split = |v: u64| -> [u64; 8] { core::array::from_fn(|i| (v >> (4 * i)) & 15) };
+    let (x, y) = (0xdead_beefu64, 0x0123_4567u64);
+    let honest: [(u64, u64); 8] = core::array::from_fn(|i| (split(x)[i], split(y)[i]));
+    let pc = PedersenGens::default();
+    let bp = BulletproofGens::new(512, 1);
+    for backend in backends() {
+        let run = |nib: [(u64, u64); 8]| -> Result<(R1CSProof, Vec<CompressedRistretto>, Cost), R1CSError> {
+            let mut t = Transcript::new(b"xor32");
+            let mut p = Prover::new(&pc, &mut t);
+            p.set_backend(backend);
+            let (V0, vx) = p.commit(Scalar::from(x), Scalar::from(1u64));
+            let (V1, vy) = p.commit(Scalar::from(y), Scalar::from(2u64));
+            let z = xor32(&mut p, vx, vy, Some(nib))?;
+            let (V2, vz) = p.commit(Scalar::from(x ^ y), Scalar::from(3u64));
+            p.constrain(z - vz);
+            let cost = p.cost();
+            Ok((p.prove_with_rng(&bp, &mut ChaCha20Rng::seed_from_u64(5))?, vec![V0, V1, V2], cost))
+        };
+        let verify = |proof: &R1CSProof, V: &[CompressedRistretto]| {
+            let mut t = Transcript::new(b"xor32");
+            let mut v = Verifier::new(&mut t);
+            v.set_backend(backend);
+            let (vx, vy) = (v.commit(V[0]), v.commit(V[1]));
+            let z = xor32(&mut v, vx, vy, None)?;
+            let vz = v.commit(V[2]);
+            v.constrain(z - vz);
+            v.verify(proof, &pc, &bp)
+        };
+        let (proof, V, cost) = run(honest).unwrap();
+        verify(&proof, &V).unwrap();
+        assert_eq!(cost.bppp_gates, 8, "one gate per lookup, no gate for the 256 multiplicities");
+        // nibble 0 of x as 15 + 16 = 31, nibble 1 one less: the same x, not a row
+        let mut cheat = honest;
+        cheat[0].0 += 16;
+        cheat[1].0 -= 1;
+        assert!(matches!(run(cheat), Err(R1CSError::GadgetError { .. })), "{:?}", backend);
     }
 }

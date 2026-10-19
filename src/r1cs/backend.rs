@@ -27,12 +27,12 @@ mod bppp_backend {
 
     use curve25519_dalek::scalar::Scalar;
 
-    use super::super::builder::{gadget_error, offsets, pack_row, pow2, Argument};
+    use super::super::builder::{gadget_error, needs_early_copy, Argument};
     use super::super::compact::ConstraintStore;
     use super::super::{LinearCombination, Variable};
     use crate::bppp::{
-        ArithmeticCircuit, CircuitProof, CircuitWitness, Pole, ReciprocalCircuit, ReciprocalRow, ReciprocalWitness, Slot,
-        SparseMatrix,
+        ArithmeticCircuit, CircuitProof, CircuitWitness, Component, Pole, ReciprocalCircuit, ReciprocalRow, ReciprocalWitness, Slot,
+        SparseMatrix, TuplePole,
     };
     use crate::errors::R1CSError;
 
@@ -224,18 +224,34 @@ mod bppp_backend {
         let n_m = n_r + n_prod;
         let n_mm = n_p + n_m;
 
-        // Copies of numerators and public coefficients that read w_R.
+        // Copies of numerators and public coefficients that read w_R, and of tuple components
+        // (m >= 2) that read w_L or w_R (spec §7.6): per argument, per private term the
+        // numerator then the components, then the public terms.
         let mut copies: Vec<&LinearCombination> = Vec::new();
         let mut num_copy = Vec::with_capacity(n_p);
+        let mut comp_copy: Vec<Vec<Option<usize>>> = Vec::with_capacity(n_p);
         let mut pub_copy = Vec::with_capacity(rec.args.len());
         for a in rec.args {
-            for (num, _) in &a.private {
+            for (num, tuple) in &a.private {
                 num_copy.push(if has_right(num) {
                     copies.push(num);
                     Some(copies.len() - 1)
                 } else {
                     None
                 });
+                comp_copy.push(
+                    tuple
+                        .iter()
+                        .map(|x| {
+                            if a.m >= 2 && needs_early_copy(x) {
+                                copies.push(x);
+                                Some(copies.len() - 1)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect(),
+                );
             }
             let mut pc = Vec::with_capacity(a.public.len());
             for (coeff, _) in &a.public {
@@ -347,19 +363,27 @@ mod bppp_backend {
             push_eq(&mut w_l, &mut a_l, col_l(n_r + g), l)?;
             push_eq(&mut w_l, &mut a_l, col_r(n_r + g), r)?;
         }
+        // Poles of one-column arguments: w_D,i - x_0 = 0. Poles of arguments with m >= 2 are
+        // tuple poles (spec §4.1), over early columns.
+        let mut tuples = Vec::new();
         let mut pole = 0;
         for a in rec.args {
-            let o = offsets(&a.widths);
             for (_, tuple) in &a.private {
-                let mut terms = vec![(col_d(pole), Scalar::ONE)];
-                let mut constant = Scalar::ZERO;
-                for (x, oj) in tuple.iter().zip(&o) {
-                    let (t, c) = lower(x, -pow2(*oj))?;
-                    terms.extend(t);
-                    constant += c;
+                if a.m == 1 {
+                    push_eq(&mut w_l, &mut a_l, col_d(pole), &tuple[0])?;
+                } else {
+                    let mut components = Vec::with_capacity(a.m);
+                    for (x, copy) in tuple.iter().zip(&comp_copy[pole]) {
+                        components.push(match copy {
+                            Some(q) => Component { terms: vec![(col_copy(*q), Scalar::ONE)], constant: Scalar::ZERO },
+                            None => {
+                                let (terms, constant) = lower(x, Scalar::ONE)?;
+                                Component { terms, constant }
+                            }
+                        });
+                    }
+                    tuples.push(TuplePole { pole, components });
                 }
-                w_l.push_row(terms);
-                a_l.push(constant);
                 pole += 1;
             }
         }
@@ -378,7 +402,7 @@ mod bppp_backend {
                 pole += 1;
             }
             for ((coeff, row), copy) in a.public.iter().zip(pc) {
-                let t = Some(Pole::from(pack_row(row, &a.widths)));
+                let t = Some(Pole(row.iter().map(|e| Scalar::from(*e)).collect()));
                 match copy {
                     Some(q) => terms.push((col_copy(*q), Scalar::ONE, t)),
                     None => {
@@ -408,7 +432,7 @@ mod bppp_backend {
             w_l,
             a_l,
             recip,
-            tuples: vec![],
+            tuples,
             f_l: k > 0,
             f_m: false,
             partition,
@@ -417,9 +441,9 @@ mod bppp_backend {
         let witness = values.map(|v| {
             let mut w_d = Vec::with_capacity(n_p);
             for a in rec.args {
-                let o = offsets(&a.widths);
                 for (_, tuple) in &a.private {
-                    w_d.push(tuple.iter().zip(&o).map(|(x, oj)| pow2(*oj) * v.lc(x)).sum());
+                    // a tuple pole is set by the prover after eta (spec §4.3)
+                    w_d.push(if a.m == 1 { v.lc(&tuple[0]) } else { Scalar::ZERO });
                 }
             }
             let pad = |x: &[Scalar]| -> Vec<Scalar> {

@@ -3,8 +3,6 @@
 //! `verify` to Bulletproofs (§7.5, logUp over randomized constraints) or to a BP++ reciprocal
 //! form circuit (§7.6).
 
-use std::collections::HashMap;
-
 use curve25519_dalek::scalar::Scalar;
 use clear_on_drop::clear::Clear;
 use subtle::{Choice, ConstantTimeEq};
@@ -12,16 +10,10 @@ use subtle::{Choice, ConstantTimeEq};
 use super::{ConstraintSystem, LinearCombination, RandomizedConstraintSystem, Variable};
 use crate::errors::R1CSError;
 
-/// A column width, in bits.
-pub type Width = u32;
-
 /// Up to this many (row, lookup) pairs the multiplicities are counted directly (≈50 ns a
 /// pair), beyond by an oblivious sort (both constant time; measured crossover: 2^16 rows and
 /// 2^12 lookups take 0.8 s sorted, 13 s directly).
 const DIRECT_COUNT_MAX: usize = 1 << 16;
-
-/// Largest total width of a tuple: packed tuples stay below `2^252 < l`.
-pub const MAX_TUPLE_BITS: u64 = 252;
 
 /// A table created by [`CircuitBuilder::table`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,40 +47,40 @@ impl Cost {
     }
 }
 
-/// A reciprocal argument under construction (spec §7.2): terms `num / (X + pack(tuple))` whose
-/// sum must vanish as a rational function of `X`. Recorded by
-/// [`CircuitBuilder::finish_reciprocal`], which validates it.
+/// A reciprocal argument under construction (spec §7.2): terms `num / (X + tuple)` over
+/// tuples of `m` components, which must cancel per tuple (distinct tuples are distinct poles).
+/// Recorded by [`CircuitBuilder::finish_reciprocal`], which validates it.
 #[derive(Clone, Debug)]
 pub struct Reciprocal {
-    pub(super) widths: Vec<Width>,
+    pub(super) m: usize,
     pub(super) private: Vec<(LinearCombination, Vec<LinearCombination>)>,
     pub(super) public: Vec<(LinearCombination, Vec<u64>)>,
 }
 
 impl Reciprocal {
-    /// The term `1 / (X + pack(tuple))`.
+    /// The term `1 / (X + tuple)`.
     pub fn add(&mut self, tuple: Vec<LinearCombination>) {
         self.add_weighted(Scalar::ONE.into(), tuple)
     }
 
-    /// The term `-1 / (X + pack(tuple))`.
+    /// The term `-1 / (X + tuple)`.
     pub fn sub(&mut self, tuple: Vec<LinearCombination>) {
         self.add_weighted((-Scalar::ONE).into(), tuple)
     }
 
-    /// The term `num / (X + pack(tuple))`.
+    /// The term `num / (X + tuple)`.
     pub fn add_weighted(&mut self, num: LinearCombination, tuple: Vec<LinearCombination>) {
         self.private.push((num, tuple));
     }
 
-    /// The term `coeff / (X + pack(row))` for a public row.
+    /// The term `coeff / (X + row)` for a public row.
     pub fn add_public(&mut self, coeff: LinearCombination, row: Vec<u64>) {
         self.public.push((coeff, row));
     }
 
-    /// The width list.
-    pub fn widths(&self) -> &[Width] {
-        &self.widths
+    /// The number of components of the tuples.
+    pub fn columns(&self) -> usize {
+        self.m
     }
 }
 
@@ -102,21 +94,23 @@ pub trait CircuitBuilder: ConstraintSystem {
     /// The constraint `l * r = out` (one multiplier, one BP++ gate).
     fn product(&mut self, l: LinearCombination, r: LinearCombination, out: LinearCombination) -> Result<(), R1CSError>;
 
-    /// A public table with the given column widths; every entry of column `j` is below
-    /// `2^widths[j]`, and the widths sum to at most 252 bits.
-    fn table(&mut self, rows: Vec<Vec<u64>>, widths: &[Width]) -> Result<TableId, R1CSError>;
+    /// A public table: at least one row, all rows of the same length `m >= 1` (the columns).
+    fn table(&mut self, rows: Vec<Vec<u64>>) -> Result<TableId, R1CSError>;
 
-    /// Assert that `tuple` is a row of table `t`. For tables of two or more columns every
-    /// component needs a proven bound (spec §7.3).
+    /// Assert that `tuple` (`m` components) is a row of table `t`, component by component; the
+    /// components may be any field elements (spec §7.3: the backends compress tuples with a
+    /// challenge, so the lookup itself bounds every component).
     fn lookup(&mut self, t: TableId, tuple: &[LinearCombination]) -> Result<(), R1CSError>;
 
-    /// A witness that is an entry of the one-column table `t` (and bounded by its width).
+    /// A witness that is an entry of the one-column table `t`.
     fn lookup_value(&mut self, t: TableId, v: Option<u64>) -> Result<Variable, R1CSError>;
 
-    /// Start a reciprocal argument over tuples of the given widths.
-    fn reciprocal(&mut self, widths: &[Width]) -> Result<Reciprocal, R1CSError> {
-        check_widths(widths)?;
-        Ok(Reciprocal { widths: widths.to_vec(), private: Vec::new(), public: Vec::new() })
+    /// Start a reciprocal argument over tuples of `m >= 1` components.
+    fn reciprocal(&mut self, m: usize) -> Result<Reciprocal, R1CSError> {
+        if m == 0 {
+            return Err(gadget_error("a reciprocal argument needs at least one column"));
+        }
+        Ok(Reciprocal { m, private: Vec::new(), public: Vec::new() })
     }
 
     /// Validate and record a reciprocal argument.
@@ -130,50 +124,11 @@ pub(super) fn gadget_error(description: &str) -> R1CSError {
     R1CSError::GadgetError { description: description.into() }
 }
 
-pub(super) fn check_widths(widths: &[Width]) -> Result<(), R1CSError> {
-    let total: u64 = widths.iter().map(|w| *w as u64).sum();
-    if widths.is_empty() || widths.iter().any(|w| *w == 0) || total > MAX_TUPLE_BITS {
-        return Err(gadget_error("invalid width list"));
-    }
-    Ok(())
-}
-
-fn check_row(row: &[u64], widths: &[Width]) -> Result<(), R1CSError> {
-    if row.len() != widths.len() || row.iter().zip(widths).any(|(e, w)| *w < 64 && e >> *w != 0) {
-        return Err(gadget_error("table row does not match the widths"));
-    }
-    Ok(())
-}
-
-/// The packing offsets `o_j` of a width list (spec §7.2).
-pub(super) fn offsets(widths: &[Width]) -> Vec<u32> {
-    let mut o = 0;
-    widths
-        .iter()
-        .map(|w| {
-            let x = o;
-            o += w;
-            x
-        })
-        .collect()
-}
-
-/// `2^e` for `e < 252`.
-pub(super) fn pow2(e: u32) -> Scalar {
-    let mut b = [0u8; 32];
-    b[(e / 8) as usize] = 1 << (e % 8);
-    Scalar::from_bytes_mod_order(b)
-}
-
-/// `pack(row) = sum_j 2^{o_j} row_j`.
-pub(super) fn pack_row(row: &[u64], widths: &[Width]) -> Scalar {
-    row.iter().zip(offsets(widths)).map(|(e, o)| pow2(o) * Scalar::from(*e)).sum()
-}
-
 /// A recorded table.
 #[derive(Clone)]
 pub(super) struct Table {
-    pub(super) widths: Vec<Width>,
+    /// Columns.
+    pub(super) m: usize,
     pub(super) rows: Vec<Vec<u64>>,
     pub(super) queries: Vec<Vec<LinearCombination>>,
 }
@@ -181,7 +136,8 @@ pub(super) struct Table {
 /// A recorded reciprocal argument: `(numerator, tuple)` private terms, `(coefficient, row)`
 /// public terms.
 pub(super) struct Argument {
-    pub(super) widths: Vec<Width>,
+    /// Components of every tuple and row.
+    pub(super) m: usize,
     pub(super) private: Vec<(LinearCombination, Vec<LinearCombination>)>,
     pub(super) public: Vec<(LinearCombination, Vec<u64>)>,
 }
@@ -205,8 +161,6 @@ pub(super) struct Builder {
     pub(super) products: Vec<(LinearCombination, LinearCombination, LinearCombination)>,
     pub(super) tables: Vec<Table>,
     pub(super) args: Vec<Argument>,
-    /// Recorded bounds `b_x` in bits (spec §7.3).
-    bounds: HashMap<Variable, Width>,
     /// Test hook: count by the oblivious sort from this many (row, lookup) pairs on.
     #[cfg(test)]
     pub(super) direct_count_max: Option<usize>,
@@ -231,47 +185,12 @@ impl Builder {
         lc.terms.iter().try_for_each(|(x, _)| self.check_var(*x, c))
     }
 
-    /// The bound of an LC (spec §7.3): `c_0 + sum_x c_x (2^{b_x} - 1)`, or `None`.
-    fn bound(&self, lc: &LinearCombination) -> Option<Big> {
-        let mut merged: Vec<(Variable, Scalar)> = Vec::new();
-        let mut c0 = Scalar::ZERO;
-        for (x, c) in &lc.terms {
-            match x {
-                Variable::One() => c0 += c,
-                _ => match merged.iter_mut().find(|(y, _)| y == x) {
-                    Some((_, d)) => *d += c,
-                    None => merged.push((*x, *c)),
-                },
-            }
+    /// Validate a tuple of `m` components (spec §7.2).
+    fn check_tuple(&self, tuple: &[LinearCombination], m: usize, c: Counts) -> Result<(), R1CSError> {
+        if tuple.len() != m {
+            return Err(gadget_error("tuple length does not match the columns"));
         }
-        let mut sum = Big::from_u64(small(&c0)?);
-        for (x, c) in merged {
-            if c == Scalar::ZERO {
-                continue;
-            }
-            let b = *self.bounds.get(&x)?;
-            sum = sum.add(&Big::pow2_minus_1(b).mul_u64(small(&c)?));
-        }
-        Some(sum)
-    }
-
-    /// Validate a tuple against a width list (spec §7.2, §7.3).
-    fn check_tuple(&self, tuple: &[LinearCombination], widths: &[Width], c: Counts) -> Result<(), R1CSError> {
-        if tuple.len() != widths.len() {
-            return Err(gadget_error("tuple length does not match the widths"));
-        }
-        for lc in tuple {
-            self.check_lc(lc, c)?;
-        }
-        if widths.len() >= 2 {
-            for (lc, w) in tuple.iter().zip(widths) {
-                match self.bound(lc) {
-                    Some(b) if b.below_pow2(*w) => {}
-                    _ => return Err(gadget_error("a tuple component has no bound below its width")),
-                }
-            }
-        }
-        Ok(())
+        tuple.iter().try_for_each(|lc| self.check_lc(lc, c))
     }
 
     pub(super) fn witness(&mut self) -> Variable {
@@ -289,16 +208,17 @@ impl Builder {
         Ok(())
     }
 
-    pub(super) fn table(&mut self, rows: Vec<Vec<u64>>, widths: &[Width]) -> Result<TableId, R1CSError> {
-        check_widths(widths)?;
-        if rows.is_empty() {
-            return Err(gadget_error("empty table"));
-        }
-        for row in &rows {
-            check_row(row, widths)?;
+    pub(super) fn table(&mut self, rows: Vec<Vec<u64>>) -> Result<TableId, R1CSError> {
+        let m = match rows.first() {
+            None => return Err(gadget_error("empty table")),
+            Some(r) if r.is_empty() => return Err(gadget_error("a table needs at least one column")),
+            Some(r) => r.len(),
+        };
+        if rows.iter().any(|r| r.len() != m) {
+            return Err(gadget_error("table rows of different lengths"));
         }
         self.active = true;
-        self.tables.push(Table { widths: widths.to_vec(), rows, queries: Vec::new() });
+        self.tables.push(Table { m, rows, queries: Vec::new() });
         Ok(TableId(self.tables.len() - 1))
     }
 
@@ -307,42 +227,38 @@ impl Builder {
     }
 
     pub(super) fn lookup(&mut self, t: TableId, tuple: &[LinearCombination], c: Counts) -> Result<(), R1CSError> {
-        let widths = self.get_table(t)?.widths.clone();
-        self.check_tuple(tuple, &widths, c)?;
+        let m = self.get_table(t)?.m;
+        self.check_tuple(tuple, m, c)?;
         self.active = true;
-        if widths.len() == 1 {
-            if let [(x, coeff)] = tuple[0].terms[..] {
-                if x != Variable::One() && coeff == Scalar::ONE {
-                    let b = self.bounds.entry(x).or_insert(widths[0]);
-                    *b = (*b).min(widths[0]);
-                }
-            }
-        }
         self.tables[t.0].queries.push(tuple.to_vec());
         Ok(())
     }
 
     /// `lookup_value` needs a one-column table; checked before its witness is created.
     pub(super) fn check_value_table(&self, t: TableId) -> Result<(), R1CSError> {
-        if self.get_table(t)?.widths.len() != 1 {
+        if self.get_table(t)?.m != 1 {
             return Err(gadget_error("lookup_value needs a one-column table"));
         }
         Ok(())
     }
 
     pub(super) fn finish_reciprocal(&mut self, r: Reciprocal, c: Counts) -> Result<(), R1CSError> {
-        check_widths(&r.widths)?;
+        if r.m == 0 {
+            return Err(gadget_error("a reciprocal argument needs at least one column"));
+        }
         for (num, tuple) in &r.private {
             self.check_lc(num, c)?;
-            self.check_tuple(tuple, &r.widths, c)?;
+            self.check_tuple(tuple, r.m, c)?;
         }
         for (coeff, row) in &r.public {
             self.check_lc(coeff, c)?;
-            check_row(row, &r.widths)?;
+            if row.len() != r.m {
+                return Err(gadget_error("public row length does not match the columns"));
+            }
         }
         self.active = true;
         if !r.private.is_empty() || !r.public.is_empty() {
-            self.args.push(Argument { widths: r.widths, private: r.private, public: r.public });
+            self.args.push(Argument { m: r.m, private: r.private, public: r.public });
         }
         Ok(())
     }
@@ -354,12 +270,19 @@ impl Builder {
         let n_p = self.args.iter().map(|a| a.private.len()).sum::<usize>() + used().map(|t| t.queries.len()).sum::<usize>();
         let n_prod = self.products.len();
         let n_r = if n == 0 && n_prod == 0 && n_p == 0 { 1 } else { n };
+        // copies (spec §7.6): numerators and coefficients that read w_R, components of
+        // tuples (m >= 2) that read w_L or w_R
         let right = |lc: &LinearCombination| lc.terms.iter().any(|(x, _)| matches!(x, Variable::MultiplierRight(_)));
+        let comp_copies = |m: usize, tuple: &[LinearCombination]| if m >= 2 { tuple.iter().filter(|x| needs_early_copy(x)).count() } else { 0 };
         let copies: usize = self
             .args
             .iter()
-            .map(|a| a.private.iter().filter(|(num, _)| right(num)).count() + a.public.iter().filter(|(c, _)| right(c)).count())
-            .sum();
+            .map(|a| {
+                a.private.iter().map(|(num, x)| right(num) as usize + comp_copies(a.m, x)).sum::<usize>()
+                    + a.public.iter().filter(|(c, _)| right(c)).count()
+            })
+            .sum::<usize>()
+            + used().map(|t| t.queries.iter().map(|q| comp_copies(t.m, q)).sum::<usize>()).sum::<usize>();
         let gates = n_p + n_r + n_prod;
         Cost {
             bp_phase1: n + (n_w + 1) / 2 + n_prod,
@@ -426,7 +349,7 @@ impl Builder {
                 .zip(table.rows)
                 .map(|(r, row)| (LinearCombination::from(Variable::Witness(first + r)) * (-Scalar::ONE), row))
                 .collect();
-            self.args.push(Argument { widths: table.widths, private, public });
+            self.args.push(Argument { m: table.m, private, public });
         }
         Ok(values)
     }
@@ -466,7 +389,7 @@ pub(super) mod cheat {
 /// (for tuples of two or more components) and `c`; one multiplier `r * d = num` with
 /// `d = c + sum_j alpha^j x_j` per private term; `sum r + sum coeff / d(row) = 0`.
 pub(super) fn logup<CS: RandomizedConstraintSystem>(cs: &mut CS, arg: Argument) -> Result<(), R1CSError> {
-    let m = arg.widths.len();
+    let m = arg.m;
     let alpha = if m > 1 { cs.challenge_scalar(b"logup alpha") } else { Scalar::ONE };
     let c = cs.challenge_scalar(b"logup c");
     let pows: Vec<Scalar> = core::iter::successors(Some(Scalar::ONE), |p| Some(p * alpha)).take(m).collect();
@@ -531,90 +454,10 @@ pub(super) fn logup<CS: RandomizedConstraintSystem>(cs: &mut CS, arg: Argument) 
     Ok(())
 }
 
-/// A scalar as an integer below `2^64`, if it is one.
-fn small(c: &Scalar) -> Option<u64> {
-    let b = c.as_bytes();
-    if b[8..].iter().all(|x| *x == 0) {
-        let mut lo = [0u8; 8];
-        lo.copy_from_slice(&b[..8]);
-        Some(u64::from_le_bytes(lo))
-    } else {
-        None
-    }
-}
-
-/// Unsigned integers of 512 bits (enough for bounds: terms below `2^316`), saturating.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct Big([u64; 8]);
-
-impl Big {
-    fn from_u64(x: u64) -> Self {
-        let mut l = [0; 8];
-        l[0] = x;
-        Big(l)
-    }
-
-    /// `2^b - 1`, `b <= 252`.
-    fn pow2_minus_1(b: Width) -> Self {
-        let mut l = [0u64; 8];
-        for (i, x) in l.iter_mut().enumerate() {
-            let lo = 64 * i as u32;
-            if b >= lo + 64 {
-                *x = u64::MAX;
-            } else if b > lo {
-                *x = (1u64 << (b - lo)) - 1;
-            }
-        }
-        Big(l)
-    }
-
-    fn saturated() -> Self {
-        Big([u64::MAX; 8])
-    }
-
-    fn add(&self, o: &Big) -> Big {
-        let mut l = [0u64; 8];
-        let mut carry = 0u128;
-        for i in 0..8 {
-            let s = self.0[i] as u128 + o.0[i] as u128 + carry;
-            l[i] = s as u64;
-            carry = s >> 64;
-        }
-        if carry != 0 {
-            Big::saturated()
-        } else {
-            Big(l)
-        }
-    }
-
-    fn mul_u64(&self, c: u64) -> Big {
-        let mut l = [0u64; 8];
-        let mut carry = 0u128;
-        for i in 0..8 {
-            let p = self.0[i] as u128 * c as u128 + carry;
-            l[i] = p as u64;
-            carry = p >> 64;
-        }
-        if carry != 0 {
-            Big::saturated()
-        } else {
-            Big(l)
-        }
-    }
-
-    /// `self < 2^w`.
-    fn below_pow2(&self, w: Width) -> bool {
-        self.0.iter().enumerate().all(|(i, x)| {
-            let lo = 64 * i as u32;
-            if w >= lo + 64 {
-                true
-            } else if w > lo {
-                x >> (w - lo) == 0
-            } else {
-                *x == 0
-            }
-        })
-    }
+/// Whether a tuple component reads `w_L` or `w_R` and so needs a copy into `C_O` before the
+/// BP++ challenge `eta` (spec §7.6).
+pub(super) fn needs_early_copy(lc: &LinearCombination) -> bool {
+    lc.terms.iter().any(|(x, _)| matches!(x, Variable::MultiplierLeft(_) | Variable::MultiplierRight(_)))
 }
 
 #[cfg(test)]
@@ -623,80 +466,45 @@ mod tests {
 
     const C: Counts = Counts { n: 2, k: 1 };
 
-    fn lc(terms: &[(Variable, u64)]) -> LinearCombination {
-        terms.iter().map(|(x, c)| (*x, Scalar::from(*c))).collect()
-    }
-
-    /// A builder with witnesses `W0..W3`, `W0`, `W1` bounded by 4 bits through a one-column table.
-    fn bounded() -> (Builder, TableId) {
+    /// A builder with witnesses `W0..W3` and a one-column table of 16 rows.
+    fn four() -> (Builder, TableId) {
         let mut b = Builder::default();
         for _ in 0..4 {
             b.witness();
         }
-        let t = b.table((0..16).map(|x| vec![x]).collect(), &[4]).unwrap();
-        b.lookup(t, &[Variable::Witness(0).into()], C).unwrap();
-        b.lookup(t, &[Variable::Witness(1).into()], C).unwrap();
+        let t = b.table((0..16).map(|x| vec![x]).collect()).unwrap();
         (b, t)
     }
 
     #[test]
-    fn widths_and_tables_are_validated() {
+    fn tables_are_validated() {
         let mut b = Builder::default();
-        assert!(b.table(vec![vec![1]], &[]).is_err());
-        assert!(b.table(vec![vec![1]], &[0]).is_err());
-        assert!(b.table(vec![vec![1, 1]], &[126, 127]).is_err(), "253 bits");
-        assert!(b.table(vec![vec![1, 1]], &[126, 126]).is_ok(), "252 bits");
-        assert!(b.table(Vec::<Vec<u64>>::new(), &[8]).is_err(), "empty");
-        assert!(b.table(vec![vec![256]], &[8]).is_err(), "entry >= 2^w");
-        assert!(b.table(vec![vec![255]], &[8]).is_ok());
-        assert!(b.table(vec![vec![u64::MAX]], &[64]).is_ok());
-        assert!(b.table(vec![vec![1]], &[4, 4]).is_err(), "row length");
-        assert_eq!(b.tables.len(), 3);
+        assert!(b.table(vec![vec![]]).is_err(), "no column");
+        assert!(b.table(Vec::<Vec<u64>>::new()).is_err(), "empty");
+        assert!(b.table(vec![vec![1], vec![1, 2]]).is_err(), "row length");
+        assert!(b.table(vec![vec![1, 2], vec![1]]).is_err(), "row length");
+        assert!(b.table(vec![vec![u64::MAX, 0, 7]]).is_ok());
+        assert!(b.table(vec![vec![256], vec![256]]).is_ok(), "duplicate rows");
+        assert_eq!(b.tables.len(), 2);
+        assert_eq!(b.tables[0].m, 3);
     }
 
+    /// No bounds (spec §7.3): any component, negative or huge coefficients, unbounded
+    /// witnesses, constants, products' wires.
     #[test]
-    fn bound_rule() {
-        let (mut b, _) = bounded();
-        let (w0, w1, w2) = (Variable::Witness(0), Variable::Witness(1), Variable::Witness(2));
-        let t2 = b.table(vec![vec![0, 0]], &[8, 8]).unwrap();
-        // w0 + 16 w1 <= 255: fits 8 bits; plus 1 does not
-        assert!(b.lookup(t2, &[lc(&[(w0, 1), (w1, 16)]), w0.into()], C).is_ok());
-        assert!(b.lookup(t2, &[lc(&[(w0, 1), (w1, 16), (Variable::One(), 1)]), w0.into()], C).is_err());
-        // a bound of exactly 2^w - 1 is accepted, 2^w is not (w0 has 4 bits: 15 * 17 = 255)
-        assert!(b.lookup(t2, &[lc(&[(w0, 17)]), w0.into()], C).is_ok());
-        assert!(b.lookup(t2, &[lc(&[(w0, 17), (Variable::One(), 1)]), w0.into()], C).is_err());
-        // unbounded, negative, too large a coefficient; merged terms; zero coefficients
-        assert!(b.lookup(t2, &[w2.into(), w0.into()], C).is_err(), "unbounded");
-        assert!(b.lookup(t2, &[w0 * (-Scalar::ONE), w0.into()], C).is_err(), "negative");
-        assert!(b.lookup(t2, &[w0 * Scalar::from(1u128 << 64), w0.into()], C).is_err(), "2^64");
-        assert!(b.lookup(t2, &[w0 + w0 * Scalar::from(16u64), w0.into()], C).is_ok(), "17 w0 merged");
-        assert!(b.lookup(t2, &[w0 - w0 + w2 * Scalar::ZERO, w0.into()], C).is_ok(), "zero coefficients");
-        assert!(b.lookup(t2, &[(w0 + w0) - w0, w0.into()], C).is_ok(), "merged 1 + 1 - 1");
-    }
-
-    #[test]
-    fn bounds_come_from_single_term_lookups_only() {
-        let (mut b, t) = bounded();
-        let (w2, w3) = (Variable::Witness(2), Variable::Witness(3));
-        let t2 = b.table(vec![vec![0, 0]], &[8, 8]).unwrap();
-        b.lookup(t, &[w2 * Scalar::from(2u64)], C).unwrap(); // coefficient 2: no bound
-        b.lookup(t, &[w3 + Scalar::ZERO], C).unwrap(); // two terms: no bound
-        assert!(b.lookup(t2, &[w2.into(), w2.into()], C).is_err());
-        assert!(b.lookup(t2, &[w3.into(), w3.into()], C).is_err());
-        b.lookup(t, &[w3.into()], C).unwrap();
-        assert!(b.lookup(t2, &[w3.into(), w3.into()], C).is_ok());
-        // the tighter of two bounds wins
-        let wide = b.table(vec![vec![0]], &[200]).unwrap();
-        b.lookup(wide, &[w3.into()], C).unwrap();
-        assert_eq!(b.bounds[&w3], 4);
-        // a one-component tuple needs no bound
-        let field = b.table(vec![vec![0]], &[252]).unwrap();
-        assert!(b.lookup(field, &[w2 * (-Scalar::ONE)], C).is_ok());
+    fn tuple_components_need_no_bound() {
+        let (mut b, _) = four();
+        let (w0, w2) = (Variable::Witness(0), Variable::Witness(2));
+        let t2 = b.table(vec![vec![0, 0]]).unwrap();
+        assert!(b.lookup(t2, &[w2.into(), w0.into()], C).is_ok());
+        assert!(b.lookup(t2, &[w0 * (-Scalar::ONE), Scalar::from(1u128 << 100).into()], C).is_ok());
+        assert!(b.lookup(t2, &[Variable::MultiplierLeft(1).into(), Variable::MultiplierRight(0) - w0], C).is_ok());
+        assert_eq!(b.tables[1].queries.len(), 3);
     }
 
     #[test]
     fn variables_must_exist() {
-        let (mut b, t) = bounded();
+        let (mut b, t) = four();
         assert!(b.lookup(t, &[Variable::Witness(4).into()], C).is_err());
         assert!(b.lookup(t, &[Variable::MultiplierRight(2).into()], C).is_err());
         assert!(b.lookup(t, &[Variable::MultiplierOutput(1).into()], C).is_ok());
@@ -704,47 +512,51 @@ mod tests {
         assert!(b.product(Variable::Witness(9).into(), Scalar::ONE.into(), Scalar::ONE.into(), C).is_err());
         assert!(b.lookup(TableId(7), &[Scalar::ONE.into()], C).is_err());
         assert!(b.lookup(t, &[Scalar::ONE.into(), Scalar::ONE.into()], C).is_err(), "tuple length");
+        assert!(b.lookup(t, &[], C).is_err(), "tuple length");
         let before = b.tables[t.0].queries.len();
         assert!(b.lookup(t, &[Variable::Witness(4).into()], C).is_err());
         assert_eq!(b.tables[t.0].queries.len(), before, "a failed operation records nothing");
+        let t2 = b.table(vec![vec![0, 0]]).unwrap();
+        assert!(b.check_value_table(t2).is_err(), "lookup_value needs one column");
+        assert!(b.check_value_table(t).is_ok());
     }
 
     #[test]
     fn reciprocals_are_validated() {
-        let (mut b, _) = bounded();
+        let (mut b, _) = four();
         let (w0, w1, w2) = (Variable::Witness(0), Variable::Witness(1), Variable::Witness(2));
-        let new = |w: &[Width]| Reciprocal { widths: w.to_vec(), private: vec![], public: vec![] };
-        let mut r = new(&[4, 4]);
+        let new = |m: usize| Reciprocal { m, private: vec![], public: vec![] };
+        let mut r = new(2);
         r.add(vec![w0.into(), w1.into()]);
-        r.add_public(w2.into(), vec![15, 15]);
+        r.add_public(w2.into(), vec![15, 1 << 40]);
         assert!(b.finish_reciprocal(r.clone(), C).is_ok());
-        let mut x = r.clone();
-        x.add_public(Scalar::ONE.into(), vec![16, 0]);
-        assert!(b.finish_reciprocal(x, C).is_err(), "row entry >= 2^w");
         let mut x = r.clone();
         x.add_public(Scalar::ONE.into(), vec![1]);
         assert!(b.finish_reciprocal(x, C).is_err(), "row length");
         let mut x = r.clone();
-        x.sub(vec![w2.into(), w0.into()]);
-        assert!(b.finish_reciprocal(x, C).is_err(), "unbounded component");
+        x.sub(vec![w2.into()]);
+        assert!(b.finish_reciprocal(x, C).is_err(), "tuple length");
         let mut x = r.clone();
         x.add_weighted(Variable::Witness(8).into(), vec![w0.into(), w1.into()]);
         assert!(b.finish_reciprocal(x, C).is_err(), "unknown numerator variable");
-        // one component: any LC
-        let mut x = new(&[252]);
+        let mut x = r.clone();
+        x.add(vec![w0.into(), Variable::Witness(8).into()]);
+        assert!(b.finish_reciprocal(x, C).is_err(), "unknown component variable");
+        let mut x = new(1);
         x.add_weighted(w2.into(), vec![w2 * Scalar::from(7u64) + Scalar::ONE]);
         assert!(b.finish_reciprocal(x, C).is_ok());
         assert_eq!(b.args.len(), 2);
-        assert!(b.finish_reciprocal(new(&[8]), C).is_ok());
+        assert!(b.finish_reciprocal(new(3), C).is_ok());
         assert_eq!(b.args.len(), 2, "an empty argument is dropped");
+        assert!(b.finish_reciprocal(new(0), C).is_err(), "no column");
     }
 
     #[test]
     fn finalize_counts_first_equal_row() {
         let mut b = Builder::default();
         let w: Vec<Variable> = (0..3).map(|_| b.witness()).collect();
-        let t = b.table(vec![vec![1], vec![2], vec![1]], &[2]).unwrap();
-        let _unused = b.table(vec![vec![0]], &[1]).unwrap();
+        let t = b.table(vec![vec![1], vec![2], vec![1]]).unwrap();
+        let _unused = b.table(vec![vec![0]]).unwrap();
         for x in &w {
             b.lookup(t, &[(*x).into()], C).unwrap();
         }
@@ -762,10 +574,34 @@ mod tests {
         // a query equal to no row
         let mut b = Builder::default();
         let x = b.witness();
-        let t = b.table(vec![vec![1]], &[2]).unwrap();
+        let t = b.table(vec![vec![1]]).unwrap();
         b.lookup(t, &[x.into()], C).unwrap();
         let zero = |_: &LinearCombination| Scalar::ZERO;
         assert!(b.finalize(Some(&zero)).is_err());
+    }
+
+    /// Copies are counted for tuple components that read `w_L` or `w_R` (m >= 2), lookups of
+    /// tables included, not for one-component tuples (spec §7.6).
+    #[test]
+    fn cost_counts_component_copies() {
+        let (l, r, o) = (Variable::MultiplierLeft(0), Variable::MultiplierRight(1), Variable::MultiplierOutput(0));
+        let mut b = Builder::default();
+        let t1 = b.table(vec![vec![0]]).unwrap();
+        b.lookup(t1, &[l.into()], C).unwrap();
+        let base = b.cost(2, 1);
+        let t2 = b.table(vec![vec![0, 0]]).unwrap();
+        b.lookup(t2, &[l.into(), o + Scalar::ONE], C).unwrap();
+        let one = b.cost(2, 1);
+        // + 1 pole, + 1 multiplicity, + 1 copy (l); o needs none
+        assert_eq!(one.bppp_gates, base.bppp_gates + 1);
+        assert_eq!(one.bppp_lin, base.bppp_lin + 1 + 1 - 1);
+        let mut x = Reciprocal { m: 2, private: vec![], public: vec![] };
+        x.add_weighted(r.into(), vec![r.into(), l + r]);
+        b.finish_reciprocal(x, C).unwrap();
+        let two = b.cost(2, 1);
+        // + 1 pole, + 3 copies (numerator r, both components)
+        assert_eq!(two.bppp_gates, one.bppp_gates + 1);
+        assert_eq!(two.bppp_lin, one.bppp_lin + 3 - 1);
     }
 
     /// The oblivious sort gives the multiplicities of the direct count (duplicate rows, a
@@ -780,8 +616,8 @@ mod tests {
             let vals: Vec<(u64, u64)> = (0..n_w).map(|_| (rng.gen_range(0..6), rng.gen_range(0..3))).collect();
             let w: Vec<Variable> = (0..2 * n_w).map(|_| b.witness()).collect();
             let rows: Vec<Vec<u64>> = (0..rng.gen_range(1..20)).map(|_| vec![rng.gen_range(0..6), rng.gen_range(0..3)]).collect();
-            let range = b.table((0..8).map(|x| vec![x]).collect(), &[3]).unwrap();
-            let t = b.table(rows, &[3, 3]).unwrap();
+            let range = b.table((0..8).map(|x| vec![x]).collect()).unwrap();
+            let t = b.table(rows).unwrap();
             for x in &w {
                 b.lookup(range, &[(*x).into()], C).unwrap();
             }
@@ -805,19 +641,5 @@ mod tests {
                 assert_eq!(d, s, "trial {}", trial);
             }
         }
-    }
-
-    #[test]
-    fn big_integers() {
-        assert!(Big::pow2_minus_1(252).below_pow2(252));
-        assert!(!Big::pow2_minus_1(252).add(&Big::from_u64(1)).below_pow2(252));
-        assert!(Big::pow2_minus_1(64).below_pow2(64));
-        assert!(!Big::from_u64(1 << 63).mul_u64(2).below_pow2(64));
-        assert!(Big::pow2_minus_1(252).mul_u64(u64::MAX).below_pow2(316));
-        assert!(!Big::saturated().below_pow2(252));
-        assert_eq!(pow2(0), Scalar::ONE);
-        assert_eq!(pow2(251), (0..251).fold(Scalar::ONE, |a, _| a + a));
-        assert_eq!(pack_row(&[3, 1], &[2, 5]), Scalar::from(7u64));
-        assert_eq!(offsets(&[2, 5, 1]), vec![0, 2, 7]);
     }
 }

@@ -100,7 +100,7 @@ fn r1cs_proof(builder: bool) -> Vec<u8> {
     let (_, _, o) = p.multiply(x.into(), y.into());
     p.constrain(o - Scalar::from(3 * 0xbeefu64));
     if builder {
-        let byte = p.table((0..256u64).map(|v| vec![v]).collect(), &[8]).unwrap();
+        let byte = p.table((0..256u64).map(|v| vec![v]).collect()).unwrap();
         let mut sum = LinearCombination::default();
         for i in 0..2 {
             let b = p.lookup_value(byte, Some((0xbeef >> (8 * i)) & 255)).unwrap();
@@ -109,7 +109,7 @@ fn r1cs_proof(builder: bool) -> Vec<u8> {
         p.constrain(sum - x);
         let w = p.witness(Some(Scalar::from(7u64))).unwrap();
         p.product(w.into(), y.into(), Scalar::from(21u64).into()).unwrap();
-        let mut r = p.reciprocal(&[252]).unwrap();
+        let mut r = p.reciprocal(1).unwrap();
         r.add_weighted(x.into(), vec![Variable::Committed(1).into()]);
         r.add_public(LinearCombination::from(-Scalar::from(0xbeefu64)), vec![3]);
         p.finish_reciprocal(r).unwrap();

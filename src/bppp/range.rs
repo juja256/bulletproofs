@@ -18,8 +18,8 @@ use crate::errors::ProofError;
 use crate::{BulletproofGens, PedersenGens};
 
 /// The digit layout of `[0, range)` in `base` (spec §5.1): `(weight, radix)` per digit, in
-/// construction order. Needs `range >= 2`, `base >= 2`.
-pub fn layout(range: u128, base: u64) -> Vec<(u128, u64)> {
+/// construction order. Needs `range >= 2`, `base >= 2` (validated by the statements).
+pub(crate) fn layout(range: u128, base: u64) -> Vec<(u128, u64)> {
     let b = base as u128;
     let mut out = Vec::new();
     let (mut s, mut p) = (0u128, 1u128);
@@ -94,13 +94,12 @@ pub(crate) fn multiplicities(digits: &[(u64, u64)], r: u64) -> Vec<u64> {
         .collect()
 }
 
-/// A range statement (spec §5.2): a base and `[A_i, B_i)` per value.
+/// A range statement (spec §5.2): a base and `[A_i, B_i)` per value. Built only through
+/// [`RangeStatement::new`], so every statement is valid.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RangeStatement {
-    /// The base, `2..=256`.
-    pub base: u64,
-    /// `(A_i, B_i)` with `2 <= B_i - A_i` and `B_i <= 2^64`.
-    pub ranges: Vec<(u64, u128)>,
+    base: u64,
+    ranges: Vec<(u64, u128)>,
 }
 
 /// The layout of a built range circuit.
@@ -158,7 +157,18 @@ pub(crate) fn table_rows(radices: &[u64], pole_offset: usize, n_mm: usize, mult_
 }
 
 impl RangeStatement {
-    /// Validate a statement.
+    /// The base, `2..=256`.
+    pub fn base(&self) -> u64 {
+        self.base
+    }
+
+    /// `(A_i, B_i)` per value, with `A_i + 2 <= B_i <= 2^64`.
+    pub fn ranges(&self) -> &[(u64, u128)] {
+        &self.ranges
+    }
+
+    /// A statement for `base` (`2..=256`) and the ranges `[A_i, B_i)` with
+    /// `A_i + 2 <= B_i <= 2^64`; `FormatError` otherwise.
     pub fn new(base: u64, ranges: Vec<(u64, u128)>) -> Result<Self, ProofError> {
         let ok = (2..=256).contains(&base)
             && !ranges.is_empty()
@@ -236,7 +246,7 @@ pub struct RangeProof(pub(crate) CircuitProof);
 
 impl RangeProof {
     /// Prove `values[i] in [A_i, B_i)` for commitments `values[i] B + blindings[i] B_blinding`;
-    /// returns the proof and the commitments. Fails if a value is out of its range.
+    /// returns the proof and the commitments. `FormatError` if a value is out of its range.
     pub fn prove<T: BpppTranscript, R: RngCore + CryptoRng>(
         st: &RangeStatement,
         pc: &PedersenGens,
@@ -250,7 +260,7 @@ impl RangeProof {
             return Err(ProofError::FormatError);
         }
         if values.iter().zip(&st.ranges).any(|(&v, &(a, b))| v < a || v as u128 >= b) {
-            return Err(ProofError::VerificationError);
+            return Err(ProofError::FormatError);
         }
         let (c, info) = st.circuit();
         let g = st.gens(pc, bp)?;
@@ -421,9 +431,9 @@ mod tests {
         for &v in &[999u64, 2000, 0, u64::MAX] {
             assert!(RangeProof::prove(&st, &pc, &bp, &[v], &[Scalar::ONE], &mut Transcript::new(b"r"), &mut rng).is_err());
         }
-        // a digit outside its radix, with the linear row holding: v = 2000 as digits of
-        // [0, 1000) with the top digit one too large; the prover's check refuses, and a proof
-        // made without it does not verify
+        // a digit outside its radix, with the linear row holding: the digits of 999 with the
+        // weight-49 digit raised by 20 (to 35, outside radix 16), i.e. v = 1000 + 1979 = 2979;
+        // a proof made without the prover's check does not verify
         let (c, info) = st.circuit();
         let layout = &info.layouts[0];
         let mut digits = decompose(999, layout);

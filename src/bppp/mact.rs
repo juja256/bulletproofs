@@ -1,5 +1,11 @@
 //! Multi-asset confidential transactions (spec §5.3, paper §6.5): per asset type the inputs
 //! and outputs balance, and every output amount is in `[0, 2^64)`.
+//!
+//! **Input amounts are not range-checked.** As in the paper (relation (76)), the proof is sound
+//! only if every input commitment is already known to open to an amount in `[0, 2^64)` — for
+//! example because it is an output of an earlier verified proof with the same generators. An
+//! input committing to a larger field element (say `2^64 + 5`) can fund outputs it does not
+//! cover.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -36,14 +42,12 @@ impl core::fmt::Debug for MactEntry {
 }
 
 /// The shape of a transaction: numbers of inputs and outputs and the base of the range proofs.
+/// Built only through [`MactStatement::new`], so every statement is valid.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MactStatement {
-    /// The base, `2..=256`.
-    pub base: u64,
-    /// Number of inputs.
-    pub n_in: usize,
-    /// Number of outputs.
-    pub n_out: usize,
+    base: u64,
+    n_in: usize,
+    n_out: usize,
 }
 
 pub(crate) struct MactInfo {
@@ -52,7 +56,23 @@ pub(crate) struct MactInfo {
 }
 
 impl MactStatement {
-    /// Validate a statement.
+    /// The base of the output range proofs.
+    pub fn base(&self) -> u64 {
+        self.base
+    }
+
+    /// Number of inputs.
+    pub fn n_in(&self) -> usize {
+        self.n_in
+    }
+
+    /// Number of outputs.
+    pub fn n_out(&self) -> usize {
+        self.n_out
+    }
+
+    /// A statement for `n_in` inputs and `n_out` outputs (`n_in + n_out >= 1`) with output range
+    /// proofs in `base` (`2..=256`); `FormatError` otherwise.
     pub fn new(base: u64, n_in: usize, n_out: usize) -> Result<Self, ProofError> {
         if !(2..=256).contains(&base) || n_in.checked_add(n_out).map_or(true, |k| k == 0) {
             return Err(ProofError::FormatError);
@@ -166,7 +186,7 @@ pub struct MactProof(pub(crate) CircuitProof);
 impl MactProof {
     /// Prove that `inputs` and `outputs` balance per asset type and that the outputs are in
     /// range; returns the proof and the commitments (inputs, then outputs). Fails if they do
-    /// not balance.
+    /// not balance. Input amounts are not range-checked (see the module documentation).
     pub fn prove<T: BpppTranscript, R: RngCore + CryptoRng>(
         st: &MactStatement,
         pc: &PedersenGens,
@@ -191,7 +211,8 @@ impl MactProof {
         Ok((MactProof(proof), V))
     }
 
-    /// Verify against the commitments `V` (inputs, then outputs).
+    /// Verify against the commitments `V` (inputs, then outputs). Sound only if the input
+    /// commitments are known to open to amounts in `[0, 2^64)` (see the module documentation).
     pub fn verify<T: BpppTranscript>(
         &self,
         st: &MactStatement,
@@ -310,6 +331,32 @@ mod tests {
             }
             testutil::run_recip_case(case, &c, &w);
         }
+    }
+
+    /// A field-negative output (-5) balanced by an honest-looking range decomposition of
+    /// another value: the output's link row ties its digits to its amount, so it fails.
+    /// Found in review (deleting the link rows was caught only by the vector test).
+    #[test]
+    fn negative_output_is_rejected() {
+        let mut rng = ChaCha20Rng::seed_from_u64(53);
+        let st = MactStatement::new(16, 1, 2).unwrap();
+        let pc = PedersenGens::default();
+        let bp = BulletproofGens::new(st.generators_capacity(), 1);
+        let g = st.gens(&pc, &bp).unwrap();
+        let (c, info) = st.circuit();
+        let t = Scalar::from(77u64);
+        let e = |a: u64| MactEntry { amount: a, asset: t, blinding: Scalar::from(a + 1) };
+        let entries = [e(10), e(15), e(5)];
+        let digits = vec![decompose(15, &info.layout), decompose(5, &info.layout)];
+        let mut w = info.witness(&entries, &digits);
+        w.v[2][0] = -Scalar::from(5u64); // the output commits to -5 (10 = 15 - 5)
+        w.w_o[2] = -Scalar::from(5u64);
+        assert!(!c.is_satisfied(&w, Scalar::from(99u64)));
+        let V: Vec<CompressedRistretto> = w.v.iter().zip(&w.s).map(|(v, s)| g.commit_input(v, *s).compress()).collect();
+        let mut tr = Transcript::new(b"m");
+        tr.append_message(b"dom-sep", b"bppp-mact v1");
+        let proof = reciprocal::prove_impl(&c, &g, &V, &w, &mut tr, &mut rng, false).unwrap();
+        assert!(MactProof(proof).verify(&st, &pc, &bp, &V, &mut Transcript::new(b"m")).is_err());
     }
 
     /// An output with a digit outside its radix (a "negative" amount in disguise) does not verify.

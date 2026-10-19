@@ -462,4 +462,8 @@ confidential assets. Let $L$ be the layout of $2^{64}$ in base $b$.
 - **Reciprocal rows**: first the balance row $\sum_{i<k} w_{P,i} = 0$, i.e.
   $\sum_i \frac{\pm c_i}{X + t_i} = 0$; then the table rows of §5.2.
 
+The paper (§6.5.1) takes the numerators from the inputs with $f_m = 1$ and aligns them by dummy
+constraints; we copy the amounts into $c_i$ with linear rows instead ($f_m = 0$), which keeps
+every numerator on an initial column.
+
 The transcript is `domain_sep("bppp-mact v1")` followed by §4.5.

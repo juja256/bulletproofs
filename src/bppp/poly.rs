@@ -55,11 +55,45 @@ impl VecPoly {
         out
     }
 
-    /// `<self(T), other(T)>`, or with weights `w` (`<a, b>_w = sum a_i b_i w_i`).
+    /// `<self(T), other(T)>`, or with weights `w` (`<a, b>_w = sum a_i b_i w_i`). The weights
+    /// are folded into `self`'s terms once (`<a, b>_w = <a w, b>`); for `p.inner(p, _)` only the
+    /// pairs `i <= j` are computed (the product is symmetric); the inner products run in
+    /// parallel with `parallel`. Same values as the direct double sum.
     pub fn inner(&self, other: &VecPoly, w: Option<&[Scalar]>) -> Poly {
+        let weighted: Vec<(i32, Vec<Scalar>)>;
+        let left: &[(i32, Vec<Scalar>)] = match w {
+            Some(w) => {
+                weighted = self.0.iter().map(|(d, a)| (*d, a.iter().zip(w).map(|(x, w)| x * w).collect())).collect();
+                &weighted
+            }
+            None => &self.0,
+        };
+        let same = core::ptr::eq(self, other);
         let mut p = Poly::zero();
-        for (da, a) in &self.0 {
-            for (db, b) in &other.0 {
+        for (i, (da, a)) in left.iter().enumerate() {
+            for (j, (db, b)) in other.0.iter().enumerate() {
+                if same && j < i {
+                    continue;
+                }
+                let n = a.len().min(b.len());
+                let x = crate::util::inner_product_par(&a[..n], &b[..n]);
+                p.add(da + db, if same && j > i { x + x } else { x });
+            }
+        }
+        p
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand_chacha::rand_core::SeedableRng;
+    use rand_chacha::ChaCha20Rng;
+
+    fn direct(a: &VecPoly, b: &VecPoly, w: Option<&[Scalar]>) -> Poly {
+        let mut p = Poly::zero();
+        for (da, a) in &a.0 {
+            for (db, b) in &b.0 {
                 let x: Scalar = match w {
                     Some(w) => a.iter().zip(b).zip(w).map(|((x, y), w)| x * y * w).sum(),
                     None => a.iter().zip(b).map(|(x, y)| x * y).sum(),
@@ -68,5 +102,21 @@ impl VecPoly {
             }
         }
         p
+    }
+
+    /// The folded, symmetric, parallel inner product equals the direct double sum, for terms
+    /// of different lengths and weights shorter or longer than the terms.
+    #[test]
+    fn inner_matches_the_direct_sum() {
+        let mut rng = ChaCha20Rng::seed_from_u64(5);
+        let mut v = |n: usize| (0..n).map(|_| Scalar::random(&mut rng)).collect::<Vec<_>>();
+        let a = VecPoly(vec![(-1, v(7)), (0, v(5)), (2, v(9)), (3, v(1))]);
+        let b = VecPoly(vec![(0, v(6)), (1, v(9)), (4, v(3))]);
+        for w in [None, Some(v(9)), Some(v(4)), Some(v(12))] {
+            let w = w.as_deref();
+            assert_eq!(a.inner(&a, w), direct(&a, &a, w));
+            assert_eq!(a.inner(&b, w), direct(&a, &b, w));
+            assert_eq!(b.inner(&a, w), direct(&b, &a, w));
+        }
     }
 }

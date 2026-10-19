@@ -50,7 +50,7 @@ pub struct MactStatement {
     n_out: usize,
 }
 
-pub(crate) struct MactInfo {
+pub(crate) struct MactLayout {
     layout: Vec<(u128, u64)>,
     tables: Vec<u64>,
 }
@@ -85,7 +85,7 @@ impl MactStatement {
     }
 
     /// The circuit of spec §5.3.
-    pub(crate) fn circuit(&self) -> (ReciprocalCircuit, MactInfo) {
+    pub(crate) fn circuit(&self) -> (ReciprocalCircuit, MactLayout) {
         let k = self.k();
         let layout = layout(1u128 << 64, self.base);
         let digit_radices: Vec<u64> = (0..self.n_out).flat_map(|_| layout.iter().map(|(_, r)| *r)).collect();
@@ -145,7 +145,7 @@ impl MactStatement {
             f_m: false,
             partition,
         };
-        (c, MactInfo { layout, tables })
+        (c, MactLayout { layout, tables })
     }
 
     /// The `BulletproofGens` capacity the proof needs.
@@ -154,13 +154,21 @@ impl MactStatement {
         c.gens_capacity()
     }
 
+    #[cfg(test)]
     pub(crate) fn gens<'a>(&self, pc: &PedersenGens, bp: &'a BulletproofGens) -> Result<BpppGens<'a>, ProofError> {
+        self.circuit().0.gens(pc, bp)
+    }
+
+    /// The circuit and generators for verification, with the domain separator absorbed.
+    fn setup<'a, T: BpppTranscript>(&self, pc: &PedersenGens, bp: &'a BulletproofGens, t: &mut T) -> Result<(ReciprocalCircuit, BpppGens<'a>), ProofError> {
         let (c, _) = self.circuit();
-        c.gens(pc, bp)
+        let g = c.gens(pc, bp)?;
+        t.domain_sep(b"bppp-mact v1");
+        Ok((c, g))
     }
 }
 
-impl MactInfo {
+impl MactLayout {
     /// The reciprocal witness for the entries (inputs first) with the given output digits.
     pub(crate) fn witness(&self, entries: &[MactEntry], out_digits: &[Vec<u64>]) -> ReciprocalWitness {
         let tagged: Vec<(u64, u64)> =
@@ -201,7 +209,7 @@ impl MactProof {
             return Err(ProofError::FormatError);
         }
         let (c, info) = st.circuit();
-        let g = st.gens(pc, bp)?;
+        let g = c.gens(pc, bp)?;
         let entries: Vec<MactEntry> = inputs.iter().chain(outputs).copied().collect();
         let out_digits: Vec<Vec<u64>> = outputs.iter().map(|e| decompose(e.amount as u128, &info.layout)).collect();
         let w = info.witness(&entries, &out_digits);
@@ -222,9 +230,7 @@ impl MactProof {
         V: &[CompressedRistretto],
         transcript: &mut T,
     ) -> Result<(), ProofError> {
-        let (c, _) = st.circuit();
-        let g = st.gens(pc, bp)?;
-        transcript.domain_sep(b"bppp-mact v1");
+        let (c, g) = st.setup(pc, bp, transcript)?;
         reciprocal::verify(&self.0, &c, &g, V, transcript)
     }
 
@@ -237,9 +243,7 @@ impl MactProof {
         V: &[CompressedRistretto],
         transcript: &mut T,
     ) -> Result<super::circuit::Terms, ProofError> {
-        let (c, _) = st.circuit();
-        let g = st.gens(pc, bp)?;
-        transcript.domain_sep(b"bppp-mact v1");
+        let (c, g) = st.setup(pc, bp, transcript)?;
         reciprocal::terms(&self.0, &c, &g, V, transcript)
     }
 

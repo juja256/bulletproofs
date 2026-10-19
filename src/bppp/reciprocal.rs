@@ -326,13 +326,9 @@ impl ReciprocalCircuit {
         for i in 0..self.n_p {
             w_m.push_row(self.w_n.row(i).map(|(c, v)| (c, *v)).chain(Some((n_mm + i, -alpha))));
         }
-        for r in 0..self.n_m {
-            w_m.push_row(self.w_m.row(r).map(|(c, v)| (c, *v)));
-        }
-        let mut w_l = SparseMatrix::new(n_w);
-        for r in 0..self.w_l.n_rows() {
-            w_l.push_row(self.w_l.row(r).map(|(c, v)| (c, *v)));
-        }
+        w_m.extend_rows(&self.w_m);
+        // check() has made the widths of w_m and w_l n_w
+        let mut w_l = self.w_l.clone();
         let mut a_l = self.a_l.clone();
         // w_D,i - sum_j eta^j x_ij = 0
         for tp in &self.tuples {
@@ -573,6 +569,11 @@ impl ReciprocalCircuit {
         LateWitness { w_r: w.w_r.clone(), w_o_late: self.late_elements(&w.w_o) }
     }
 
+    /// The number of `LinR` slots (elements of `w_O` committed after `alpha`).
+    fn n_late(&self) -> usize {
+        self.partition.iter().filter(|(s, _)| *s == Slot::LinR).count()
+    }
+
     /// The `LinR` elements of `w_o`, in order.
     fn late_elements(&self, w_o: &[Scalar]) -> Vec<Scalar> {
         w_o.iter().zip(&self.partition).filter(|(_, (s, _))| *s == Slot::LinR).map(|(x, _)| *x).collect()
@@ -601,14 +602,7 @@ fn absorb_statement<T: BpppTranscript>(t: &mut T, c: &ReciprocalCircuit, gens: &
     if v2 {
         t.append_u64(b"N_t", c.tuples.len() as u64);
     }
-    t.append_point(b"G", &gens.g.compress());
-    t.append_point(b"H_0", &gens.h[0].compress());
-    let digest = c.digest();
-    t.append_message(b"circuit", &digest);
-    for v in V {
-        t.append_point(b"V", v);
-    }
-    digest
+    circuit::absorb_tail(t, gens, c.digest(), V)
 }
 
 fn check_gens(c: &ReciprocalCircuit, gens: &BpppGens) -> Result<(), ProofError> {
@@ -731,7 +725,8 @@ where
     let digest = absorb_statement(transcript, c, gens, V);
     let rng = &mut rng_for(&*transcript, &digest);
     let o = circuit::commit_o(gens, c.n_lin, c.n_mm(), &c.partition, &w.w_o, rng);
-    let (eta, w) = if c.uses_eta() {
+    let v2 = c.uses_eta();
+    let (eta, w) = if v2 {
         transcript.append_point(b"C_O", &o.C_O);
         let eta = transcript.challenge(b"eta");
         (eta, c.at_eta(w, eta))
@@ -742,14 +737,13 @@ where
     let w_l: Vec<Scalar> = w.w_d.iter().chain(&w.w_l).copied().collect();
     let mut ol = circuit::commit_l(gens, o, &w_l, rng);
     transcript.append_point(b"C_L", &ol.C_L);
-    if !c.uses_eta() {
-        transcript.append_point(b"C_O", &ol.C_O);
+    if !v2 {
+        transcript.append_point(b"C_O", &ol.o.C_O);
     }
     let alpha = transcript.challenge(b"alpha");
     let w_p = c.reciprocals(w, alpha)?;
     let lw = late(alpha, &w_p)?;
-    let n_late = c.partition.iter().filter(|(s, _)| *s == Slot::LinR).count();
-    if lw.w_r.len() != c.n_m || lw.w_o_late.len() != n_late {
+    if lw.w_r.len() != c.n_m || lw.w_o_late.len() != c.n_late() {
         return Err(ProofError::FormatError);
     }
     let mut full = w.clone();
@@ -1318,8 +1312,8 @@ mod tests {
 
     /// Components are arbitrary field elements: a tuple that packs (base 16) to a table row but
     /// is not one — `(x_0 + 16, x_1 - 1)` — and a tuple with a huge component are not satisfied,
-    /// the prover refuses and an unchecked proof does not verify. With packing and no bounds
-    /// (phase 6 without the bound rule) the first would pass.
+    /// the prover refuses and an unchecked proof does not verify. A base-16 packing of
+    /// unbounded components would accept the first.
     #[test]
     fn tuples_are_compared_component_by_component() {
         let rows = rows16();

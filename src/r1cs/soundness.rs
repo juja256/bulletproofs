@@ -112,8 +112,8 @@ fn swapped_tuple_is_rejected() {
     }
 }
 
-/// Unbounded components (spec §7.3, no bound rule): `(3 + 16, 5 - 1)` packs with base 16 to the
-/// row `(3, 5)`, and `(3 + 2^128, 5 - 2^124)` too; neither is a row. Every component may be a
+/// Unbounded components (spec §7.3): a base-16 packing would map `(3 + 16, 5 - 1)` and
+/// `(3 + 2^128, 5 - 2^124)` to the row `(3, 5)`; neither is a row. Every component may be a
 /// fresh witness, a product wire (copied into `C_O` on BP++) or carry a constant.
 #[test]
 fn packed_collisions_are_rejected() {

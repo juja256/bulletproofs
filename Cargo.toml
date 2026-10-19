@@ -65,6 +65,10 @@ required-features = ["yoloproofs"]
 name = "reciprocal"
 required-features = ["yoloproofs"]
 
+[[test]]
+name = "r1cs_bppp"
+required-features = ["yoloproofs", "bppp"]
+
 [[bench]]
 name = "range_proof"
 harness = false

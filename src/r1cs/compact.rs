@@ -170,6 +170,25 @@ impl ConstraintStore {
     }
 }
 
+impl ConstraintStore {
+    /// The terms of constraint `q`, decoded (constants appear only if they are kept).
+    #[cfg(feature = "bppp")]
+    pub(super) fn row(&self, q: usize) -> impl Iterator<Item = (Variable, Scalar)> + '_ {
+        let start = if q == 0 { 0 } else { self.ends[q - 1] };
+        self.terms[start..self.ends[q]].iter().map(move |&(packed, c)| {
+            let i = (packed & INDEX_MASK) as usize;
+            let var = match packed >> TAG_SHIFT {
+                TAG_LEFT => Variable::MultiplierLeft(i),
+                TAG_RIGHT => Variable::MultiplierRight(i),
+                TAG_OUTPUT => Variable::MultiplierOutput(i),
+                TAG_COMMITTED => Variable::Committed(i),
+                _ => Variable::One(),
+            };
+            (var, self.coeffs[c as usize])
+        })
+    }
+}
+
 fn pack(tag: u32, i: usize) -> u32 {
     assert!(i <= INDEX_MASK as usize, "too many variables for the compact constraint store");
     tag << TAG_SHIFT | i as u32

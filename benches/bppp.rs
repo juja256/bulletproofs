@@ -146,6 +146,22 @@ fn r1cs_bench(
     };
     let proof = prove();
     println!("BP R1CS, {} multiplications: proof {} bytes", g.n, proof.serialized_size());
+    let prove_bppp = || {
+        let mut t = Transcript::new(b"bench");
+        let mut prover = Prover::new(pc, &mut t);
+        prover.set_backend(bulletproofs::r1cs::Backend::Bppp);
+        let mut vars = vec![Variable::One(); 3 * g.n];
+        for i in 0..g.n {
+            let (l, r, o) = prover.allocate_multiplier(Some((g.w_l[i], g.w_r[i]))).unwrap();
+            vars[i] = l;
+            vars[g.n + i] = r;
+            vars[2 * g.n + i] = o;
+        }
+        constrain(&mut prover, g, &vars);
+        prover.prove(bp).unwrap()
+    };
+    println!("BP++ via R1CS, {} multiplications: proof {} bytes", g.n, prove_bppp().serialized_size());
+    c.bench_function(&format!("circuit n=2^{} BP++ via R1CS prove", k), |b| b.iter(prove_bppp));
     c.bench_function(&format!("circuit n=2^{} BP R1CS prove", k), |b| b.iter(prove));
     c.bench_function(&format!("circuit n=2^{} BP R1CS verify", k), |b| {
         b.iter(|| {

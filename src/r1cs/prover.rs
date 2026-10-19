@@ -21,6 +21,9 @@ use crate::r1cs::Metrics;
 use crate::transcript::TranscriptProtocol;
 use crate::util;
 use super::compact::{ConstraintStore, Flattened};
+use super::proof::{BpProof, ProofKind};
+#[cfg(feature = "bppp")]
+use super::proof::BpppProof;
 
 /// Index chunk for the polynomial passes of the prover.
 const POLY_CHUNK: usize = 1 << 12;
@@ -67,6 +70,9 @@ pub struct Prover<'g, T: BorrowMut<Transcript>> {
 
     /// Index of a pending multiplier that's not fully assigned yet.
     pending_multiplier: Option<usize>,
+
+    /// The proof system used by `prove`.
+    backend: super::Backend,
 }
 
 /// Separate struct to implement Drop trait for (for zeroing),
@@ -301,10 +307,18 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
                 a_R: Vec::new(),
                 a_O: Vec::new(),
             },
-            constraints: ConstraintStore::new(false),
+            // Constants are kept for the BP++ backend; the BP prover ignores them.
+            constraints: ConstraintStore::new(true),
             deferred_constraints: Vec::new(),
             pending_multiplier: None,
+            backend: super::Backend::default(),
         }
+    }
+
+    /// Choose the proof system for [`Prover::prove`] (default: [`Backend::Bp`](super::Backend)).
+    /// Can be called at any time before proving; the verifier must use the same backend.
+    pub fn set_backend(&mut self, backend: super::Backend) {
+        self.backend = backend;
     }
 
     /// Creates commitment to a high-level variable and adds it to the transcript.
@@ -423,6 +437,12 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
         bp_gens: &BulletproofGens,
         external_rng: &mut R,
     ) -> Result<(R1CSProof, T), R1CSError> {
+        #[cfg(feature = "bppp")]
+        {
+            if self.backend == super::Backend::Bppp {
+                return self.prove_bppp(bp_gens, external_rng);
+            }
+        }
 
         // Commit a length _suffix_ for the number of high-level variables.
         // We cannot do this in advance because user can commit variables one-by-one,
@@ -736,7 +756,7 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
         {
             scalar.clear();
         }
-        let proof = R1CSProof {
+        let proof = R1CSProof(ProofKind::Bp(BpProof {
             A_I1,
             A_O1,
             S1,
@@ -752,7 +772,48 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
             t_x_blinding,
             e_blinding,
             ipp_proof,
-        };
+        }));
         Ok((proof, self.transcript))
+    }
+
+    /// The BP++ backend (spec §6): translate the constraint system into an arithmetic circuit
+    /// and prove it with the protocol of spec §3, which absorbs the circuit digest.
+    #[cfg(feature = "bppp")]
+    fn prove_bppp<R: RngCore + CryptoRng>(
+        mut self,
+        bp_gens: &BulletproofGens,
+        external_rng: &mut R,
+    ) -> Result<(R1CSProof, T), R1CSError> {
+        use crate::bppp::{circuit, BpppGens, BpppTranscript};
+        if !self.deferred_constraints.is_empty() {
+            return Err(R1CSError::GadgetError {
+                description: "randomized constraints need the BP backend".into(),
+            });
+        }
+        let (n, k) = (self.secrets.a_L.len(), self.secrets.v.len());
+        let c = super::backend::circuit(&self.constraints, n, k);
+        let w = super::backend::witness(
+            &self.secrets.a_L,
+            &self.secrets.a_R,
+            &self.secrets.a_O,
+            &self.secrets.v,
+            &self.secrets.v_blinding,
+        );
+        let n_m = super::backend::n_m(n);
+        let gens = BpppGens::new(self.pc_gens, bp_gens, k, n_m).map_err(|_| R1CSError::InvalidGeneratorsLength)?;
+        let V: Vec<CompressedRistretto> =
+            self.secrets.v.iter().zip(&self.secrets.v_blinding).map(|(v, s)| self.pc_gens.commit(*v, *s).compress()).collect();
+        // The prover's randomness is bound to the witness as well as to `external_rng`.
+        let mut rng = {
+            let mut builder = self.transcript.borrow().build_rng();
+            for s in &self.secrets.v_blinding {
+                builder = builder.rekey_with_witness_bytes(b"v_blinding", s.as_bytes());
+            }
+            builder.finalize(external_rng)
+        };
+        let transcript = self.transcript.borrow_mut();
+        BpppTranscript::domain_sep(transcript, b"bppp-r1cs v1");
+        let proof = circuit::prove(&c, &gens, &V, &w, transcript, &mut rng).map_err(R1CSError::from)?;
+        Ok((R1CSProof(ProofKind::Bppp(BpppProof { n_m, k, proof })), self.transcript))
     }
 }

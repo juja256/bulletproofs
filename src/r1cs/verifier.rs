@@ -16,6 +16,9 @@ use crate::errors::R1CSError;
 use crate::generators::{BulletproofGens, PedersenGens};
 use crate::r1cs::Metrics;
 use crate::transcript::TranscriptProtocol;
+use super::proof::ProofKind;
+#[cfg(feature = "bppp")]
+use super::proof::BpppProof;
 use super::compact::{ConstraintStore, Flattened};
 
 /// A [`ConstraintSystem`] implementation for use by the verifier.
@@ -50,6 +53,9 @@ pub struct Verifier<T: BorrowMut<Transcript>> {
 
     /// Index of a pending multiplier that's not fully assigned yet.
     pending_multiplier: Option<usize>,
+
+    /// The proof system used by `verify`.
+    backend: super::Backend,
 }
 
 /// Verifier in the randomizing phase.
@@ -235,7 +241,14 @@ impl<T: BorrowMut<Transcript>> Verifier<T> {
             constraints: ConstraintStore::new(true),
             deferred_constraints: Vec::new(),
             pending_multiplier: None,
+            backend: super::Backend::default(),
         }
+    }
+
+    /// Choose the proof system for [`Verifier::verify`] (default: [`Backend::Bp`](super::Backend));
+    /// a proof of the other backend is rejected.
+    pub fn set_backend(&mut self, backend: super::Backend) {
+        self.backend = backend;
     }
 
     /// Creates commitment to a high-level variable and adds it to the transcript.
@@ -320,6 +333,27 @@ impl<T: BorrowMut<Transcript>> Verifier<T> {
         self.verify_and_return_transcript(proof, pc_gens, bp_gens)
             .map(|_| ())
     }
+    /// The BP++ backend (spec §6): rebuild the translated circuit and verify its proof.
+    #[cfg(feature = "bppp")]
+    fn verify_bppp(mut self, p: &BpppProof, pc_gens: &PedersenGens, bp_gens: &BulletproofGens) -> Result<T, R1CSError> {
+        use crate::bppp::{BpppGens, BpppTranscript};
+        if !self.deferred_constraints.is_empty() {
+            return Err(R1CSError::GadgetError {
+                description: "randomized constraints need the BP backend".into(),
+            });
+        }
+        let (n, k) = (self.num_vars, self.V.len());
+        if p.n_m != super::backend::n_m(n) || p.k != k {
+            return Err(R1CSError::VerificationError);
+        }
+        let c = super::backend::circuit(&self.constraints, n, k);
+        let gens = BpppGens::new(pc_gens, bp_gens, k, p.n_m).map_err(|_| R1CSError::InvalidGeneratorsLength)?;
+        let transcript = self.transcript.borrow_mut();
+        BpppTranscript::domain_sep(transcript, b"bppp-r1cs v1");
+        p.proof.verify(&c, &gens, &self.V, transcript).map_err(|_| R1CSError::VerificationError)?;
+        Ok(self.transcript)
+    }
+
     /// Same as `verify`, but also returns the transcript back to the user.
     pub fn verify_and_return_transcript(
         mut self,
@@ -327,6 +361,23 @@ impl<T: BorrowMut<Transcript>> Verifier<T> {
         pc_gens: &PedersenGens,
         bp_gens: &BulletproofGens,
     ) -> Result<T, R1CSError> {
+        #[cfg(feature = "bppp")]
+        {
+            if let ProofKind::Bppp(p) = &proof.0 {
+                if self.backend != super::Backend::Bppp {
+                    return Err(R1CSError::VerificationError);
+                }
+                return self.verify_bppp(p, pc_gens, bp_gens);
+            }
+            if self.backend == super::Backend::Bppp {
+                return Err(R1CSError::VerificationError);
+            }
+        }
+        let proof = match &proof.0 {
+            ProofKind::Bp(p) => p,
+            #[allow(unreachable_patterns)]
+            _ => return Err(R1CSError::VerificationError),
+        };
         // Commit a length _suffix_ for the number of high-level variables.
         // We cannot do this in advance because user can commit variables one-by-one,
         // but this suffix provides safe disambiguation because each variable

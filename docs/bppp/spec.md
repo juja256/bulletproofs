@@ -302,6 +302,20 @@ index (`u64`); for $W_l$ then $W_m$: per row the number of terms (`u64`) and per
 
 $C_L \| C_R \| C_O \| C_S \|$ norm argument for $|l| = 7 + N_{lin}$, $|n| = N_m$ (§2.5).
 
+### 3.11 Batch verification
+
+Proofs over the same `PedersenGens` and `BulletproofGens` (circuits §3, reciprocal form §4,
+range proofs and transactions §5) are verified together: each proof's transcript is replayed as
+in its own verification, which gives its equation of §3.7 as
+$g\,G + \langle h, H\rangle + \langle n, N\rangle + \sum_k k P_k = 0$ over the shared generators
+(prefixes of one setup) and its own points ($C_S, C_O, C_L, C_R$, the inputs, the rounds' $X, R$).
+The verifier draws a uniformly random weight per proof from its own RNG (never from a
+transcript: the weights must be unknown to the provers), sums the weighted equations
+coefficient by coefficient, and checks the sum with one multiscalar multiplication. If some
+proof's equation does not hold, the sum vanishes with probability at most $1/\ell$ over its
+weight. A failing batch does not identify the proof; malformed proofs and statements that fail
+before the multiplication are reported when added.
+
 ## 4. Reciprocal form circuits (paper §6.2–6.3)
 
 A reciprocal form circuit adds to an arithmetic circuit $N_p$ *poles*: private denominators

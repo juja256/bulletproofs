@@ -227,6 +227,21 @@ impl MactProof {
         reciprocal::verify(&self.0, &c, &g, V, transcript)
     }
 
+    /// [`Self::verify`] up to the multiscalar multiplication, for batch verification.
+    pub(crate) fn terms<T: BpppTranscript>(
+        &self,
+        st: &MactStatement,
+        pc: &PedersenGens,
+        bp: &BulletproofGens,
+        V: &[CompressedRistretto],
+        transcript: &mut T,
+    ) -> Result<super::circuit::Terms, ProofError> {
+        let (c, _) = st.circuit();
+        let g = st.gens(pc, bp)?;
+        transcript.domain_sep(b"bppp-mact v1");
+        reciprocal::terms(&self.0, &c, &g, V, transcript)
+    }
+
     /// The proof bytes.
     pub fn to_bytes(&self) -> Vec<u8> {
         self.0.to_bytes()

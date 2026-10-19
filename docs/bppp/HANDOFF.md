@@ -24,7 +24,7 @@ then the zkVM `bpvm` (github.com/juja256/bpvm, a separate repository) on BP++.
 | 5 | R1CS front end on BP++ | `src/r1cs/backend.rs`, `proof.rs`, `prover.rs`, `verifier.rs`, spec §6 | branch `bppp-r1cs` (this one) |
 | 6 | `CircuitBuilder` | `src/r1cs/builder.rs`, `backend.rs`, `prover.rs`, `verifier.rs`, `compact.rs`, spec §7 | branch `claude/beautiful-goodall-m369g7` (local commits, not pushed) |
 | 7 | performance and hardening | `wnla.rs`, `batch.rs`, `oblivious.rs`, spec §2.6, §3.11 | branch `bppp-perf` (pushed); format changes held |
-| 7b | tuple poles (option F): lookups of tuples without the bound rule | `reciprocal.rs`, `builder.rs`, `backend.rs`, spec §4.1–4.7, §7.2–7.6 | branch `bppp-tuples` (pushed); review pending |
+| 7b | tuple poles (option F): lookups of tuples without the bound rule | `reciprocal.rs`, `builder.rs`, `backend.rs`, spec §4.1–4.7, §7.2–7.6 | branch `bppp-tuples` (pushed); reviewed, done; next: option B |
 | 8 | bpvm on BP++ | other repository | open |
 
 The branches are stacked: `main` ⊂ `bppp-circuit` ⊂ `bppp-reciprocal` ⊂ `bppp-range` ⊂
@@ -273,3 +273,16 @@ DESIGN (milestone M6). bpvm depends on this fork by git revision.
   $m \ge 2$ argument with only empty public coefficients): §7.6 now defers to §4.1. Everything
   green: 145 tests (bppp parallel yoloproofs, also bppp-vartime), 70 (yoloproofs), 34 (default);
   pins and range/MACT/circuit/WNLA vectors unchanged; xcheck 13/13. Next: mutants, review, then B.
+- 2026-10-19 — phase 7b review (most capable model): 0 Critical, 0 Important, 5 Minor. Fixed:
+  M1 a reciprocal row with a tuple pole or a long pole ("$\eta$-row") must not read a free pole's
+  reciprocal (a free pole is committed after $\eta$ and could cancel any tuple) — now a rule of
+  §4.1 checked by `check()`, the reference rejects it too and `reciprocal.json` has 9
+  shape-invalid cases (`shape_ok: false`); M2 §4.7 says numerators may follow $\eta$; M3 the rekey
+  copy of $w_D$ is zeroized with `Clear` (the `at_eta` copy falls under the crate-wide
+  zeroization item); M4 the reviewer's probes kept as `src/bppp/tuple_tests.rs` (numerators and
+  rows reading tuple poles, two-phase prover with tuple poles, v2 from long public poles alone,
+  malformed v2 circuits); M5 §4.7 states the special-soundness assumption. Not done: a cheating
+  prover for a wrong copy on BP++ (an ordinary §3 linear row; the BP++ prover refuses
+  unsatisfied circuits anyway), caching `uses_eta`. Mutants of phase 7b: 20 of 20 killed.
+  Tests: 149 (bppp parallel yoloproofs, also bppp-vartime), 70 (yoloproofs), 34 (default);
+  vectors regenerate unchanged; xcheck 13/13. Phase 7b done.

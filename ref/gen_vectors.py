@@ -2,6 +2,7 @@
 """Writes tests/vectors/bppp/*.json from the reference (python3 ref/gen_vectors.py).
 Deterministic: the same output on every run."""
 
+import copy
 import json
 import os
 import random
@@ -15,9 +16,10 @@ from bppp_ref import (L, ONE, SLOTS, U64, Builder, BuilderError,  # noqa: E402
                       bld_self_check, bld_semantic, bld_uses_eta, circuit_prove,
                       circuit_self_check, inv, mact_circuit, mact_witness, pole_poly,
                       range_circuit, range_circuit_self_check, range_decompose, range_layout,
-                      range_layout_self_check, range_witness, recip_compile, recip_digest,
-                      recip_eta_witness, recip_numerators, recip_prove, recip_satisfied,
-                      recip_self_check, recip_tuples, recip_uses_eta, recip_v2_self_check, wnla_commit, wnla_prove, wnla_rounds, wnla_verify)
+                      range_layout_self_check, range_witness, recip_check_shape, recip_compile,
+                      recip_digest, recip_eta_witness, recip_numerators, recip_prove,
+                      recip_satisfied, recip_self_check, recip_tuples, recip_uses_eta,
+                      recip_v2_self_check, wnla_commit, wnla_prove, wnla_rounds, wnla_verify)
 
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tests", "vectors", "bppp")
 
@@ -184,6 +186,41 @@ CIRCUITS = [
 # Reciprocal form (spec section 4)
 
 
+def circuit_fields(name, rc):
+    """The circuit fields of a reciprocal vector entry. Public poles: a hex scalar (null for no
+    pole) in a circuit that does not use eta, a list of hex scalars (its pole polynomial) in one
+    that does."""
+    hxs = lambda v: [hx(x) for x in v]  # noqa: E731
+    rows = lambda m: [[[col, hx(x)] for col, x in row] for row in m]  # noqa: E731
+    v2 = recip_uses_eta(rc)
+
+    def opt(t):
+        if t is None:
+            return None
+        p = pole_poly(t)
+        if v2:
+            return hxs(p)
+        assert len(p) == 1
+        return hx(p[0])
+
+    return {
+        "name": name,
+        **{x: rc[x] for x in ("n_p", "n_m", "n_o", "n_v", "n_lin", "k", "n_l", "f_l", "f_m")},
+        "partition": [list(x) for x in rc["partition"]],
+        "w_n": rows(rc["w_n"]), "a_n": hxs(rc["a_n"]),
+        "w_m": rows(rc["w_m"]), "a_m": hxs(rc["a_m"]),
+        "w_l": rows(rc["w_l"]), "a_l": hxs(rc["a_l"]),
+        "recip": [{"terms": [[col, hx(c), opt(t)] for col, c, t in row["terms"]],
+                   "consts": [[hx(c), opt(t)] for c, t in row["consts"]]} for row in rc["recip"]],
+    }
+
+
+def tuples_json(rc):
+    """[[i, [[terms, const], ...]], ...] with terms [[col, hex], ...]."""
+    return [[i, [[[[col, hx(c)] for col, c in terms], hx(a)] for terms, a in comps]]
+            for i, comps in recip_tuples(rc)]
+
+
 def recip_run(rng, name, rc, wit, expect, extra=False):
     """Randomness and challenges, prove, self-check, and the vector entry. extra: also
     "uses_eta" and "digest" (spec 4.4), and for a circuit that uses eta (protocol v2) "tuples",
@@ -205,33 +242,12 @@ def recip_run(rng, name, rc, wit, expect, extra=False):
         return {"g": hx(g), "h": [hx(x) for x in h], "n": [hx(x) for x in nn]}
 
     hxs = lambda v: [hx(x) for x in v]  # noqa: E731
-    rows = lambda m: [[[col, hx(x)] for col, x in row] for row in m]  # noqa: E731
     v2 = recip_uses_eta(rc)
     assert extra or not v2
-
-    def opt(t):
-        if t is None:
-            return None
-        p = pole_poly(t)
-        if v2:
-            return hxs(p)
-        assert len(p) == 1
-        return hx(p[0])
-
-    head = {
-        "name": name,
-        **{x: rc[x] for x in ("n_p", "n_m", "n_o", "n_v", "n_lin", "k", "n_l", "f_l", "f_m")},
-        "partition": [list(x) for x in rc["partition"]],
-        "w_n": rows(rc["w_n"]), "a_n": hxs(rc["a_n"]),
-        "w_m": rows(rc["w_m"]), "a_m": hxs(rc["a_m"]),
-        "w_l": rows(rc["w_l"]), "a_l": hxs(rc["a_l"]),
-        "recip": [{"terms": [[col, hx(c), opt(t)] for col, c, t in row["terms"]],
-                   "consts": [[hx(c), opt(t)] for c, t in row["consts"]]} for row in rc["recip"]],
-    }
+    head = circuit_fields(name, rc)
     if extra:
         if v2:
-            head["tuples"] = [[i, [[[[col, hx(c)] for col, c in terms], hx(a)] for terms, a in comps]]
-                              for i, comps in recip_tuples(rc)]
+            head["tuples"] = tuples_json(rc)
         head["uses_eta"] = v2
         head["digest"] = recip_digest(rc).hex()
     head["w_D"] = hxs(wit["w_D"])
@@ -463,12 +479,13 @@ def tuple_case(rng, name, fl, fm, violate=None):
     n_O / l_O, a constant solved; pole 0 reads an input copy exactly, pole 2 has a constant
     component), looked up in a public table of 4 rows of 3 random scalars (pole 0 and 2 on
     row 1, pole 1 on row 3), multiplicities in l_L / n_O / l_O, and constants on row 0 with the
-    pole polynomials T_0 (length 3) and T_0 || 0 (length 4). Row 2 mixes the free pole 4
-    (value z, numerator copied to l_L, public pole (z)) with the 2-component tuple poles 3 and
-    5 (equal tuples, coefficient 2 on w_P,5), public poles (u_0, u_1) and (u_0, u_1, 0), and a
-    pole-free term. Row 3: pole 6, a tuple pole with one component, against the public pole
-    (x_6, 0). Row 4: public poles only (lengths 1, 2, 3). Ordinary rows read w_P, w_R and the
-    tuple poles' w_D (so they hold at the drawn (eta, alpha) only); w_R and the two l_R
+    pole polynomials T_0 (length 3) and T_0 || 0 (length 4). Row 2: the 2-component tuple poles
+    3 and 5 (equal tuples, coefficient 2 on w_P,5), public poles (u_0, u_1) and (u_0, u_1, 0),
+    and a pole-free term. Row 3: the free pole 4 (value z, numerator copied to l_L) against the
+    public pole (z) of length 1 — a row that is not an eta-row (spec 4.1: free poles and tuple
+    poles do not mix in an eta-row). Row 4: pole 6, a tuple pole with one component, against the
+    public pole (x_6, 0). Row 5: public poles only (lengths 1, 2, 3). Ordinary rows read w_P,
+    w_R and the tuple poles' w_D (so they hold at the drawn (eta, alpha) only); w_R and the two l_R
     elements are solved after (eta, alpha). w_D holds random placeholders at the tuple poles.
     violate: "component" (pole 1's last constant + 1: not a row of the table) or
     "multiplicity" (m_3 + 1)."""
@@ -539,9 +556,9 @@ def tuple_case(rng, name, fl, fm, violate=None):
     rc["recip"] = [
         {"terms": [(P(i), 1, None) for i in range(3)] + [(O(10 + r), L - 1, T[r]) for r in range(4)],
          "consts": [(5, T[0]), (L - 5, T[0] + [0])]},
-        {"terms": [(P(3), 1, None), (P(4), 1, None), (P(5), 2, None), (O(14), L - 1, u),
-                   (O(15), L - 1, [z]), (O(5), c1, None)],
+        {"terms": [(P(3), 1, None), (P(5), 2, None), (O(14), L - 1, u), (O(5), c1, None)],
          "consts": [(-K % L, u + [0]), (-c1 * w_O[5] % L, None)]},
+        {"terms": [(P(4), 1, None), (O(15), L - 1, [z])], "consts": []},
         {"terms": [(P(6), 1, None), (O(16), L - 1, [x6, 0]), (Lc(0), c2, None)],
          "consts": [(-c2 * w_L[0] % L, None)]},
         {"terms": [(O(17), 1, sp[:2]), (O(18), L - 1, sp[:2])],
@@ -652,6 +669,96 @@ def recip_v2_edge_checks(rng):
     recip_compile(rc, chal["alpha"], 0)
 
 
+def shape_base(p):
+    """A valid v2 circuit for the shape cases: N_p = 3, N_m = 0; poles 0 and 1 are tuple poles
+    ((w_O,0, w_O,1) = (3, 5) and (w_O,2, 5) = (7, 5)) in row 0 against the public poles (3, 5),
+    (7, 5); pole 2 is a free pole (value p, numerator 9) in row 1 against the public pole (p) of
+    length 1 with the multiplicity w_O,3 = 9 in l_L."""
+    P = lambda i: 3 + i  # noqa: E731
+    O = lambda i: 6 + i  # noqa: E731
+    rc = {"n_p": 3, "n_m": 0, "n_o": 4, "n_v": 1, "n_lin": 1, "k": 0, "n_l": 0, "f_l": 0,
+          "f_m": 0, "partition": [["nO", 0], ["lO", 0], ["nO", 1], ["lL", 0]],
+          "tuples": [(0, [([(O(0), 1)], 0), ([(O(1), 1)], 0)]), (1, [([(O(2), 1)], 0), ([], 5)])],
+          "w_n": [[], [], []], "a_n": [1, 1, 9], "w_m": [], "a_m": [], "w_l": [], "a_l": [],
+          "recip": [{"terms": [(P(0), 1, None), (P(1), 1, None)],
+                     "consts": [(L - 1, [3, 5]), (L - 1, [7, 5])]},
+                    {"terms": [(P(2), 1, None), (O(3), L - 1, [p])], "consts": []}]}
+    wit = {"w_D": [11, 12, p], "w_L": [], "w_R": [], "w_O": [3, 5, 7, 9], "v": [], "s": []}
+    return rc, wit
+
+
+def shape_cases():
+    """Circuits that break a shape rule of spec 4.1 (no witness, no proof): the entry has the
+    circuit fields, "tuples", "shape_ok": false and "violation" (a description). The base circuit
+    is valid and satisfied (checked here)."""
+    rng = random.Random("shape")
+    p = rng.randrange(16, L)
+    rc0, wit0 = shape_base(p)
+    recip_check_shape(rc0)
+    assert recip_satisfied(rc0, wit0, rng.randrange(1, L), rng.randrange(L)) == (True, True)
+    cases = []
+
+    def bad(name, violation, msg, f):
+        rc = copy.deepcopy(rc0)
+        f(rc)
+        try:
+            recip_check_shape(rc)
+            raise AssertionError(f"{name}: shape accepted")
+        except AssertionError as e:
+            assert msg in str(e), (name, str(e))
+        entry = circuit_fields(name, rc)
+        entry["tuples"] = tuples_json(rc)
+        entry.update({"shape_ok": False, "violation": violation})
+        cases.append(entry)
+
+    def mix_rows(rc):  # the free pole 2 and its public term move into row 0
+        rc["recip"][0]["terms"] += rc["recip"][1]["terms"]
+        del rc["recip"][1]
+
+    def free_long(rc):  # row 1's public pole (p) becomes (p, 0): an eta-row with a free pole
+        rc["recip"][1]["terms"][1] = (9, L - 1, [p, 0])
+
+    def free_long_const(rc):  # the same through a constant of length 2
+        rc["recip"][1]["terms"] = rc["recip"][1]["terms"][:1]
+        rc["recip"][1]["consts"] = [(L - 9, [p, 0])]
+
+    def comp_lL(rc):  # component 1 of pole 1 reads w_O,3 (slot l_L, committed in C_L)
+        rc["tuples"][1] = (1, [([(6 + 2, 1)], 0), ([(6 + 3, 1)], L - 4)])
+
+    def unsorted(rc):
+        rc["tuples"].reverse()
+
+    def duplicate(rc):  # (0, 0, 1): pole 0 twice, pole 1 still a tuple pole
+        rc["tuples"].insert(1, (0, rc["tuples"][1][1]))
+
+    def index_np(rc):  # (0, 1, 3)
+        rc["tuples"].append((3, rc["tuples"][1][1]))
+
+    def no_comps(rc):
+        rc["tuples"][1] = (1, [])
+
+    def empty_poly(rc):
+        rc["recip"][0]["consts"][1] = (L - 1, [])
+
+    bad("shape-free-and-tuple-pole-in-row", "row 0 has terms on w_P of tuple poles 0, 1 and of the "
+        "free pole 2 (an eta-row with a free pole)", "free pole in eta-row", mix_rows)
+    bad("shape-free-pole-and-length-2-pole", "row 1 has the free pole 2 and a term with the pole "
+        "polynomial (p, 0) of length 2 (an eta-row with a free pole)", "free pole in eta-row",
+        free_long)
+    bad("shape-free-pole-and-length-2-constant", "row 1 has the free pole 2 and a constant with "
+        "the pole polynomial (p, 0) of length 2", "free pole in eta-row", free_long_const)
+    bad("shape-component-on-lL", "component 1 of tuple pole 1 reads w_O,3 in slot l_L (not an "
+        "early column)", "non-early column", comp_lL)
+    bad("shape-tuple-poles-unsorted", "tuple poles listed as 1, 0", "increasing", unsorted)
+    bad("shape-tuple-pole-duplicate", "tuple poles listed as 0, 0, 1", "increasing", duplicate)
+    bad("shape-tuple-pole-index-ge-n_p", "tuple poles 0, 1, 3 with N_p = 3", "increasing", index_np)
+    bad("shape-tuple-pole-no-components", "tuple pole 1 has m_1 = 0 components", "m_i >= 1",
+        no_comps)
+    bad("shape-empty-pole-polynomial", "row 0 has a constant whose pole polynomial is empty "
+        "(d = 0)", "d >= 1", empty_poly)
+    return cases
+
+
 def reciprocal_v2_cases(rng):
     """Circuits that use eta (spec 4.1, protocol v2)."""
     cases = []
@@ -678,6 +785,7 @@ def reciprocal_v2_cases(rng):
     run(name, *tuple_case(rng, name, 1, 1, violate="multiplicity"), False)
     run("bad-tuple-base16-collision", *small_tuple_case(rng, (16, L - 1)), False)
     recip_v2_edge_checks(rng)
+    cases += shape_cases()
     return cases
 
 

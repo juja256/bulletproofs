@@ -723,6 +723,15 @@ def recip_check_shape(rc):
                 assert col in init, f"pole term on non-initial column {col}"
     for t in recip_public_poles(rc):
         assert not isinstance(t, (list, tuple)) or len(t) >= 1, "a pole polynomial has d >= 1"
+    # eta-rows (spec 4.1): a term on w_P,i of a tuple pole, or a pole of length >= 2; there
+    # every term on a reciprocal column must be on a tuple pole (no free poles)
+    tuple_idx = {i for i, _ in recip_tuples(rc)}
+    for q, row in enumerate(rc["recip"]):
+        rcols = [col - nm2 for col, _, t in row["terms"] if t is None and col in recip_cols]
+        long_pole = any(t is not None and len(pole_poly(t)) >= 2
+                        for t in [t for _, _, t in row["terms"]] + [t for _, t in row["consts"]])
+        if long_pole or any(i in tuple_idx for i in rcols):
+            assert all(i in tuple_idx for i in rcols), f"free pole in eta-row {q}"
     early = recip_early_cols(rc)
     prev = -1
     for i, comps in recip_tuples(rc):

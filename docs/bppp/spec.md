@@ -485,12 +485,14 @@ linear constraints $\sum c\, x + c_0 = 0$ becomes the arithmetic circuit (§3) w
 - linear rows: first, for $j < k$, $-c_j$ (so $v_j - c_j = 0$ through $f_l$); then each R1CS
   constraint in order, with `MultiplierLeft(i)`, `MultiplierRight(i)`, `MultiplierOutput(i)`,
   `Committed(j)` mapped to the columns of $w_{L,i}$, $w_{R,i}$, $w_{O,i}$, $c_j$, and the constant
-  in $a_l$.
+  in $a_l$. A variable the constraint system did not allocate is a `GadgetError`.
 
 The copies are the price of the R1CS interface (paper §5.1: inputs used in several constraints
 are copied into $w_O$); the native circuit API avoids them. Generators: §3.2 with
-$N_{lin} = k$, $N_m$, from the same `PedersenGens`/`BulletproofGens` as the BP backend, so the
-input commitments are the same in both backends.
+$N_{lin} = k$, $N_m$, from the same `PedersenGens`/`BulletproofGens` as the BP backend (capacity at
+least $\max(N_m, k + 6)$, where BP needs $n$ rounded up to a power of two), so the input
+commitments have the same form in both backends. As for every BP++ input (§3.2), the proof binds
+the committed values but not that a commitment has exactly the form $v B + s \tilde B$.
 
 ### 6.2 Protocol and encoding
 
@@ -498,6 +500,12 @@ The prover absorbs `domain_sep("bppp-r1cs v1")` after the transcript of the cons
 (the BP prover's domain separator and the `V` absorbed by `commit`) and runs §3 (`prove`, with
 the circuit digest). The prover's randomness is drawn from a transcript RNG rekeyed with the
 input blindings and the caller's RNG.
+
+The prover's constraint store drops constants (as for BP, so the BP backend pays nothing for
+BP++): it recomputes each constant as $-\sum c\, x$ over its witness. For a satisfying witness these
+are the verifier's constants; otherwise the prover proves another circuit, whose digest differs,
+and the verifier rejects. A witness that violates a multiplicative constraint is refused by the
+prover (§3.6).
 
 Randomized constraints (`specify_randomized_constraints`) are not supported: both prover and
 verifier return a `GadgetError`. A challenge between the commitments would have to come after

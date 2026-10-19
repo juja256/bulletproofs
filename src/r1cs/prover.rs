@@ -307,8 +307,9 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
                 a_R: Vec::new(),
                 a_O: Vec::new(),
             },
-            // Constants are kept for the BP++ backend; the BP prover ignores them.
-            constraints: ConstraintStore::new(true),
+            // The prover drops constants: BP does not need them, BP++ recomputes them from
+            // the witness (spec §6.2).
+            constraints: ConstraintStore::new(false),
             deferred_constraints: Vec::new(),
             pending_multiplier: None,
             backend: super::Backend::default(),
@@ -317,6 +318,13 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
 
     /// Choose the proof system for [`Prover::prove`] (default: [`Backend::Bp`](super::Backend)).
     /// Can be called at any time before proving; the verifier must use the same backend.
+    ///
+    /// With `Backend::Bppp`: the `BulletproofGens` capacity must be at least
+    /// `max(multipliers, inputs + 6)` (BP needs the multipliers rounded up to a power of two);
+    /// randomized constraints are refused with a `GadgetError`; an unsatisfied multiplicative
+    /// witness is refused with `VerificationError` (BP produces a proof that does not verify);
+    /// and, as for every BP++ input (spec §3.2), the proof binds the committed values but not
+    /// that a commitment has exactly the form `v B + s B_blinding`.
     pub fn set_backend(&mut self, backend: super::Backend) {
         self.backend = backend;
     }
@@ -791,8 +799,14 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
             });
         }
         let (n, k) = (self.secrets.a_L.len(), self.secrets.v.len());
-        let c = super::backend::circuit(&self.constraints, n, k);
-        let w = super::backend::witness(
+        let constants = super::backend::Constants::FromWitness {
+            a_l: &self.secrets.a_L,
+            a_r: &self.secrets.a_R,
+            a_o: &self.secrets.a_O,
+            v: &self.secrets.v,
+        };
+        let c = super::backend::circuit(&self.constraints, n, k, constants)?;
+        let mut w = super::backend::witness(
             &self.secrets.a_L,
             &self.secrets.a_R,
             &self.secrets.a_O,
@@ -813,7 +827,11 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
         };
         let transcript = self.transcript.borrow_mut();
         BpppTranscript::domain_sep(transcript, b"bppp-r1cs v1");
-        let proof = circuit::prove(&c, &gens, &V, &w, transcript, &mut rng).map_err(R1CSError::from)?;
-        Ok((R1CSProof(ProofKind::Bppp(BpppProof { n_m, k, proof })), self.transcript))
+        let proof = circuit::prove(&c, &gens, &V, &w, transcript, &mut rng).map_err(R1CSError::from);
+        for s in w.w_l.iter_mut().chain(w.w_r.iter_mut()).chain(w.w_o.iter_mut()).chain(w.s.iter_mut()) {
+            s.clear();
+        }
+        w.v.iter_mut().flatten().for_each(|s| s.clear());
+        Ok((R1CSProof(ProofKind::Bppp(BpppProof { n_m, k, proof: proof? })), self.transcript))
     }
 }

@@ -17,7 +17,7 @@ use sha3::{Digest, Sha3_256};
 use super::gens::BpppGens;
 use super::poly::{pow_signed, Poly, VecPoly};
 use super::sparse::SparseMatrix;
-use super::transcript::BpppTranscript;
+use super::transcript::{BpppTranscript, DynRng, Randomness};
 use super::wnla::{self, WnlaProof, WnlaStatement};
 use crate::errors::ProofError;
 use crate::util;
@@ -383,16 +383,17 @@ pub fn prove<T: BpppTranscript, R: RngCore + CryptoRng>(
     transcript: &mut T,
     rng: &mut R,
 ) -> Result<CircuitProof, ProofError> {
-    prove_impl(c, gens, V, w, transcript, rng, true, true)
+    prove_impl(c, gens, V, w, transcript, Randomness::Derived(rng), true, true)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prove_impl<T: BpppTranscript, R: RngCore + CryptoRng>(
     c: &ArithmeticCircuit,
     gens: &BpppGens,
     V: &[CompressedRistretto],
     w: &CircuitWitness,
     transcript: &mut T,
-    rng: &mut R,
+    randomness: Randomness<R>,
     bind: bool,
     require_satisfied: bool,
 ) -> Result<CircuitProof, ProofError> {
@@ -403,9 +404,19 @@ fn prove_impl<T: BpppTranscript, R: RngCore + CryptoRng>(
     if V.len() != c.k {
         return Err(ProofError::FormatError);
     }
+    absorb_statement(transcript, c, gens, V, bind);
+    let mut derived;
+    let rng: &mut dyn rand_core::CryptoRngCore = match randomness {
+        Randomness::Given(r) => r,
+        Randomness::Derived(r) => {
+            let secrets = w.w_l.iter().chain(&w.w_r).chain(&w.w_o).chain(w.v.iter().flatten()).chain(&w.s);
+            derived = super::transcript::prover_rng(&*transcript, b"circuit", &c.digest(), secrets, r);
+            &mut derived
+        }
+    };
+    let rng = &mut DynRng(rng);
     let ol = commit_ol(gens, c.n_lin, &c.partition, &w.w_l, &w.w_o, rng);
     let r = commit_r(gens, &ol, &w.w_r, rng);
-    absorb_statement(transcript, c, gens, V, bind);
     transcript.append_point(b"C_L", &ol.C_L);
     transcript.append_point(b"C_R", &r.C_R);
     transcript.append_point(b"C_O", &ol.C_O);
@@ -808,7 +819,7 @@ mod tests {
         t: &mut T,
         rng: &mut R,
     ) -> Result<CircuitProof, ProofError> {
-        prove_impl(c, g, V, w, t, rng, true, false)
+        prove_impl(c, g, V, w, t, Randomness::Given(rng), true, false)
     }
 
     fn prove_and_verify(c: &ArithmeticCircuit, w: &CircuitWitness, rng: &mut ChaCha20Rng) -> Result<(), ProofError> {

@@ -22,6 +22,7 @@ use super::gens::BpppGens;
 use super::sparse::SparseMatrix;
 use super::transcript::BpppTranscript;
 use crate::errors::ProofError;
+use crate::{BulletproofGens, PedersenGens};
 
 /// A public pole (spec §4.1): a polynomial in the challenge `eta`, `t(eta) = sum_e t_e eta^e`;
 /// a circuit needs at least one coefficient (`check` rejects an empty one), and one coefficient
@@ -150,6 +151,16 @@ enum Col {
 impl ReciprocalCircuit {
     fn n_mm(&self) -> usize {
         self.n_p + self.n_m
+    }
+
+    /// The generators of this circuit ([`BpppGens::new`] with `n_lin` and `n_p + n_m`).
+    pub fn gens<'a>(&self, pc: &PedersenGens, bp: &'a BulletproofGens) -> Result<BpppGens<'a>, ProofError> {
+        BpppGens::new(pc, bp, self.n_lin, self.n_p.checked_add(self.n_m).ok_or(ProofError::InvalidGeneratorsLength)?)
+    }
+
+    /// The `BulletproofGens` capacity [`ReciprocalCircuit::gens`] needs.
+    pub fn gens_capacity(&self) -> usize {
+        BpppGens::capacity(self.n_lin, self.n_p.saturating_add(self.n_m))
     }
 
     /// Whether the circuit uses the challenge `eta` (spec §4.1): a tuple pole, or a public pole
@@ -601,11 +612,7 @@ fn absorb_statement<T: BpppTranscript>(t: &mut T, c: &ReciprocalCircuit, gens: &
 }
 
 fn check_gens(c: &ReciprocalCircuit, gens: &BpppGens) -> Result<(), ProofError> {
-    let n_mm = c.n_p.checked_add(c.n_m);
-    if c.n_lin.checked_add(7) != Some(gens.h.len()) || n_mm != Some(gens.n.len()) {
-        return Err(ProofError::InvalidGeneratorsLength);
-    }
-    Ok(())
+    gens.check_dims(c.n_lin, c.n_p.checked_add(c.n_m).ok_or(ProofError::InvalidGeneratorsLength)?)
 }
 
 /// Prove that `w` satisfies the reciprocal form circuit `c` for the input commitments `V`
@@ -804,21 +811,7 @@ pub(crate) fn terms<T: BpppTranscript>(
 
 /// Parse a proof for the reciprocal circuit `c` (spec §4.6).
 pub fn proof_from_bytes(bytes: &[u8], c: &ReciprocalCircuit) -> Result<CircuitProof, ProofError> {
-    let shape = ArithmeticCircuit {
-        n_m: c.n_p.checked_add(c.n_m).ok_or(ProofError::FormatError)?,
-        n_o: c.n_o,
-        n_v: c.n_v,
-        n_lin: c.n_lin,
-        k: c.k,
-        w_l: SparseMatrix::new(0),
-        a_l: vec![],
-        w_m: SparseMatrix::new(0),
-        a_m: vec![],
-        f_l: c.f_l,
-        f_m: c.f_m,
-        partition: vec![],
-    };
-    CircuitProof::from_bytes(bytes, &shape)
+    CircuitProof::from_bytes_dims(bytes, c.n_lin, c.n_p.checked_add(c.n_m).ok_or(ProofError::FormatError)?)
 }
 
 #[cfg(test)]
@@ -909,7 +902,7 @@ mod tests {
     }
 
     fn setup(c: &ReciprocalCircuit) -> (PedersenGens, BulletproofGens) {
-        (PedersenGens::default(), BulletproofGens::new((c.n_p + c.n_m).max(c.n_lin + 6), 1))
+        (PedersenGens::default(), BulletproofGens::new(c.gens_capacity(), 1))
     }
 
     fn inputs(g: &BpppGens, w: &ReciprocalWitness) -> Vec<CompressedRistretto> {
@@ -948,7 +941,7 @@ mod tests {
                 for &shared in &[false, true] {
                     let (c, w) = range_proof(base, n, &digits_of(value, base, n), shared);
                     let (pc, bp) = setup(&c);
-                    let g = BpppGens::new(&pc, &bp, c.n_lin, c.n_p + c.n_m).unwrap();
+                    let g = c.gens(&pc, &bp).unwrap();
                     let V = inputs(&g, &w);
                     let proof = prove(&c, &g, &V, &w, &mut Transcript::new(b"rp"), &mut rng)
                         .unwrap_or_else(|e| panic!("base {} value {} shared {}: {:?}", base, value, shared, e));
@@ -972,7 +965,7 @@ mod tests {
             let (c, w) = range_proof(16, 4, &digits, shared);
             assert!(!c.is_satisfied(&w, Scalar::ZERO, Scalar::from(12345u64)));
             let (pc, bp) = setup(&c);
-            let g = BpppGens::new(&pc, &bp, c.n_lin, c.n_p + c.n_m).unwrap();
+            let g = c.gens(&pc, &bp).unwrap();
             let V = inputs(&g, &w);
             assert!(prove(&c, &g, &V, &w, &mut Transcript::new(b"rp"), &mut rng).is_err());
             let proof = prove_impl(&c, &g, &V, &w, &mut Transcript::new(b"rp"), &mut rng, false).unwrap();
@@ -987,7 +980,7 @@ mod tests {
         let mut rng = ChaCha20Rng::seed_from_u64(32);
         let (c, w) = range_proof(4, 3, &digits_of(37, 4, 3), true);
         let (pc, bp) = setup(&c);
-        let g = BpppGens::new(&pc, &bp, c.n_lin, c.n_p + c.n_m).unwrap();
+        let g = c.gens(&pc, &bp).unwrap();
         let V = inputs(&g, &w);
         let chal: Vec<Scalar> = (5..40u64).map(Scalar::from).collect();
         let mut t = Replay::new(chal.clone());
@@ -1013,7 +1006,7 @@ mod tests {
         let mut rng = ChaCha20Rng::seed_from_u64(33);
         let (c, w) = range_proof(4, 3, &digits_of(37, 4, 3), false);
         let (pc, bp) = setup(&c);
-        let g = BpppGens::new(&pc, &bp, c.n_lin, c.n_p + c.n_m).unwrap();
+        let g = c.gens(&pc, &bp).unwrap();
         let V = inputs(&g, &w);
         let mut chal: Vec<Scalar> = (5..40u64).map(Scalar::from).collect();
         chal[0] = -w.w_d[1];
@@ -1098,7 +1091,7 @@ mod tests {
         // the verifier checks the circuit (rules and column ranges) and fails cleanly
         let (c, w) = range_proof(4, 3, &digits_of(37, 4, 3), false);
         let (pc, bp) = setup(&c);
-        let g = BpppGens::new(&pc, &bp, c.n_lin, c.n_p + c.n_m).unwrap();
+        let g = c.gens(&pc, &bp).unwrap();
         let V = inputs(&g, &w);
         let proof = prove(&c, &g, &V, &w, &mut Transcript::new(b"t"), &mut ChaCha20Rng::seed_from_u64(1)).unwrap();
         let mut bad = c.clone();
@@ -1142,7 +1135,7 @@ mod tests {
         let mut rng = ChaCha20Rng::seed_from_u64(34);
         let (c, w) = range_proof(4, 3, &digits_of(37, 4, 3), true); // digits 1, 1, 2; poles 0..3
         let (pc, bp) = setup(&c);
-        let g = BpppGens::new(&pc, &bp, c.n_lin, c.n_p + c.n_m).unwrap();
+        let g = c.gens(&pc, &bp).unwrap();
         let V = inputs(&g, &w);
         let mut chal: Vec<Scalar> = (5..40u64).map(Scalar::from).collect();
         let proof = prove(&c, &g, &V, &w, &mut Replay::new(chal.clone()), &mut rng).unwrap();
@@ -1293,7 +1286,7 @@ mod tests {
         c.check().unwrap();
         assert!(c.uses_eta());
         let (pc, bp) = tuple_gens(&c);
-        let g = BpppGens::new(&pc, &bp, c.n_lin, c.n_p + c.n_m).unwrap();
+        let g = c.gens(&pc, &bp).unwrap();
         let chal: Vec<Scalar> = (5..40u64).map(Scalar::from).collect();
         let eta = chal[0];
         assert!(c.is_satisfied(&w, eta, chal[1]));
@@ -1337,7 +1330,7 @@ mod tests {
         for (i, &cheat) in cheats.iter().enumerate() {
             let (c, w) = tuple_lookup(&[cheat], &rows, &m);
             let (pc, bp) = tuple_gens(&c);
-            let g = BpppGens::new(&pc, &bp, c.n_lin, c.n_p + c.n_m).unwrap();
+            let g = c.gens(&pc, &bp).unwrap();
             assert!(!c.is_satisfied(&w, Scalar::from(77u64), Scalar::from(5u64)), "cheat {}", i);
             let mut rng = ChaCha20Rng::seed_from_u64(3);
             assert!(prove(&c, &g, &[], &w, &mut Transcript::new(b"tp"), &mut rng).is_err(), "cheat {}", i);
@@ -1415,7 +1408,7 @@ mod tests {
         let (r, rw) = range_proof(4, 3, &digits_of(37, 4, 3), true);
         let pc = PedersenGens::default();
         let bp = BulletproofGens::new(64, 1);
-        let g = BpppGens::new(&pc, &bp, c.n_lin, c.n_p + c.n_m).unwrap();
+        let g = c.gens(&pc, &bp).unwrap();
         let gr = BpppGens::new(&pc, &bp, r.n_lin, r.n_p + r.n_m).unwrap();
         let Vr = inputs(&gr, &rw);
         let mut rng = ChaCha20Rng::seed_from_u64(9);

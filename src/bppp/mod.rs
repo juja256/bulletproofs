@@ -11,6 +11,7 @@ mod poly;
 pub mod range;
 pub mod reciprocal;
 mod sparse;
+mod terms;
 #[cfg(test)]
 pub(crate) mod testutil;
 #[cfg(test)]

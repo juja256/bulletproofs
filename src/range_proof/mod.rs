@@ -22,7 +22,7 @@ use crate::transcript::TranscriptProtocol;
 use crate::util;
 
 use rand_core::{CryptoRng, RngCore};
-use serde::de::{Error, SeqAccess, Visitor};
+use serde::de::{SeqAccess, Visitor};
 use serde::{self, Deserialize, Deserializer, Serialize, Serializer};
 
 // Modules for MPC protocol

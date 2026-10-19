@@ -6,20 +6,20 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
-use core::iter::once;
 
 use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
 use curve25519_dalek::scalar::Scalar;
-use curve25519_dalek::traits::{IsIdentity, VartimeMultiscalarMul};
 use rand_core::{CryptoRng, RngCore};
 use sha3::{Digest, Sha3_256};
 
-use super::gens::BpppGens;
+use super::gens::{BpppGens, H_FIXED};
 use super::poly::{pow_signed, Poly, VecPoly};
 use super::sparse::SparseMatrix;
+pub(crate) use super::terms::Terms;
 use super::transcript::BpppTranscript;
 use super::wnla::{self, WnlaProof, WnlaStatement};
 use crate::errors::ProofError;
+use crate::{BulletproofGens, PedersenGens};
 use crate::util;
 
 /// Where an element of `w_O` is committed (spec §3.3).
@@ -204,10 +204,17 @@ impl ArithmeticCircuit {
     }
 
     fn check_gens(&self, gens: &BpppGens) -> Result<(), ProofError> {
-        if self.n_lin.checked_add(7) != Some(gens.h.len()) || gens.n.len() != self.n_m {
-            return Err(ProofError::InvalidGeneratorsLength);
-        }
-        Ok(())
+        gens.check_dims(self.n_lin, self.n_m)
+    }
+
+    /// The generators of this circuit ([`BpppGens::new`] with `n_lin`, `n_m`).
+    pub fn gens<'a>(&self, pc: &PedersenGens, bp: &'a BulletproofGens) -> Result<BpppGens<'a>, ProofError> {
+        BpppGens::new(pc, bp, self.n_lin, self.n_m)
+    }
+
+    /// The `BulletproofGens` capacity [`ArithmeticCircuit::gens`] needs.
+    pub fn gens_capacity(&self) -> usize {
+        BpppGens::capacity(self.n_lin, self.n_m)
     }
 
     /// The circuit digest absorbed by [`prove`] and [`CircuitProof::verify`] (spec §3.9).
@@ -609,33 +616,6 @@ pub(crate) fn prove_inner<T: BpppTranscript, R: RngCore + CryptoRng>(
     Ok(CircuitProof { C_L: ol.C_L, C_R: cr.C_R, C_O: ol.C_O, C_S, wnla })
 }
 
-/// The verification equation of one proof as a linear combination: `g G + <h, H> + <n, N> +
-/// sum k P = 0` over the generators of [`BpppGens`] and the proof's own points (spec §3.7).
-pub(crate) struct Terms {
-    pub(crate) g: Scalar,
-    pub(crate) h: Vec<Scalar>,
-    pub(crate) n: Vec<Scalar>,
-    pub(crate) points: Vec<(Scalar, RistrettoPoint)>,
-}
-
-impl Terms {
-    /// One multiscalar multiplication.
-    pub(crate) fn check(&self, gens: &BpppGens) -> Result<(), ProofError> {
-        let small = RistrettoPoint::vartime_multiscalar_mul(
-            once(self.g).chain(self.points.iter().map(|(k, _)| *k)),
-            once(&gens.g).chain(self.points.iter().map(|(_, p)| p)),
-        );
-        let check = small
-            + util::vartime_msm_slices(&self.h, &gens.h[..self.h.len()], util::MSM_CHUNK_VT)
-            + util::vartime_msm_slices(&self.n, &gens.n[..self.n.len()], util::MSM_CHUNK_VT);
-        if check.is_identity() {
-            Ok(())
-        } else {
-            Err(ProofError::VerificationError)
-        }
-    }
-}
-
 impl CircuitProof {
     /// Verify the proof for circuit `c` and input commitments `V`; absorbs the same statement
     /// as [`prove`].
@@ -722,12 +702,18 @@ impl CircuitProof {
 
     /// Parse a proof for circuit `c`.
     pub fn from_bytes(bytes: &[u8], c: &ArithmeticCircuit) -> Result<Self, ProofError> {
+        Self::from_bytes_dims(bytes, c.n_lin, c.n_m)
+    }
+
+    /// Parse a proof for a linear part of length `n_lin` and `n_m` norm slots (the only
+    /// dimensions the encoding depends on).
+    pub(crate) fn from_bytes_dims(bytes: &[u8], n_lin: usize, n_m: usize) -> Result<Self, ProofError> {
         if bytes.len() < 128 {
             return Err(ProofError::FormatError);
         }
         let p = |i: usize| CompressedRistretto(util::read32(&bytes[32 * i..]));
-        let a = c.n_lin.checked_add(7).ok_or(ProofError::FormatError)?;
-        let wnla = WnlaProof::from_bytes(&bytes[128..], a, c.n_m)?;
+        let a = n_lin.checked_add(H_FIXED).ok_or(ProofError::FormatError)?;
+        let wnla = WnlaProof::from_bytes(&bytes[128..], a, n_m)?;
         Ok(CircuitProof { C_L: p(0), C_R: p(1), C_O: p(2), C_S: p(3), wnla })
     }
 }
@@ -845,7 +831,7 @@ mod tests {
     }
 
     fn gens_for(c: &ArithmeticCircuit) -> (PedersenGens, BulletproofGens) {
-        (PedersenGens::default(), BulletproofGens::new(c.n_m.max(c.n_lin + 6), 1))
+        (PedersenGens::default(), BulletproofGens::new(c.gens_capacity(), 1))
     }
 
     fn commitments(g: &BpppGens, w: &CircuitWitness) -> Vec<CompressedRistretto> {
@@ -973,7 +959,7 @@ mod tests {
                 s: scs(&case["s"]),
             };
             assert_eq!(c.is_satisfied(&w), case["satisfied"].as_bool().unwrap(), "{}", name);
-            let bp = BulletproofGens::new(n_m.max(n_lin + 6), 1);
+            let bp = BulletproofGens::new(BpppGens::capacity(n_lin, n_m), 1);
             let g = BpppGens::new(&pc, &bp, n_lin, n_m).unwrap();
             let point = |p: &serde_json::Value| {
                 use curve25519_dalek::traits::MultiscalarMul;

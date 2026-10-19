@@ -1,6 +1,8 @@
 //! The R1CS front end on the BP++ backend (spec §6): the same gadgets proven with both
 //! backends, backend mismatches, randomized constraints, malformed proofs.
 
+#![allow(non_snake_case)]
+
 use std::convert::TryInto;
 
 use bulletproofs::r1cs::*;

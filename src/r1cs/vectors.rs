@@ -11,7 +11,7 @@ use rand_chacha::ChaCha20Rng;
 use serde_json::Value;
 
 use super::builder::{CircuitBuilder, Cost, TableId};
-use super::{Backend, ConstraintSystem, LinearCombination, Prover, R1CSError, Variable, Verifier};
+use super::{Backend, LinearCombination, Prover, R1CSError, Variable, Verifier};
 use crate::bppp::testutil;
 use crate::{BulletproofGens, PedersenGens};
 
@@ -185,7 +185,7 @@ fn builder_matches_reference_vectors() {
             pc_case["verifies"] = Value::Bool(true);
             let proof = testutil::run_recip_case(&pc_case, &cp, &w);
             let pcg = PedersenGens::default();
-            let bpg = BulletproofGens::new((c.n_p + c.n_m).max(c.n_lin + 6), 1);
+            let bpg = BulletproofGens::new(c.gens_capacity(), 1);
             let g = crate::bppp::BpppGens::new(&pcg, &bpg, c.n_lin, c.n_p + c.n_m).unwrap();
             let V: Vec<CompressedRistretto> = w.v.iter().zip(&w.s).map(|(v, s)| g.commit_input(v, *s).compress()).collect();
             let ch = &case["chal"];

@@ -390,7 +390,8 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
     /// Can be called at any time before proving; the verifier must use the same backend.
     ///
     /// With `Backend::Bppp`: the `BulletproofGens` capacity must be at least
-    /// `max(multipliers, inputs + 6)` (BP needs the multipliers rounded up to a power of two);
+    /// [`Cost::gens_capacity`](super::Cost::gens_capacity) (BP's is the multipliers rounded up
+    /// to a power of two);
     /// randomized constraints are refused with a `GadgetError`; an unsatisfied multiplicative
     /// witness is refused with `VerificationError` (BP produces a proof that does not verify);
     /// and, as for every BP++ input (spec §3.2), the proof binds the committed values but not

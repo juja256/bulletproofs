@@ -170,3 +170,409 @@ def wnla_verify(G, H, N, c, rho, C, rounds, l, n, gammas):
             N = fold_pts(N0, N1, rho, gamma)
             rho, mu = mu, mu * mu % L
     return C == wnla_commit(G, H, N, c, mu, l, n)
+
+
+# ---------------------------------------------------------------------------------------------
+# Arithmetic circuits (spec section 3, paper section 5)
+#
+# Laurent polynomials in T: a scalar polynomial is a dict {degree: coefficient}, a vector
+# polynomial a dict {degree: list of scalars} (all lists of one polynomial have equal length).
+# Zero coefficients are dropped, so the keys are exactly the support.
+
+
+def lp_norm(p):
+    return {e: x % L for e, x in p.items() if x % L}
+
+
+def lp_add(*ps):
+    acc = {}
+    for p in ps:
+        for e, x in p.items():
+            acc[e] = acc.get(e, 0) + x
+    return lp_norm(acc)
+
+
+def lp_scale(p, s):
+    return lp_norm({e: x * s for e, x in p.items()})
+
+
+def lp_mul(a, b):
+    acc = {}
+    for e, x in a.items():
+        for f, y in b.items():
+            acc[e + f] = acc.get(e + f, 0) + x * y
+    return lp_norm(acc)
+
+
+def tpow(x, e):
+    """x^e for any integer e (x != 0 if e < 0)."""
+    return pow(x, e, L) if e >= 0 else pow(inv(x), -e, L)
+
+
+def lp_eval(p, x):
+    return sum(c * tpow(x, e) for e, c in p.items()) % L
+
+
+def vp_norm(p):
+    out = {}
+    for e, v in p.items():
+        v = [x % L for x in v]
+        if any(v):
+            out[e] = v
+    return out
+
+
+def vp_add(n, *ps):
+    acc = {}
+    for p in ps:
+        for e, v in p.items():
+            assert len(v) == n
+            a = acc.setdefault(e, [0] * n)
+            for i, x in enumerate(v):
+                a[i] += x
+    return vp_norm(acc)
+
+
+def vp_ip(a, b):
+    """<a(T), b(T)> as a scalar polynomial."""
+    acc = {}
+    for e, x in a.items():
+        for f, y in b.items():
+            acc[e + f] = acc.get(e + f, 0) + ip(x, y)
+    return lp_norm(acc)
+
+
+def vp_wip(a, b, mu):
+    """<a(T), b(T)>_mu as a scalar polynomial."""
+    acc = {}
+    for e, x in a.items():
+        for f, y in b.items():
+            acc[e + f] = acc.get(e + f, 0) + wip(x, y, mu)
+    return lp_norm(acc)
+
+
+def vp_eval(p, x, n):
+    out = [0] * n
+    for e, v in p.items():
+        xe = tpow(x, e)
+        for i, y in enumerate(v):
+            out[i] = (out[i] + y * xe) % L
+    return out
+
+
+# Exponents of c_r(T) = beta (T^-1, T, T^2, T^3, T^5, T^6, T^7) (section 3.5/3.6).
+CR_EXP = (-1, 1, 2, 3, 5, 6, 7)
+SLOTS = ("nO", "lO", "lL", "lR")
+
+
+def circuit_gens(c):
+    """Section 3.2: G, H (|H| = 7 + N_lin; H_0 = input blinding, H_1..6 the remaining blinding
+    slots, H_7.. the linear part), N (|N| = N_m), as symbolic generators."""
+    return (Sym.gen("G"), [Sym.gen("H", i) for i in range(7 + c["n_lin"])],
+            [Sym.gen("N", t) for t in range(c["n_m"])])
+
+
+def circuit_check_shape(c):
+    nm, no, nv, nlin, k, nl = (c[x] for x in ("n_m", "n_o", "n_v", "n_lin", "k", "n_l"))
+    assert nm >= 1 and nv >= 1 and k >= 0 and nlin >= nv - 1
+    assert len(c["w_l"]) == nl == len(c["a_l"]) and len(c["w_m"]) == nm == len(c["a_m"])
+    assert not c["f_l"] or nl >= k * nv
+    assert not c["f_m"] or nm >= k * nv
+    assert len(c["partition"]) == no
+    assert len(set(map(tuple, c["partition"]))) == no  # injective
+    for slot, t in c["partition"]:
+        assert slot in SLOTS and 0 <= t < (nm if slot == "nO" else nlin)
+    for row in c["w_l"] + c["w_m"]:
+        for col, _ in row:
+            assert 0 <= col < 2 * nm + no
+
+
+def sparse_mul(rows, w):
+    return [sum(x * w[col] for col, x in row) % L for row in rows]
+
+
+def circuit_error(c, wit, lam, mu):
+    """E of section 3.5 (with the weights Lambda of 3.4), from the relation directly.
+    Returns (E, satisfied)."""
+    nm, nl = c["n_m"], c["n_l"]
+    w = wit["w_L"] + wit["w_R"] + wit["w_O"]
+    wv = [x for v in wit["v"] for x in v]
+    lin = [(x + c["f_l"] * (wv[t] if t < len(wv) else 0) + c["a_l"][t]) % L
+           for t, x in enumerate(sparse_mul(c["w_l"], w))]
+    mul = [(x + c["f_m"] * (wv[t] if t < len(wv) else 0) + c["a_m"][t]) % L
+           for t, x in enumerate(sparse_mul(c["w_m"], w))]
+    hadamard = [x * y % L for x, y in zip(wit["w_L"], wit["w_R"])]
+    satisfied = all(x == 0 for x in lin) and hadamard == mul
+    Lam = circuit_lambda(c, lam, mu)
+    mus = [pow(mu, r + 1, L) for r in range(nm)]
+    E = (ip(Lam, lin) + wip(wit["w_L"], wit["w_R"], mu) - ip(mus, mul)) % L
+    assert len(Lam) == nl
+    return E, satisfied
+
+
+def circuit_lambda(c, lam, mu):
+    """Linear weights Lambda (section 3.4)."""
+    nv, k = c["n_v"], c["k"]
+    Lam = [pow(lam, t, L) for t in range(c["n_l"])]
+    if c["f_l"] and c["f_m"]:
+        for i in range(k):
+            for j in range(1, nv):
+                t = nv * i + j
+                Lam[t] = (pow(lam, t, L) + pow(mu, j, L) * pow(lam, nv * i, L)
+                          - pow(lam, j, L) * pow(mu, nv * i + 1, L)) % L
+    return Lam
+
+
+def circuit_public(c, chal):
+    """Everything the verifier derives from the circuit and the challenges (sections 3.4, 3.5):
+    weights, input scalings and the public Laurent polynomials p_n, p_s, c_l_hat, c_r."""
+    nm, no, nv, nlin, k = (c[x] for x in ("n_m", "n_o", "n_v", "n_lin", "k"))
+    fl, fm = c["f_l"], c["f_m"]
+    rho, lam, beta, delta = chal["rho"], chal["lambda"], chal["beta"], chal["delta"]
+    mu = rho * rho % L
+    mus = [pow(mu, r + 1, L) for r in range(nm)]
+    Lam = circuit_lambda(c, lam, mu)
+    # y = Lambda^T W_l - mu^T W_m
+    y = [0] * (2 * nm + no)
+    for row, wt in zip(c["w_l"], Lam):
+        for col, x in row:
+            y[col] += wt * x
+    for row, wt in zip(c["w_m"], mus):
+        for col, x in row:
+            y[col] -= wt * x
+    y = [x % L for x in y]
+    c_n = {"nL": [y[t] * inv(mus[t]) % L for t in range(nm)],
+           "nR": [y[nm + t] * inv(mus[t]) % L for t in range(nm)],
+           "nO": [0] * nm}
+    c_l = {"lO": [0] * nlin, "lL": [0] * nlin, "lR": [0] * nlin}
+    for i, (slot, t) in enumerate(c["partition"]):
+        if slot == "nO":
+            c_n["nO"][t] = y[2 * nm + i] * inv(mus[t]) % L
+        else:
+            c_l[slot][t] = y[2 * nm + i]
+    nu = [2 * (fm * pow(mu, nv * i + 1, L) - fl * pow(lam, nv * i, L)) % L for i in range(k)]
+    c_V = [-(fm * pow(mu, j, L) + fl * pow(lam, j, L)) % L for j in range(1, nv)]
+    c_V += [0] * (nlin - len(c_V))
+    di = inv(delta)
+    p_n = vp_norm({3: [di * x for x in c_n["nO"]], 2: c_n["nL"], 1: c_n["nR"]})
+    p_s = lp_add(vp_wip(p_n, p_n, mu),
+                 {3: 2 * ip(mus, c["a_m"]) - 2 * ip(Lam, c["a_l"])})
+    c_l_hat = vp_norm({3: [2 * di * x for x in c_l["lO"]], 2: [2 * x for x in c_l["lL"]],
+                       1: [2 * x for x in c_l["lR"]], 0: c_V})
+    c_r = {}
+    for j, e in enumerate(CR_EXP):
+        c_r[e] = [beta if i == j else 0 for i in range(7)]
+    return {"mu": mu, "mus": mus, "Lambda": Lam, "y": y, "c_n": c_n, "c_l": c_l, "nu": nu,
+            "c_V": c_V, "p_n": p_n, "p_s": p_s, "c_l_hat": c_l_hat, "c_r": vp_norm(c_r)}
+
+
+def circuit_layout(c, wit):
+    """Section 3.3: n_O, l_O, l_L, l_R from the partition."""
+    nm, nlin = c["n_m"], c["n_lin"]
+    slots = {"nO": [0] * nm, "lO": [0] * nlin, "lL": [0] * nlin, "lR": [0] * nlin}
+    for x, (slot, t) in zip(wit["w_O"], c["partition"]):
+        slots[slot][t] = x
+    return slots
+
+
+def circuit_commit(G, H, N, r, l, n):
+    """C_X = r_0 G + sum_{j=1..7} r_j H_{j-1} + <l, H_7..> + <n, N> (section 3.3)."""
+    assert len(r) == 8 and len(l) == len(H) - 7 and len(n) == len(N)
+    return G.scale(r[0]) + msm(r[1:], H[:7]) + msm(l, H[7:]) + msm(n, N)
+
+
+def circuit_input_commit(G, H, v, s):
+    """V_i = v_0 G + s H_0 + sum_{j>=1} v_j H_{6+j} (section 3.2)."""
+    return G.scale(v[0]) + H[0].scale(s) + msm(v[1:], H[7:])
+
+
+def circuit_prove(c, wit, rnd, chal, gammas):
+    """Prover of section 3 with given randomness and challenges (no transcript). Returns a dict
+    with everything the prover sends, the norm-argument inputs and the intermediate polynomials
+    (for the self-checks)."""
+    circuit_check_shape(c)
+    nm, no, nv, nlin, k = (c[x] for x in ("n_m", "n_o", "n_v", "n_lin", "k"))
+    assert len(wit["w_L"]) == nm == len(wit["w_R"]) and len(wit["w_O"]) == no
+    assert len(wit["v"]) == k == len(wit["s"]) and all(len(v) == nv for v in wit["v"])
+    G, H, N = circuit_gens(c)
+    rho, beta, delta, tau = chal["rho"], chal["beta"], chal["delta"], chal["tau"]
+    assert all(x % L for x in (rho, beta, delta, tau))
+
+    # 3.2, 3.3: input commitments and C_L, C_R, C_O
+    V = [circuit_input_commit(G, H, v, s) for v, s in zip(wit["v"], wit["s"])]
+    lay = circuit_layout(c, wit)
+    ro, rl, rr = rnd["r_O"], rnd["r_L"], rnd["r_R"]
+    assert len(ro) == 6 and len(rl) == 5 and len(rr) == 4
+    r_O = [ro[0], ro[1], ro[2], ro[3], 0, ro[4], ro[5], 0]
+    r_L = [rl[0], rl[1], rl[2], 0, rl[3], rl[4], 0, 0]
+    r_R = [rr[0], rr[1], 0, rr[2], rr[3], 0, 0, 0]
+    n_L, n_R, n_O = wit["w_L"], wit["w_R"], lay["nO"]
+    l_O, l_L, l_R = lay["lO"], lay["lL"], lay["lR"]
+    C_L = circuit_commit(G, H, N, r_L, l_L, n_L)
+    C_R = circuit_commit(G, H, N, r_R, l_R, n_R)
+    C_O = circuit_commit(G, H, N, r_O, l_O, n_O)
+
+    # 3.4: weights and inputs
+    pub = circuit_public(c, chal)
+    mu, nu = pub["mu"], pub["nu"]
+    v_hat = sum(x * v[0] for x, v in zip(nu, wit["v"])) % L
+    l_V = [sum(x * v[j] for x, v in zip(nu, wit["v"])) % L for j in range(1, nv)]
+    l_V += [0] * (nlin - len(l_V))
+    r_V = [0, sum(x * s for x, s in zip(nu, wit["s"])) % L, 0, 0, 0, 0, 0, 0]
+
+    # 3.5: polynomials
+    l_S, n_S = rnd["l_S"], rnd["n_S"]
+    assert len(l_S) == nlin and len(n_S) == nm
+    l_hat = vp_norm({-1: l_S, 0: [delta * x for x in l_O], 1: l_L, 2: l_R, 3: l_V})
+    n_hat = vp_norm({-1: n_S, 0: [delta * x for x in n_O], 1: n_L, 2: n_R})
+    n_poly = vp_add(nm, pub["p_n"], n_hat)
+    f_hat = lp_add(pub["p_s"], {3: v_hat}, lp_scale(vp_ip(pub["c_l_hat"], l_hat), -1),
+                   lp_scale(vp_wip(n_poly, n_poly, mu), -1))
+
+    # 3.6: blinding commitment
+    sigma = {"O": {0: delta}, "L": {1: 1}, "R": {2: 1}, "V": {3: 1}}
+    rX = {"O": r_O, "L": r_L, "R": r_R, "V": r_V}
+    g = {}
+    for X in ("O", "L", "R", "V"):
+        inner = lp_add(vp_ip(pub["c_r"], {0: rX[X][1:]}), {0: -rX[X][0]})
+        g = lp_add(g, lp_mul(sigma[X], inner))
+    d = lp_add(f_hat, lp_scale(g, -1))
+    r_S = [-d.get(-1, 0) % L] + [inv(beta) * d.get(e - 1, 0) % L for e in CR_EXP]
+    C_S = circuit_commit(G, H, N, r_S, l_S, n_S)
+
+    # 3.7: opening at tau and the norm argument
+    r_poly = vp_norm({-1: r_S, 0: [delta * x for x in r_O], 1: r_L, 2: r_R, 3: r_V})
+    r_tau = vp_eval(r_poly, tau, 8)
+    v = (lp_eval(pub["p_s"], tau) + r_tau[0] + pow(tau, 3, L) * v_hat) % L
+    wl = r_tau[1:] + vp_eval(l_hat, tau, nlin)
+    wn = vp_eval(n_poly, tau, nm)
+    wc = vp_eval(pub["c_r"], tau, 7) + vp_eval(pub["c_l_hat"], tau, nlin)
+    gi = iter(gammas)
+    rounds, l_final, n_final = wnla_prove(G, H, N, wc, rho, list(wl), list(wn),
+                                          lambda X, R: next(gi))
+    assert next(gi, None) is None, "unused gammas"
+    # g with the r_S part, <c_r(T), r_{1:}(T)> - r_0(T), for the self-checks
+    g_full = lp_add(vp_ip(pub["c_r"], {e: x[1:] for e, x in r_poly.items()}),
+                    lp_scale({e: x[0] for e, x in r_poly.items()}, -1))
+    return {"V": V, "C_L": C_L, "C_R": C_R, "C_O": C_O, "C_S": C_S,
+            "r_O": r_O, "r_L": r_L, "r_R": r_R, "r_V": r_V, "r_S": r_S,
+            "v_hat": v_hat, "l_V": l_V, "pub": pub,
+            "f_hat": f_hat, "g": g, "g_full": g_full, "d": d,
+            "wnla_v": v, "wnla_c": wc, "wnla_l": wl, "wnla_n": wn,
+            "rounds": rounds, "l_final": l_final, "n_final": n_final}
+
+
+def circuit_commitment(c, chal, V, C_L, C_R, C_O, C_S):
+    """The verifier's C(tau) and c (section 3.7)."""
+    G, H, N = circuit_gens(c)
+    pub = circuit_public(c, chal)
+    tau, delta = chal["tau"], chal["delta"]
+    t3 = pow(tau, 3, L)
+    C = (G.scale(lp_eval(pub["p_s"], tau)) + msm(vp_eval(pub["p_n"], tau, c["n_m"]), N)
+         + C_S.scale(inv(tau)) + C_O.scale(delta) + C_L.scale(tau) + C_R.scale(tau * tau)
+         + msm([t3 * x for x in pub["nu"]], V))
+    wc = vp_eval(pub["c_r"], tau, 7) + vp_eval(pub["c_l_hat"], tau, c["n_lin"])
+    return C, wc, pub
+
+
+def circuit_verify(c, V, C_L, C_R, C_O, C_S, chal, rounds, l_final, n_final, gammas):
+    """Verifier of section 3.7 via C(tau) and the naive norm-argument verifier."""
+    if any(chal[x] % L == 0 for x in ("rho", "beta", "delta", "tau")) or len(V) != c["k"]:
+        return False
+    G, H, N = circuit_gens(c)
+    C, wc, _ = circuit_commitment(c, chal, V, C_L, C_R, C_O, C_S)
+    return wnla_verify(G, H, N, wc, chal["rho"], C, rounds, l_final, n_final, gammas)
+
+
+def wnla_verification_scalars(a, b, c, rho, gammas, l, n):
+    """Section 2.4: (v, h, n') such that the proof is valid iff
+    v G + <h, H> + <n', N> - C - sum_r (gamma_r X_r + (gamma_r^2 - 1) R_r) = 0."""
+    k = len(gammas)
+    ka = kn = 0  # rounds in which l (resp. n) was folded
+    aa, bb = a, b
+    for _ in range(k):
+        if aa > 1:
+            aa, ka = (aa + 1) // 2, ka + 1
+        if bb > 1:
+            bb, kn = (bb + 1) // 2, kn + 1
+    assert len(l) == aa and len(n) == bb
+    cc = list(c)
+    for r, gamma in enumerate(gammas):
+        if len(cc) > 1:
+            c0, c1 = split(cc)
+            cc = fold(c0, c1, 1, gamma)
+    rho_r = [pow(rho, 2**r, L) if r < kn else 1 for r in range(k)]
+    h = []
+    for i in range(a):
+        x = l[i >> k]
+        for r in range(k):
+            if (i >> r) & 1:
+                x = x * gammas[r] % L
+        h.append(x)
+    nn = []
+    for i in range(b):
+        x = n[i >> k]
+        for r in range(k):
+            x = x * (gammas[r] if (i >> r) & 1 else rho_r[r]) % L
+        nn.append(x)
+    mu_fin = pow(rho, 2**(kn + 1), L)
+    v = (ip(cc, l) + wip(n, n, mu_fin)) % L
+    return v, h, nn
+
+
+def circuit_verify_msm(c, V, C_L, C_R, C_O, C_S, chal, rounds, l_final, n_final, gammas):
+    """Verifier of section 3.7 as the single multiscalar equation (with the scalars of 2.4)."""
+    if any(chal[x] % L == 0 for x in ("rho", "beta", "delta", "tau")) or len(V) != c["k"]:
+        return False
+    a, b = 7 + c["n_lin"], c["n_m"]
+    k, fa, fb = wnla_rounds(a, b)
+    if len(rounds) != k or len(gammas) != k or len(l_final) != fa or len(n_final) != fb:
+        return False
+    G, H, N = circuit_gens(c)
+    pub = circuit_public(c, chal)
+    tau, delta = chal["tau"], chal["delta"]
+    wc = vp_eval(pub["c_r"], tau, 7) + vp_eval(pub["c_l_hat"], tau, c["n_lin"])
+    g, h, nn = wnla_verification_scalars(a, b, wc, chal["rho"], gammas, l_final, n_final)
+    p_n = vp_eval(pub["p_n"], tau, b)
+    t3 = pow(tau, 3, L)
+    acc = (G.scale(g - lp_eval(pub["p_s"], tau)) + msm(h, H) + msm([x - y for x, y in zip(nn, p_n)], N)
+           - C_S.scale(inv(tau)) - C_O.scale(delta) - C_L.scale(tau) - C_R.scale(tau * tau)
+           - msm([t3 * x for x in pub["nu"]], V))
+    for (X, R), gamma in zip(rounds, gammas):
+        acc = acc - X.scale(gamma) - R.scale(gamma * gamma - 1)
+    return acc == ZERO
+
+
+def circuit_self_check(c, wit, chal, gammas, proof):
+    """The self-checks: identity of 3.5, zero pattern of 3.6, opening and norm relation at tau,
+    both verifiers. Returns (satisfied, verifies); raises AssertionError on any mismatch."""
+    G, H, N = circuit_gens(c)
+    pub = proof["pub"]
+    E, satisfied = circuit_error(c, wit, chal["lambda"], pub["mu"])
+    f_hat, g, g_full = proof["f_hat"], proof["g"], proof["g_full"]
+    # 3.5 identity: the T^3 coefficient of f_hat is -2E (for any witness)
+    assert f_hat.get(3, 0) == -2 * E % L, "f_hat_3 != -2E"
+    assert (E == 0) == satisfied, "E vanishes on an unsatisfied witness (unlucky challenges)"
+    # 3.6 zero pattern
+    assert all(-2 <= e <= 6 for e in f_hat), f"f_hat degrees {sorted(f_hat)}"
+    assert 3 not in g and all(-2 <= e <= 6 for e in g), f"g degrees {sorted(g)}"
+    # r_S cancels every coefficient of f_hat - g_full except the value term
+    assert lp_add(f_hat, lp_scale(g_full, -1)) == lp_norm({3: f_hat.get(3, 0)})
+    # opening at tau: C(tau) the verifier's way = v G + <l, H> + <n, N>
+    tau = chal["tau"]
+    C, wc, _ = circuit_commitment(c, chal, proof["V"], proof["C_L"], proof["C_R"], proof["C_O"],
+                                  proof["C_S"])
+    assert wc == proof["wnla_c"]
+    v, wl, wn = proof["wnla_v"], proof["wnla_l"], proof["wnla_n"]
+    assert C == G.scale(v) + msm(wl, H) + msm(wn, N), "C(tau) != opening"
+    # norm linear relation: v - <c, l> - |n|^2_mu = f_hat_3 tau^3, zero iff satisfied
+    rel = (v - ip(wc, wl) - wip(wn, wn, pub["mu"])) % L
+    assert rel == f_hat.get(3, 0) * pow(tau, 3, L) % L
+    assert (rel == 0) == satisfied
+    # full proof, both verifiers
+    args = (c, proof["V"], proof["C_L"], proof["C_R"], proof["C_O"], proof["C_S"], chal,
+            proof["rounds"], proof["l_final"], proof["n_final"], gammas)
+    verifies = circuit_verify(*args)
+    assert circuit_verify_msm(*args) == verifies, "the two verifiers disagree"
+    assert verifies == satisfied
+    return satisfied, verifies

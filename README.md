@@ -238,7 +238,13 @@ Status:
   are computed in constant time.
 - `bppp::MactProof`, multi-asset transactions (paper §6.5, spec §5.3): per asset type the
   inputs and outputs balance, and every output is in `[0, 2^64)`. Asset types are scalars
-  committed with the amount (`amount B + blinding B_blinding + asset H_7`).
+  committed with the amount (`amount B + blinding B_blinding + asset H_7`). **Input amounts
+  are not range-checked**: as in the paper, the input commitments must already be known to
+  open to amounts in `[0, 2^64)` (e.g. outputs of earlier verified proofs).
+
+When multiplicities do not fit in the norm part (few digits, large base) they are shared in
+the linear part, and the proof still carries an empty `C_O` (32 B) that the paper drops; for
+example a 64-bit proof in base 256 is 704 B.
 
 A BP++ backend for the R1CS front end follows.
 

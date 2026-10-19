@@ -26,7 +26,7 @@ then the zkVM `bpvm` (github.com/juja256/bpvm, a separate repository) on BP++.
 | 7 | performance and hardening | `wnla.rs`, `batch.rs`, `oblivious.rs`, spec §2.6, §3.11 | branch `bppp-perf` (pushed); format changes held |
 | 7b | tuple poles (option F): lookups of tuples without the bound rule | `reciprocal.rs`, `builder.rs`, `backend.rs`, spec §4.1–4.7, §7.2–7.6 | branch `bppp-tuples` (pushed); reviewed, done |
 | 7c | option B: one BP++ lowering and encoding for every constraint system | `prover.rs`, `verifier.rs`, `proof.rs`, `backend.rs`, spec §6, §7.7 | branch `bppp-one-proof` (pushed); reviewed, done |
-| 8 | bpvm on BP++ | other repository | open |
+| 8 | bpvm on BP++ | bpvm branch `bppp`; here `bppp-bpvm` (`R1CSProof::backend`, feature `cheats`, prover speed-ups) | done, reviewed; not pushed |
 
 The branches are stacked: `main` ⊂ `bppp-circuit` ⊂ `bppp-reciprocal` ⊂ `bppp-range` ⊂
 `bppp-r1cs` ⊂ `claude/beautiful-goodall-m369g7` (phase 6). None of 2–5 is merged into `main` yet; ask the owner before merging.
@@ -310,3 +310,33 @@ DESIGN (milestone M6). bpvm depends on this fork by git revision.
   sets `active` (harmless). Mutants of 7c: 8 of 8 killed. Pins of the R1CS front end updated
   twice (protocol, then tag). Tests: 151 (bppp parallel yoloproofs, also bppp-vartime), 70
   (yoloproofs), 34 (default); vectors regenerate unchanged; xcheck 13/13. Phase 7c done.
+- 2026-10-19 — the cloud work (phases 6–7c) accepted on the owner's machine (Apple M4 Pro):
+  151 tests (bppp parallel yoloproofs, also bppp-vartime), 70 (yoloproofs), 34 (default);
+  vectors regenerate unchanged; xcheck 5/5, 13/13.
+- 2026-10-19 — phase 8 started. Here, branch `bppp-bpvm` (from `bppp-one-proof`):
+  `R1CSProof::backend()` (bpvm's verifier takes the backend from the proof) and the testing
+  feature `cheats` (`r1cs::cheats::set_unchecked_prover`, thread-local): the prover counts
+  multiplicities only for lookups that equal a row and the BP++ prover proves unsatisfied
+  circuits (`reciprocal::prove_unsatisfied`, same derived randomness), so that downstream
+  crates can test that the verifier rejects cheating proofs; honest proofs unchanged (pins).
+  Tests `tests/cheats.rs`; 155 with `cheats`. bpvm (branch `bppp`, by path dependency until
+  this branch is pushed): `Env` on `CircuitBuilder` (tables, lookups, reciprocal arguments for
+  memory and bus; one-column range tables per digit width; free witnesses), `prove(st, wit,
+  backend)`, `bpvm --backend bp|bppp`; all VM tests and five tampered traces on both backends.
+  fib: BP 4424 multipliers, 1345 B, verify 40 ms; BP++ 2450 gates + 1683 linear, 945 B, 26 ms.
+- 2026-10-19 — phase 8 review (most capable model): 0 Critical, 1 Important (no bpvm test
+  caught a dropped fetch lookup), Minor (gadget tests that did not exercise the range lookup,
+  shape-only circuit binding, CLI verify checks, unbounded steps, proof-file version). Fixed in
+  bpvm with mutation probes (dropped fetch, all digits from the 8-bit table: both killed).
+  Profiling bpvm on BP++ with `parallel` (macOS `sample`) found sequential prover work:
+  `reciprocals` inverted every denominator separately (17% of a sha256 proof) — now one batch
+  inversion; `VecPoly::inner` (14%) — weights folded once, symmetry of `p.inner(p)`, parallel
+  inner products, one weighted term alive at a time. Proofs identical (pins). sha256 on BP++
+  with `parallel`: prove 6.2 → 4.1 s (BP 4.8 s); ec_add ($2^{24}$): 240 → 159 s (BP 166 s).
+  Remaining sequential work, mostly in the verifier: `ReciprocalCircuit::check` compiles the
+  circuit a second time with dummy coefficients, `compile`/`add_transposed`/`eval`,
+  `Weights::new`, the circuit digest, the oblivious sort of multiplicities; at $2^{24}$ the BP++
+  verifier takes 32 s against BP's 16 s with `parallel` (single-threaded BP++ verifies faster).
+  BP++ prover memory: ec_mini 2.14 GB vs BP 1.13 GB, ec_add 8.5 vs 10.1 GB. Tests: 156
+  (bppp parallel yoloproofs cheats), 152 (bppp yoloproofs), 70, 34.
+

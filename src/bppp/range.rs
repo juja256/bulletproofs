@@ -288,6 +288,21 @@ impl RangeProof {
         reciprocal::verify(&self.0, &c, &g, V, transcript)
     }
 
+    /// [`Self::verify`] up to the multiscalar multiplication, for batch verification.
+    pub(crate) fn terms<T: BpppTranscript>(
+        &self,
+        st: &RangeStatement,
+        pc: &PedersenGens,
+        bp: &BulletproofGens,
+        V: &[CompressedRistretto],
+        transcript: &mut T,
+    ) -> Result<super::circuit::Terms, ProofError> {
+        let (c, _) = st.circuit();
+        let g = st.gens(pc, bp)?;
+        transcript.domain_sep(b"bppp-range v1");
+        reciprocal::terms(&self.0, &c, &g, V, transcript)
+    }
+
     /// The proof bytes (spec §4.6).
     pub fn to_bytes(&self) -> Vec<u8> {
         self.0.to_bytes()

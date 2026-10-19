@@ -3,6 +3,7 @@
 
 #![allow(non_snake_case)]
 
+pub mod batch;
 pub mod circuit;
 mod gens;
 pub mod mact;
@@ -15,6 +16,7 @@ pub(crate) mod testutil;
 mod transcript;
 pub mod wnla;
 
+pub use self::batch::BatchVerifier;
 pub use self::circuit::{ArithmeticCircuit, CircuitProof, CircuitWitness, Slot};
 pub use self::gens::BpppGens;
 pub use self::mact::{MactEntry, MactProof, MactStatement};

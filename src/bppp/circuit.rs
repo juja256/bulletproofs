@@ -586,6 +586,33 @@ pub(crate) fn prove_inner<T: BpppTranscript, R: RngCore + CryptoRng>(
     Ok(CircuitProof { C_L: ol.C_L, C_R: cr.C_R, C_O: ol.C_O, C_S, wnla })
 }
 
+/// The verification equation of one proof as a linear combination: `g G + <h, H> + <n, N> +
+/// sum k P = 0` over the generators of [`BpppGens`] and the proof's own points (spec §3.7).
+pub(crate) struct Terms {
+    pub(crate) g: Scalar,
+    pub(crate) h: Vec<Scalar>,
+    pub(crate) n: Vec<Scalar>,
+    pub(crate) points: Vec<(Scalar, RistrettoPoint)>,
+}
+
+impl Terms {
+    /// One multiscalar multiplication.
+    pub(crate) fn check(&self, gens: &BpppGens) -> Result<(), ProofError> {
+        let small = RistrettoPoint::vartime_multiscalar_mul(
+            once(self.g).chain(self.points.iter().map(|(k, _)| *k)),
+            once(&gens.g).chain(self.points.iter().map(|(_, p)| p)),
+        );
+        let check = small
+            + util::vartime_msm_slices(&self.h, &gens.h[..self.h.len()], util::MSM_CHUNK_VT)
+            + util::vartime_msm_slices(&self.n, &gens.n[..self.n.len()], util::MSM_CHUNK_VT);
+        if check.is_identity() {
+            Ok(())
+        } else {
+            Err(ProofError::VerificationError)
+        }
+    }
+}
+
 impl CircuitProof {
     /// Verify the proof for circuit `c` and input commitments `V`; absorbs the same statement
     /// as [`prove`].
@@ -628,6 +655,38 @@ impl CircuitProof {
         V: &[CompressedRistretto],
         transcript: &mut T,
     ) -> Result<(), ProofError> {
+        self.inner_terms(c, gens, V, transcript)?.check(gens)
+    }
+
+    /// The terms of the verification equation (spec §3.7) of [`CircuitProof::verify`], for
+    /// batch verification.
+    pub(crate) fn terms<T: BpppTranscript>(
+        &self,
+        c: &ArithmeticCircuit,
+        gens: &BpppGens,
+        V: &[CompressedRistretto],
+        transcript: &mut T,
+    ) -> Result<Terms, ProofError> {
+        c.check_gens(gens)?;
+        c.check().map_err(|_| ProofError::VerificationError)?;
+        if V.len() != c.k {
+            return Err(ProofError::VerificationError);
+        }
+        absorb_statement(transcript, c, gens, V, true);
+        transcript.append_point(b"C_L", &self.C_L);
+        transcript.append_point(b"C_R", &self.C_R);
+        transcript.append_point(b"C_O", &self.C_O);
+        self.inner_terms(c, gens, V, transcript)
+    }
+
+    /// [`CircuitProof::verify_inner`] up to the multiscalar multiplication.
+    pub(crate) fn inner_terms<T: BpppTranscript>(
+        &self,
+        c: &ArithmeticCircuit,
+        gens: &BpppGens,
+        V: &[CompressedRistretto],
+        transcript: &mut T,
+    ) -> Result<Terms, ProofError> {
         let rho = nonzero(transcript, b"rho")?;
         let lambda = transcript.challenge(b"lambda");
         let beta = nonzero(transcript, b"beta")?;
@@ -645,27 +704,19 @@ impl CircuitProof {
         let s = self.wnla.verification_scalars(&cvec, rho, c.n_m, transcript)?;
 
         let decompress = |p: &CompressedRistretto| p.decompress().ok_or(ProofError::VerificationError);
-        let comms = [self.C_S, self.C_O, self.C_L, self.C_R].iter().map(decompress).collect::<Result<Vec<_>, _>>()?;
-        let inputs = V.iter().map(decompress).collect::<Result<Vec<_>, _>>()?;
-        let xs = self.wnla.X.iter().map(decompress).collect::<Result<Vec<_>, _>>()?;
-        let rs = self.wnla.R.iter().map(decompress).collect::<Result<Vec<_>, _>>()?;
-        let small = RistrettoPoint::vartime_multiscalar_mul(
-            once(s.g - p_s)
-                .chain([-tau_inv, -delta, -tau, -(tau * tau)])
-                .chain(wt.nu.iter().map(|nu| -(tau3 * nu)))
-                .chain(s.gammas.iter().map(|g| -g))
-                .chain(s.gammas.iter().map(|g| Scalar::ONE - g * g)),
-            once(&gens.g).chain(comms.iter()).chain(inputs.iter()).chain(xs.iter()).chain(rs.iter()),
-        );
-        let n_coef: Vec<Scalar> = s.n.iter().zip(&p_n).map(|(a, b)| a - b).collect();
-        let check = small
-            + util::vartime_msm_slices(&s.h, &gens.h, util::MSM_CHUNK_VT)
-            + util::vartime_msm_slices(&n_coef, gens.n, util::MSM_CHUNK_VT);
-        if check.is_identity() {
-            Ok(())
-        } else {
-            Err(ProofError::VerificationError)
+        let mut points = Vec::with_capacity(4 + V.len() + 2 * s.gammas.len());
+        for (k, p) in [(-tau_inv, &self.C_S), (-delta, &self.C_O), (-tau, &self.C_L), (-(tau * tau), &self.C_R)] {
+            points.push((k, decompress(p)?));
         }
+        for (nu, v) in wt.nu.iter().zip(V) {
+            points.push((-(tau3 * nu), decompress(v)?));
+        }
+        for ((g, X), R) in s.gammas.iter().zip(&self.wnla.X).zip(&self.wnla.R) {
+            points.push((-g, decompress(X)?));
+            points.push((Scalar::ONE - g * g, decompress(R)?));
+        }
+        let n: Vec<Scalar> = s.n.iter().zip(&p_n).map(|(a, b)| a - b).collect();
+        Ok(Terms { g: s.g - p_s, h: s.h, n, points })
     }
 
     /// `C_L || C_R || C_O || C_S || norm argument` (spec §3.10).

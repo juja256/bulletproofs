@@ -195,6 +195,26 @@ fn main() {
             v.verify(&proof, &pc, &bp).unwrap();
             (pm, ms(t), proof.to_bytes().len(), format!("builder {:?} {} x range32", backend, size))
         }
+        "batch" => {
+            let st = bppp::RangeStatement::new(16, vec![(0, 1 << 64)]).unwrap();
+            let bp = BulletproofGens::new(st.generators_capacity(), 1);
+            let proofs: Vec<_> = (0..size as u64)
+                .map(|i| bppp::RangeProof::prove(&st, &pc, &bp, &[i * 0x9e37_79b9], &[Scalar::from(i)], &mut Transcript::new(b"p"), &mut rng).unwrap())
+                .collect();
+            let t = Instant::now();
+            for (p, V) in &proofs {
+                p.verify(&st, &pc, &bp, V, &mut Transcript::new(b"p")).unwrap();
+            }
+            let single = ms(t);
+            let t = Instant::now();
+            let mut b = bppp::BatchVerifier::new(&pc, &bp, ChaCha20Rng::seed_from_u64(1));
+            for (p, V) in &proofs {
+                b.add_range(p, &st, V, &mut Transcript::new(b"p")).unwrap();
+            }
+            b.verify().unwrap();
+            println!("{} x 64-bit range proofs: one by one {:.1} ms, batch {:.1} ms", size, single, ms(t));
+            return;
+        }
         "micro" => {
             use curve25519_dalek::traits::{MultiscalarMul, VartimeMultiscalarMul};
             let n = 1usize << size;

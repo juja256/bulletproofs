@@ -82,6 +82,10 @@ name = "bppp_profile"
 required-features = ["yoloproofs", "bppp"]
 
 [[test]]
+name = "bppp_batch"
+required-features = ["bppp"]
+
+[[test]]
 name = "bppp_regression"
 required-features = ["yoloproofs", "bppp"]
 

@@ -376,6 +376,13 @@ impl ReciprocalCircuit {
             .collect()
     }
 
+    /// The compiled circuit and witness for `alpha` (tests).
+    #[cfg(test)]
+    pub(crate) fn compiled_for_test(&self, w: &ReciprocalWitness, alpha: Scalar) -> (ArithmeticCircuit, CircuitWitness) {
+        let w_p = self.reciprocals(w, alpha).unwrap();
+        (self.compile(alpha).unwrap(), self.compiled_witness(w, w_p))
+    }
+
     #[cfg(test)]
     pub(crate) fn reciprocals_for_test(&self, w: &ReciprocalWitness, alpha: Scalar) -> Vec<Scalar> {
         self.reciprocals(w, alpha).unwrap()
@@ -557,6 +564,17 @@ pub fn verify<T: BpppTranscript>(
     V: &[CompressedRistretto],
     transcript: &mut T,
 ) -> Result<(), ProofError> {
+    terms(proof, c, gens, V, transcript)?.check(gens)
+}
+
+/// [`verify`] up to the multiscalar multiplication, for batch verification.
+pub(crate) fn terms<T: BpppTranscript>(
+    proof: &CircuitProof,
+    c: &ReciprocalCircuit,
+    gens: &BpppGens,
+    V: &[CompressedRistretto],
+    transcript: &mut T,
+) -> Result<circuit::Terms, ProofError> {
     check_gens(c, gens)?;
     c.check().map_err(|_| ProofError::VerificationError)?;
     if V.len() != c.k {
@@ -568,7 +586,7 @@ pub fn verify<T: BpppTranscript>(
     let alpha = transcript.challenge(b"alpha");
     let compiled = c.compile(alpha)?;
     transcript.append_point(b"C_R", &proof.C_R);
-    proof.verify_inner(&compiled, gens, V, transcript)
+    proof.inner_terms(&compiled, gens, V, transcript)
 }
 
 /// Parse a proof for the reciprocal circuit `c` (spec §4.6).

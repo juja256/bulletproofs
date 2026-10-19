@@ -152,7 +152,7 @@ fn builder_matches_reference_vectors() {
             bp_phase1: costs["bp_phase1"].as_u64().unwrap() as usize,
             bp_phase2: costs["bp_phase2"].as_u64().unwrap() as usize,
             bppp_gates: costs["bppp_gates"].as_u64().unwrap() as usize,
-            bppp_lin: case["n_lin"].as_u64().unwrap() as usize,
+            bppp_linear: case["n_lin"].as_u64().unwrap() as usize,
         };
         assert_eq!(p.cost(), want, "{}: prover cost", name);
         assert_eq!(v.cost(), want, "{}: verifier cost", name);

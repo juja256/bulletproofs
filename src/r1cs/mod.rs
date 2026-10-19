@@ -18,37 +18,12 @@ mod soundness;
 #[cfg(all(test, feature = "bppp"))]
 mod vectors;
 
-pub use self::backend::Backend;
+pub use self::backend::{Backend, UnknownBackend};
 
-/// Testing only (feature `cheats`): a prover that skips its own checks, so that downstream
-/// soundness tests can check that the verifier rejects what it produces.
 #[cfg(feature = "cheats")]
-pub mod cheats {
-    use core::cell::Cell;
-
-    thread_local! {
-        static UNCHECKED: Cell<bool> = Cell::new(false);
-    }
-
-    /// While on (in this thread), the prover counts multiplicities only for lookups that equal
-    /// a row (instead of refusing the others) and the BP++ prover proves unsatisfied circuits
-    /// (instead of refusing them). The BP prover already proves violated constraints. The
-    /// verifier is unaffected: such proofs must not verify.
-    pub fn set_unchecked_prover(on: bool) {
-        UNCHECKED.with(|u| u.set(on));
-    }
-
-    pub(crate) fn unchecked() -> bool {
-        UNCHECKED.with(|u| u.get())
-    }
-}
-
+pub mod cheats;
 #[cfg(not(feature = "cheats"))]
-pub(crate) mod cheats {
-    pub(crate) fn unchecked() -> bool {
-        false
-    }
-}
+pub(crate) mod cheats;
 pub use self::builder::{CircuitBuilder, Cost, Reciprocal, TableId};
 pub use self::constraint_system::{
     ConstraintSystem, RandomizableConstraintSystem, RandomizedConstraintSystem,

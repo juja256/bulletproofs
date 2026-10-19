@@ -171,7 +171,7 @@ fn gadgets_on_both_backends() {
         // private terms: range32 4, xor8 8 (6 nibbles, 2 xor rows), memory 12 + 6, balance
         // 3 + 8 = 41; witnesses 33 + multiplicities 256 + 16 + 256 = 561, 281 pairs; 1 product
         // N_lin: 7 input copies + 561 witnesses - 42 norm slots
-        assert_eq!(cost, Cost { bp_phase1: 282, bp_phase2: 41, bppp_gates: 42, bppp_lin: 526 }, "{:?}", backend);
+        assert_eq!(cost, Cost { bp_phase1: 282, bp_phase2: 41, bppp_gates: 42, bppp_linear: 526 }, "{:?}", backend);
         // exactly the capacity the cost asks for suffices, one less does not
         let need = cost.gens_capacity(backend);
         assert_eq!(need, if backend == Backend::Bp { 512 } else { 532 });
@@ -289,7 +289,7 @@ fn copies_of_right_wires() {
         // BP++: w_O = 1 output + 1 input copy + 9 witnesses + 3 copies of right wires (two
         // numerators, one coefficient) + 4 copies of tuple components (a, b twice: w_L, w_R are
         // committed after eta), 6 in n_O
-        assert_eq!(cost, Cost { bp_phase1: 1 + 5 + 1, bp_phase2: 4, bppp_gates: 4 + 1 + 1, bppp_lin: 12 });
+        assert_eq!(cost, Cost { bp_phase1: 1 + 5 + 1, bp_phase2: 4, bppp_gates: 4 + 1 + 1, bppp_linear: 12 });
         verify_small(backend, &proof, V, |cs, x| copies(cs, &[x], None)).unwrap();
         // a wrong w: refused or rejected
         let bad = prove_small(backend, 4, |cs, x| copies(cs, &[x], Some([2, 5, 19])));
@@ -313,7 +313,7 @@ fn no_gates() {
         };
         let (proof, V, cost) = prove_small(backend, 4, g).unwrap();
         // w_O = the padding output, the input copy, the witness; one norm slot
-        assert_eq!(cost, Cost { bp_phase1: 1, bp_phase2: 0, bppp_gates: 1, bppp_lin: 2 });
+        assert_eq!(cost, Cost { bp_phase1: 1, bp_phase2: 0, bppp_gates: 1, bppp_linear: 2 });
         verify_small(backend, &proof, V, gv).unwrap();
         // a wrong value: rejected
         if let Ok((proof, V, _)) = prove_small(backend, 5, g) {
@@ -574,4 +574,25 @@ fn xor32_with_unbounded_nibbles() {
         cheat[1].0 -= 1;
         assert!(matches!(run(cheat), Err(R1CSError::GadgetError { .. })), "{:?}", backend);
     }
+}
+
+#[test]
+fn backends_parse_and_print() {
+    for b in backends() {
+        let name = b.to_string();
+        assert_eq!(name.parse::<Backend>().unwrap(), b);
+    }
+    assert_eq!(Backend::Bp.to_string(), "bp");
+    assert!("bpp".parse::<Backend>().is_err());
+    assert!("BP".parse::<Backend>().is_err());
+    #[cfg(feature = "bppp")]
+    assert_eq!("bppp".parse::<Backend>().unwrap(), Backend::Bppp);
+}
+
+#[test]
+fn cost_per_backend() {
+    let c = Cost { bp_phase1: 7, bp_phase2: 3, bppp_gates: 5, bppp_linear: 4 };
+    assert_eq!((c.gates(Backend::Bp), c.linear(Backend::Bp)), (10, 0));
+    #[cfg(feature = "bppp")]
+    assert_eq!((c.gates(Backend::Bppp), c.linear(Backend::Bppp)), (5, 4));
 }

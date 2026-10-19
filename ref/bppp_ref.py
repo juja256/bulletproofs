@@ -8,6 +8,8 @@ and ("N", i). Challenges are inputs, so the vectors check the protocol algebra; 
 and point encoding are checked separately (transcript tests in Rust).
 """
 
+import copy
+import itertools
 import random
 
 L = 2**252 + 27742317777372353535851937790883648493
@@ -1187,3 +1189,590 @@ def range_circuit_self_check():
         wit = mact_witness([(b + 3, t0, 1), (0, t1, 2)], [(b + 3, t0, 3), (0, t1, 4)], b,
                            digits=[d, None])
         assert recip_satisfied(rc, wit, rng.randrange(1, L)) == (False, True)
+
+
+# ---------------------------------------------------------------------------------------------
+# The circuit builder (spec section 7)
+#
+# A builder record is produced by replaying a *program* (a list of operations in the JSON form
+# of tests/vectors/bppp/builder.json) through Builder; the prover's values are part of the
+# program. Variables are tuples ("V", j) Committed, ("L", i) / ("R", i) / ("O", i)
+# MultiplierLeft/Right/Output, ("W", i) Witness and ONE = ("1",); an LC is a list of
+# (variable, coefficient mod L), kept in the order given. Only the BP++ lowering (7.6) is
+# implemented; of the BP lowering (7.5) only its cost formula.
+
+ONE = ("1",)
+VAR_KINDS = ("V", "L", "R", "O", "W")
+
+
+class BuilderError(Exception):
+    """GadgetError of a builder operation (spec 7.1-7.3); the failed operation records nothing."""
+
+
+class BuilderProverError(Exception):
+    """Finalization fails for the prover (spec 7.4: a lookup equal to no row)."""
+
+
+def bld_widths_valid(widths):
+    """Spec 7.2: m >= 1, every w_j >= 1, sum <= 252."""
+    return (isinstance(widths, list) and len(widths) >= 1
+            and all(isinstance(w, int) and not isinstance(w, bool) and w >= 1 for w in widths)
+            and sum(widths) <= 252)
+
+
+def bld_offsets(widths):
+    out, o = [], 0
+    for w in widths:
+        out.append(o)
+        o += w
+    return out
+
+
+def bld_pack(widths, xs):
+    """pack(x) = sum_j 2^{o_j} x_j (in F)."""
+    assert len(xs) == len(widths)
+    return sum(x * pow(2, o, L) for o, x in zip(bld_offsets(widths), xs)) % L
+
+
+def bld_is_u64(e):
+    return isinstance(e, int) and not isinstance(e, bool) and 0 <= e < U64
+
+
+def bld_row_valid(widths, row):
+    """A table row / public row: m u64 entries, entry j < 2^{w_j}."""
+    return (isinstance(row, list) and len(row) == len(widths)
+            and all(bld_is_u64(e) and e < 2**w for e, w in zip(row, widths)))
+
+
+def bld_constant(lc):
+    """The sum of the coefficients of the One terms (spec 7.1)."""
+    return sum(c for x, c in lc if x == ONE) % L
+
+
+def bld_lc_bound(lc, bounds):
+    """Spec 7.3: merge the terms per variable (sum in F); the bound is defined iff the constant
+    and every non-zero merged coefficient are < 2^64 and every variable with a non-zero merged
+    coefficient has a recorded bound; then c_0 + sum_x c_x (2^{b_x} - 1). None if undefined."""
+    merged = {}
+    for x, c in lc:
+        if x != ONE:
+            merged[x] = (merged.get(x, 0) + c) % L
+    c0 = bld_constant(lc)
+    if c0 >= U64:
+        return None
+    total = c0
+    for x, c in merged.items():
+        if c == 0:
+            continue
+        if c >= U64 or x not in bounds:
+            return None
+        total += c * (2**bounds[x] - 1)
+    return total
+
+
+def bld_bound_ok(lc, bounds, w):
+    b = bld_lc_bound(lc, bounds)
+    return b is not None and b < 2**w
+
+
+def bld_parse_var(x):
+    if isinstance(x, list) and x == ["1"]:
+        return ONE
+    if (isinstance(x, list) and len(x) == 2 and x[0] in VAR_KINDS and isinstance(x[1], int)
+            and not isinstance(x[1], bool) and x[1] >= 0):
+        return (x[0], x[1])
+    raise ValueError(f"malformed variable {x!r}")
+
+
+def bld_parse_scalar(h):
+    assert isinstance(h, str) and len(h) == 64
+    x = int.from_bytes(bytes.fromhex(h), "little")
+    assert x < L, "non-canonical scalar"
+    return x
+
+
+def bld_parse_lc(lc):
+    return [(bld_parse_var(x), bld_parse_scalar(c)) for x, c in lc]
+
+
+class Builder:
+    """The builder record of spec 7.1-7.2 together with the prover's values. Every operation
+    validates first and records only if it succeeds."""
+
+    def __init__(self):
+        self.v, self.s = [], []                 # committed inputs, k = len(v)
+        self.aL, self.aR, self.aO = [], [], []  # R1CS multipliers, n = len(aL)
+        self.pending = None                     # multiplier whose right input allocate fills
+        self.wit = []                           # builder witnesses, n_w = len(wit)
+        self.r1cs = []                          # R1CS constraints (LC = 0), in order
+        self.products = []                      # (l, r, out)
+        self.tables = []                        # (widths, rows)
+        self.lookups = []                       # (table id, tuple), in call order
+        self.args = []                          # (widths, [(num, tuple)], [(coeff, row)])
+        self.bounds = {}                        # b_x
+        self.builder_mode = False
+
+    k = property(lambda self: len(self.v))
+    n = property(lambda self: len(self.aL))
+    n_w = property(lambda self: len(self.wit))
+
+    # -- variables and LCs (7.1)
+    def exists(self, x):
+        if x == ONE:
+            return True
+        lim = {"V": self.k, "L": self.n, "R": self.n, "O": self.n, "W": self.n_w}[x[0]]
+        return x[1] < lim
+
+    def check_lc(self, lc):
+        for x, _ in lc:
+            if not self.exists(x):
+                raise BuilderError(f"variable {x} does not exist")
+
+    def value(self, x, wit=None):
+        if x == ONE:
+            return 1
+        src = {"V": self.v, "L": self.aL, "R": self.aR, "O": self.aO,
+               "W": self.wit if wit is None else wit}[x[0]]
+        return src[x[1]]
+
+    def eval(self, lc, wit=None):
+        return sum(c * self.value(x, wit) for x, c in lc) % L
+
+    # -- ConstraintSystem operations (spec 6, 7.1)
+    def commit(self, v, s):
+        self.v.append(v % L)
+        self.s.append(s % L)
+        return ("V", self.k - 1)
+
+    def multiply(self, l, r):
+        # The prover evaluates l and r, so their variables must exist (the spec states the
+        # existence rule for builder operations only; reported).
+        self.check_lc(l)
+        self.check_lc(r)
+        a, b = self.eval(l), self.eval(r)
+        i = self.n
+        self.aL.append(a)
+        self.aR.append(b)
+        self.aO.append(a * b % L)
+        self.r1cs.append(list(l) + [(("L", i), L - 1)])
+        self.r1cs.append(list(r) + [(("R", i), L - 1)])
+        return ("L", i), ("R", i), ("O", i)
+
+    def allocate(self, v):
+        """Fills the left input of a new multiplier (right = output = 0 while pending), or the
+        right input of the pending one (dalek semantics: multiply/allocate_multiplier leave the
+        pending multiplier alone)."""
+        if self.pending is None:
+            i = self.n
+            self.aL.append(v % L)
+            self.aR.append(0)
+            self.aO.append(0)
+            self.pending = i
+            return ("L", i)
+        i, self.pending = self.pending, None
+        self.aR[i] = v % L
+        self.aO[i] = self.aL[i] * self.aR[i] % L
+        return ("R", i)
+
+    def allocate_multiplier(self, a, b):
+        i = self.n
+        self.aL.append(a % L)
+        self.aR.append(b % L)
+        self.aO.append(a * b % L)
+        return ("L", i), ("R", i), ("O", i)
+
+    def constrain(self, lc):
+        # Not a builder operation; checked here like multiply (reported).
+        self.check_lc(lc)
+        self.r1cs.append(list(lc))
+
+    # -- builder operations (7.2)
+    def witness(self, v):
+        self.builder_mode = True
+        self.wit.append(v % L)
+        return ("W", self.n_w - 1)
+
+    def product(self, l, r, out):
+        self.builder_mode = True
+        for lc in (l, r, out):
+            self.check_lc(lc)
+        self.products.append((list(l), list(r), list(out)))
+
+    def table(self, widths, rows):
+        self.builder_mode = True
+        if not bld_widths_valid(widths):
+            raise BuilderError("invalid width list")
+        if not isinstance(rows, list) or not rows:
+            raise BuilderError("empty table")
+        for row in rows:
+            if not bld_row_valid(widths, row):
+                raise BuilderError("bad table row")
+        self.tables.append((list(widths), [list(r) for r in rows]))
+        return len(self.tables) - 1
+
+    def _check_lookup(self, t, tup):
+        if not (isinstance(t, int) and 0 <= t < len(self.tables)):
+            raise BuilderError("unknown table")
+        widths = self.tables[t][0]
+        if len(tup) != len(widths):
+            raise BuilderError("tuple length differs from the table's")
+        for lc in tup:
+            self.check_lc(lc)
+        if len(widths) >= 2:
+            for lc, w in zip(tup, widths):
+                if not bld_bound_ok(lc, self.bounds, w):
+                    raise BuilderError("tuple component breaks the bound rule")
+        return widths
+
+    def _record_lookup(self, t, tup, widths):
+        self.lookups.append((t, [list(lc) for lc in tup]))
+        if len(widths) == 1 and len(tup[0]) == 1:
+            x, c = tup[0][0]
+            if x != ONE and c % L == 1:
+                self.bounds[x] = min(self.bounds.get(x, widths[0]), widths[0])
+
+    def lookup(self, t, tup):
+        self.builder_mode = True
+        widths = self._check_lookup(t, tup)
+        self._record_lookup(t, tup, widths)
+
+    def lookup_value(self, t, v):
+        self.builder_mode = True
+        if not (isinstance(t, int) and 0 <= t < len(self.tables)) or len(self.tables[t][0]) != 1:
+            raise BuilderError("lookup_value needs an existing one-column table")
+        x = self.witness(v)
+        widths = self._check_lookup(t, [[(x, 1)]])
+        self._record_lookup(t, [[(x, 1)]], widths)
+        return x
+
+    def reciprocal(self, widths, terms, public):
+        """reciprocal(widths), the terms (private first, then public, in order), then
+        finish_reciprocal; any failure fails the whole call."""
+        self.builder_mode = True
+        if not bld_widths_valid(widths):
+            raise BuilderError("invalid width list")
+        m = len(widths)
+        for num, tup in terms:
+            if len(tup) != m:
+                raise BuilderError("tuple length differs from the width list")
+            self.check_lc(num)
+            for lc in tup:
+                self.check_lc(lc)
+            if m >= 2:
+                for lc, w in zip(tup, widths):
+                    if not bld_bound_ok(lc, self.bounds, w):
+                        raise BuilderError("tuple component breaks the bound rule")
+        for coeff, row in public:
+            self.check_lc(coeff)
+            if not bld_row_valid(widths, row):
+                raise BuilderError("bad public row")
+        if not terms and not public:
+            return  # an argument without terms is dropped
+        self.args.append((list(widths), [(list(n), [list(x) for x in t]) for n, t in terms],
+                          [(list(c), list(r)) for c, r in public]))
+
+
+def bld_apply(b, op):
+    """Apply one JSON operation; returns the variable(s) or table id it creates."""
+    S, LC = bld_parse_scalar, bld_parse_lc
+    kind = op["op"]
+    if kind == "commit":
+        return b.commit(S(op["v"]), S(op["s"]))
+    if kind == "multiply":
+        return b.multiply(LC(op["l"]), LC(op["r"]))
+    if kind == "allocate":
+        return b.allocate(S(op["v"]))
+    if kind == "allocate_multiplier":
+        return b.allocate_multiplier(S(op["l"]), S(op["r"]))
+    if kind == "constrain":
+        return b.constrain(LC(op["lc"]))
+    if kind == "witness":
+        return b.witness(S(op["v"]))
+    if kind == "product":
+        return b.product(LC(op["l"]), LC(op["r"]), LC(op["out"]))
+    if kind == "table":
+        return b.table(op["widths"], op["rows"])
+    if kind == "lookup":
+        return b.lookup(op["table"], [LC(x) for x in op["tuple"]])
+    if kind == "lookup_value":
+        assert bld_is_u64(op["v"])
+        return b.lookup_value(op["table"], op["v"])
+    if kind == "reciprocal":
+        return b.reciprocal(op["widths"], [(LC(t["num"]), [LC(x) for x in t["tuple"]])
+                                           for t in op["terms"]],
+                            [(LC(p["coeff"]), p["row"]) for p in op["public"]])
+    raise ValueError(f"unknown operation {kind}")
+
+
+def bld_run_program(ops):
+    """Replay a program; returns (builder, index of the failing operation or None). Operations
+    after a failure are not applied."""
+    b = Builder()
+    for idx, op in enumerate(ops):
+        try:
+            bld_apply(b, op)
+        except BuilderError:
+            return b, idx
+    return b, None
+
+
+def bld_finalize(b, prover=True):
+    """Spec 7.4. Returns {"mult": {table id: index of its first multiplicity witness},
+    "n_w": n_w with the multiplicities, "args": the list A as (widths, [(num, tuple)],
+    [(coeff, row)]), "wit": the witness values with the multiplicities (prover only)}.
+    Raises BuilderProverError (prover only) for a lookup equal to no row."""
+    used = sorted({t for t, _ in b.lookups})
+    mult, nw = {}, b.n_w
+    for t in used:
+        mult[t] = nw
+        nw += len(b.tables[t][1])
+    wit = None
+    if prover:
+        counts = {t: [0] * len(b.tables[t][1]) for t in used}
+        for t, tup in b.lookups:
+            vals = [b.eval(lc) for lc in tup]
+            for r, row in enumerate(b.tables[t][1]):
+                if all(x == e % L for x, e in zip(vals, row)):
+                    counts[t][r] += 1  # the first equal row only
+                    break
+            else:
+                raise BuilderProverError("lookup equal to no row")
+        wit = list(b.wit) + [c for t in used for c in counts[t]]
+    args = list(b.args)
+    for t in used:
+        widths, rows = b.tables[t]
+        priv = [([(ONE, 1)], tup) for tt, tup in b.lookups if tt == t]
+        pub = [([(("W", mult[t] + r), L - 1)], row) for r, row in enumerate(rows)]
+        args.append((widths, priv, pub))
+    return {"mult": mult, "n_w": nw, "args": args, "wit": wit}
+
+
+def bld_costs(b, fin):
+    """Spec 7.5 (BP multipliers, before BP's padding) and 7.6 (BP++ gates)."""
+    n_p = sum(len(priv) for _, priv, _ in fin["args"])
+    n_prod = len(b.products)
+    n_r = 1 if b.n == n_prod == n_p == 0 else b.n
+    return {"bp_phase1": b.n + (fin["n_w"] + 1) // 2 + n_prod, "bp_phase2": n_p,
+            "bppp_gates": n_p + n_r + n_prod}
+
+
+def bld_lower(b, fin):
+    """Spec 7.6: the reciprocal form circuit rc (format of recip_prove) and its witness
+    (w_D, w_L, w_R, w_O, v, s; prover values from fin["wit"])."""
+    args = fin["args"]
+    poles = [(widths, num, tup) for widths, priv, _ in args for num, tup in priv]
+    n_p, n_prod, k = len(poles), len(b.products), b.k
+    n_r = 1 if b.n == n_prod == n_p == 0 else b.n
+    n_m = n_r + n_prod
+    nm2 = n_p + n_m
+    nw = fin["n_w"]
+    W = fin["wit"]
+    # R1CS constraints may name variables that do not exist yet (ConstraintSystem does not
+    # check them at the call); here every variable must exist (spec 6.1). Multiplicities count.
+    lim = {"V": k, "L": b.n, "R": b.n, "O": b.n, "W": nw}
+    for lc in b.r1cs:
+        for x, _ in lc:
+            if x != ONE and x[1] >= lim[x[0]]:
+                raise BuilderError(f"constraint names unallocated variable {x}")
+    # copies: per argument, private terms then public terms
+    copies = []                      # the copied LCs u
+    nums, coeffs = [], []            # per pole: numerator LC; per argument: public coeffs
+    for widths, priv, pub in args:
+        for num, _ in priv:
+            if any(x[0] == "R" for x, _ in num if x != ONE):
+                copies.append(num)
+                nums.append([(("Y", len(copies) - 1), 1)])
+            else:
+                nums.append(num)
+        cs = []
+        for coeff, row in pub:
+            if any(x[0] == "R" for x, _ in coeff if x != ONE):
+                copies.append(coeff)
+                cs.append(([(("Y", len(copies) - 1), 1)], row))
+            else:
+                cs.append((coeff, row))
+        coeffs.append(cs)
+    n_o = n_r + k + nw + len(copies)
+    nlin = max(0, n_o - nm2)
+    partition = [["nO", e] if e < nm2 else ["lO", e - nm2] for e in range(n_o)]
+    cD = lambda i: i                          # noqa: E731
+    cL = lambda g: n_p + g                    # noqa: E731
+    cP = lambda i: nm2 + i                    # noqa: E731
+    cR = lambda g: nm2 + n_p + g              # noqa: E731
+    cO = lambda e: 2 * nm2 + e                # noqa: E731
+
+    def col(x):
+        """Column of a variable; ("Y", y) is copy y (after the witnesses in w_O)."""
+        kind, i = x
+        if kind in ("L", "R", "O"):
+            return {"L": cL, "R": cR, "O": cO}[kind](i)
+        return cO({"V": n_r, "W": n_r + k, "Y": n_r + k + nw}[kind] + i)
+
+    def low(lc, scale=1):
+        """(terms, constant) of the lowered LC, coefficients times scale."""
+        return ([(col(x), c * scale % L) for x, c in lc if x != ONE], bld_constant(lc) * scale % L)
+
+    w_n, a_n = [], []
+    for num in nums:
+        t, c = low(num)
+        w_n.append(t)
+        a_n.append(c)
+    w_m = [[(cO(i), 1)] for i in range(n_r)]
+    a_m = [0] * n_r
+    for _, _, out in b.products:
+        t, c = low(out)
+        w_m.append(t)
+        a_m.append(c)
+    w_l, a_l = [], []
+    for j in range(k):
+        w_l.append([(cO(n_r + j), L - 1)])
+        a_l.append(0)
+    for lc in b.r1cs:
+        t, c = low(lc)
+        w_l.append(t)
+        a_l.append(c)
+    for g, (l, r, _) in enumerate(b.products):
+        for wcol, lc in ((cL(n_r + g), l), (cR(n_r + g), r)):
+            t, c = low(lc, L - 1)
+            w_l.append([(wcol, 1)] + t)
+            a_l.append(c)
+    for i, (widths, _, tup) in enumerate(poles):
+        row, aff = [(cD(i), 1)], 0
+        for o, lc in zip(bld_offsets(widths), tup):
+            t, c = low(lc, -pow(2, o, L) % L)
+            row += t
+            aff += c
+        w_l.append(row)
+        a_l.append(aff % L)
+    for y, u in enumerate(copies):
+        t, c = low(u, L - 1)
+        w_l.append([(col(("Y", y)), 1)] + t)
+        a_l.append(c)
+    recip, p = [], 0
+    for (widths, priv, _), cs in zip(args, coeffs):
+        terms, consts = [], []
+        for _ in priv:
+            terms.append((cP(p), 1, None))
+            p += 1
+        for coeff, row in cs:
+            t = bld_pack(widths, row)
+            terms += [(cc, c, t) for cc, c in low(coeff)[0]]
+            if any(x == ONE for x, _ in coeff):
+                consts.append((bld_constant(coeff), t))
+        recip.append({"terms": terms, "consts": consts})
+    rc = {"n_p": n_p, "n_m": n_m, "n_o": n_o, "n_v": 1, "n_lin": nlin, "k": k, "n_l": len(w_l),
+          "f_l": int(k > 0), "f_m": 0, "partition": partition, "w_n": w_n, "a_n": a_n,
+          "w_m": w_m, "a_m": a_m, "w_l": w_l, "a_l": a_l, "recip": recip}
+    recip_check_shape(rc)
+    wit = None
+    if W is not None:
+        pad = lambda v: (v + [0] * n_r)[:n_r]  # noqa: E731
+        w_D = [bld_pack(widths, [b.eval(lc, W) for lc in tup]) for widths, _, tup in poles]
+        w_L = pad(list(b.aL)) + [b.eval(l, W) for l, _, _ in b.products]
+        w_R = pad(list(b.aR)) + [b.eval(r, W) for _, r, _ in b.products]
+        w_O = pad(list(b.aO)) + list(b.v) + list(W) + [b.eval(u, W) for u in copies]
+        wit = {"w_D": w_D, "w_L": w_L, "w_R": w_R, "w_O": w_O, "v": [[x] for x in b.v],
+               "s": list(b.s)}
+    return rc, wit
+
+
+def bld_semantic(b, fin):
+    """Direct check of the program for the prover's values, independent of the lowering:
+    R1CS constraints and multipliers, products, lookups (each tuple a row; components of
+    tuples with m >= 2 in range), and every argument of A vanishing as a rational function of
+    X (terms grouped by pole value). Returns True iff all hold."""
+    W = fin["wit"]
+    ok = all(b.eval(lc, W) == 0 for lc in b.r1cs)
+    ok &= all(x * y % L == z for x, y, z in zip(b.aL, b.aR, b.aO))
+    ok &= all(b.eval(l, W) * b.eval(r, W) % L == b.eval(o, W) for l, r, o in b.products)
+    for t, tup in b.lookups:
+        vals = [b.eval(lc, W) for lc in tup]
+        assert any(vals == [e % L for e in row] for row in b.tables[t][1])  # else prover error
+    for widths, priv, pub in fin["args"]:
+        tot = {}
+        for num, tup in priv:
+            vals = [b.eval(lc, W) for lc in tup]
+            if len(widths) >= 2:
+                # the bound rule (7.3) with all one-column lookups holding: in range
+                assert all(x < 2**w for x, w in zip(vals, widths)), "bound rule unsound"
+            pole = bld_pack(widths, vals)
+            tot[pole] = (tot.get(pole, 0) + b.eval(num, W)) % L
+        for coeff, row in pub:
+            pole = bld_pack(widths, row)
+            tot[pole] = (tot.get(pole, 0) + b.eval(coeff, W)) % L
+        ok &= not any(tot.values())
+    return bool(ok)
+
+
+def bld_self_check():
+    """Checks of the claims of spec 7.3 on small random instances: (1) the packing is
+    injective on in-range components and below 2^{sum w}; (2) a component accepted by the bound
+    rule takes only values in [0, 2^w) when its variables are in their recorded ranges, and its
+    bound is attained (so a rejection by size is exact); (3) the rejection cases are exactly
+    those the spec lists."""
+    rng = random.Random(70)
+    for _ in range(200):
+        m = rng.randrange(1, 4)
+        widths = [rng.randrange(1, 4) for _ in range(m)]
+        seen = {}
+        for xs in itertools.product(*[range(2**w) for w in widths]):
+            p = bld_pack(widths, list(xs))
+            assert p < 2**sum(widths) and p not in seen
+            seen[p] = xs
+        assert len(seen) == 2**sum(widths)
+    for _ in range(300):
+        nv = rng.randrange(1, 4)
+        xs = [("W", i) for i in range(nv)]
+        bounds = {x: rng.randrange(1, 4) for x in xs if rng.random() < 0.9}
+        lc = [(rng.choice(xs + [ONE]), rng.choice([0, 1, 2, 3, 5, L - 1, L - 2, U64 - 1, U64]))
+              for _ in range(rng.randrange(1, 5))]
+        w = rng.randrange(1, 8)
+        bd = bld_lc_bound(lc, bounds)
+        merged = {}
+        for x, c in lc:
+            merged[x] = (merged.get(x, 0) + c) % L
+        live = [x for x in xs if merged.get(x, 0)]
+        expect_defined = (merged.get(ONE, 0) < U64 and all(merged[x] < U64 for x in live)
+                          and all(x in bounds for x in live))
+        assert (bd is not None) == expect_defined
+        if bd is None:
+            continue
+        vals = []
+        for ass in itertools.product(*[range(2**bounds[x]) for x in live]):
+            env = dict(zip(live, ass))
+            vals.append(sum(c * (1 if x == ONE else env.get(x, 0)) for x, c in lc) % L)
+        assert max(vals) == bd and min(vals) >= 0
+        assert bld_bound_ok(lc, bounds, w) == all(v < 2**w for v in vals)
+    a, c, u = ("W", 0), ("W", 1), ("W", 2)
+    bounds = {a: 2, c: 2}
+    for lc, w, ok in (
+            ([(a, 1)], 2, True), ([(a, 1), (ONE, 1)], 2, False),          # bound 4 = 2^2
+            ([(a, 1), (c, 4)], 4, True), ([(a, 1), (c, 4), (ONE, 1)], 4, False),
+            ([(u, 1)], 8, False),                                          # unbounded
+            ([(a, 1), (u, 1), (u, L - 1)], 2, True),                       # merged to zero
+            ([(a, 2), (a, L - 1)], 2, True),                               # merged to 1
+            ([(a, L - 1), (ONE, 3)], 2, False),                            # -1 >= 2^64
+            ([(a, U64)], 252, False), ([(a, U64 - 1)], 66, True),
+            ([(ONE, U64)], 252, False), ([(ONE, U64 - 1)], 64, True), ([], 1, True),
+            ([(ONE, 5), (ONE, L - 3)], 2, True), ([(ONE, 1), (ONE, L - 2)], 252, False)):
+        assert bld_bound_ok(lc, bounds, w) == ok, (lc, w)
+
+
+def bld_agreement_check(b, rng):
+    """For a program without construction error: change one prover value at a time (inputs,
+    multiplier wires, witnesses) and check that the direct semantic check and the lowered
+    circuit (spec 4.1 at a random alpha) agree. Returns the number of variants compared."""
+    count = 0
+    for attr in ("v", "aL", "aR", "aO", "wit"):
+        for i in range(len(getattr(b, attr))):
+            b2 = copy.deepcopy(b)
+            getattr(b2, attr)[i] = (getattr(b2, attr)[i] + rng.randrange(1, L)) % L
+            try:
+                fin = bld_finalize(b2)
+            except BuilderProverError:
+                continue
+            rc, wit = bld_lower(b2, fin)
+            recip_ok, ord_ok = recip_satisfied(rc, wit, rng.randrange(1, L))
+            assert bld_semantic(b2, fin) == (recip_ok and ord_ok), (attr, i)
+            count += 1
+    return count

@@ -9,12 +9,15 @@ import sys
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from bppp_ref import (L, SLOTS, U64, ReciprocalError, Sym, circuit_prove,  # noqa: E402
+from bppp_ref import (L, ONE, SLOTS, U64, Builder, BuilderError,  # noqa: E402
+                      BuilderProverError, ReciprocalError, Sym, bld_agreement_check, bld_apply,
+                      bld_costs, bld_finalize, bld_lower, bld_parse_lc, bld_run_program,
+                      bld_self_check, bld_semantic, circuit_prove,
                       circuit_self_check, inv, mact_circuit, mact_witness, range_circuit,
                       range_circuit_self_check, range_decompose, range_layout, range_layout_self_check,
                       range_witness,
-                      recip_compile, recip_numerators, recip_prove, recip_self_check,
-                      wnla_commit, wnla_prove, wnla_rounds, wnla_verify)
+                      recip_compile, recip_numerators, recip_prove, recip_satisfied,
+                      recip_self_check, wnla_commit, wnla_prove, wnla_rounds, wnla_verify)
 
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tests", "vectors", "bppp")
 
@@ -596,6 +599,464 @@ def mact_cases(rng):
     return cases
 
 
+# ---------------------------------------------------------------------------------------------
+# The circuit builder (spec section 7)
+
+
+def lc(*terms):
+    """A JSON LC: each term is a variable (coefficient 1), (variable, coefficient) or an int
+    (a One term with that coefficient)."""
+    out = []
+    for t in terms:
+        if isinstance(t, int):
+            out.append([["1"], hx(t)])
+        elif isinstance(t[0], str):
+            out.append([list(t), hx(1)])
+        else:
+            out.append([list(t[0]), hx(t[1])])
+    return out
+
+
+class Prog:
+    """Writes a program (JSON operations) while applying it to a live Builder, so that the
+    prover's values can be read back to build satisfied programs."""
+
+    def __init__(self):
+        self.ops, self.b, self.failed = [], Builder(), None
+
+    def _op(self, op):
+        assert self.failed is None, "an error case ends with its failing operation"
+        self.ops.append(op)
+        return bld_apply(self.b, op)
+
+    def fail(self, method, *args):
+        """Apply an operation that must fail (the last of the program)."""
+        try:
+            getattr(self, method)(*args)
+        except BuilderError:
+            self.failed = len(self.ops) - 1
+            return
+        raise AssertionError(f"{method}{args} did not fail")
+
+    def val(self, jlc):
+        return self.b.eval(bld_parse_lc(jlc))
+
+    def commit(self, v, s):
+        return self._op({"op": "commit", "v": hx(v), "s": hx(s)})
+
+    def multiply(self, l, r):
+        return self._op({"op": "multiply", "l": l, "r": r})
+
+    def allocate(self, v):
+        return self._op({"op": "allocate", "v": hx(v)})
+
+    def allocate_multiplier(self, a, b):
+        return self._op({"op": "allocate_multiplier", "l": hx(a), "r": hx(b)})
+
+    def constrain(self, x):
+        return self._op({"op": "constrain", "lc": x})
+
+    def witness(self, v):
+        return self._op({"op": "witness", "v": hx(v)})
+
+    def product(self, l, r, out):
+        return self._op({"op": "product", "l": l, "r": r, "out": out})
+
+    def table(self, widths, rows):
+        return self._op({"op": "table", "widths": widths, "rows": rows})
+
+    def lookup(self, t, tup):
+        return self._op({"op": "lookup", "table": t, "tuple": tup})
+
+    def lookup_value(self, t, v):
+        return self._op({"op": "lookup_value", "table": t, "v": v})
+
+    def reciprocal(self, widths, terms, public=()):
+        return self._op({"op": "reciprocal", "widths": widths,
+                         "terms": [{"num": n, "tuple": t} for n, t in terms],
+                         "public": [{"coeff": c, "row": r} for c, r in public]})
+
+
+def builder_case(rng, name, P, expect=True):
+    """Replay the program from its JSON, finalize, lower (7.6), check, prove (recip_run)."""
+    ops = json.loads(json.dumps(P.ops))
+    b, err = bld_run_program(ops)
+    assert err == P.failed, (name, err, P.failed)
+    base = {"name": name, "program": ops, "error": err, "prover_error": False}
+    if err is not None:
+        assert err == len(ops) - 1
+        return base
+    fin_v = bld_finalize(b, prover=False)
+    rc_v, _ = bld_lower(b, fin_v)  # the verifier's lowering needs no values
+    try:
+        fin = bld_finalize(b)
+    except BuilderProverError:
+        assert expect == "prover_error", name
+        base["prover_error"] = True
+        return base
+    assert expect != "prover_error", name
+    rc, wit = bld_lower(b, fin)
+    assert rc == rc_v
+    costs = bld_costs(b, fin)
+    assert costs["bppp_gates"] == rc["n_p"] + rc["n_m"]
+    sem = bld_semantic(b, fin)
+    assert sem == expect, (name, sem)
+    recip_ok, ord_ok = recip_satisfied(rc, wit, rng.randrange(1, L))
+    assert (recip_ok and ord_ok) == sem, (name, recip_ok, ord_ok)
+    bld_agreement_check(b, random.Random(name))
+    wit["chal"] = challenges(rng)
+    entry = recip_run(rng, name, rc, wit, expect)
+    del entry["name"]
+    return {**base, "costs": costs, **entry}
+
+
+def builder_cases(rng):
+    s = lambda: rng.randrange(1, L)  # noqa: E731
+    cases = []
+
+    def add(name, P, expect=True):
+        cases.append(builder_case(rng, name, P, expect))
+
+    def range_table(P, w):
+        return P.table([w], [[i] for i in range(2**w)])
+
+    # -- satisfied programs
+    # builder mode without any gate: n = n_prod = N_p = 0, so n_r = 1 (one zero multiplier)
+    P = Prog()
+    x1, x2 = s(), s()
+    a, b = P.witness(x1), P.witness(x2)
+    P.constrain(lc(a, b, -(x1 + x2) % L))
+    add("no-gates-witness-constraint", P)
+
+    P = Prog()
+    v = s()
+    V0 = P.commit(v, s())
+    w = P.witness(v)
+    P.constrain(lc(V0, (w, L - 1)))
+    add("no-gates-committed-input", P)
+
+    # R1CS operations mixed with builder operations; pending allocate; committed inputs in
+    # tuples and numerators; MultiplierRight in numerators (copies)
+    P = Prog()
+    V0, V1 = P.commit(5, s()), P.commit(s(), s())
+    L0, R0, O0 = P.multiply(lc(V0, 2), lc(V1))
+    xv, yv = s(), s()
+    L1 = P.allocate(xv)
+    L2, R2, O2 = P.multiply(lc((O0, 3)), lc(V0, (V1, 2)))  # leaves multiplier 1 pending
+    R1 = P.allocate(yv)                                     # fills multiplier 1
+    L3 = P.allocate(9)                                      # multiplier 3 stays pending
+    pl, pr = s(), s()
+    L4, R4, O4 = P.allocate_multiplier(pl, pr)
+    P.constrain(lc(O4, (L4, -pr % L)))
+    P.constrain(lc(("O", 1), (R1, -xv % L)))
+    P.constrain(lc(L3, -9 % L))
+    P.constrain(lc(("O", 3)))
+    P.constrain(lc(("R", 3), 0))
+    wv = 7 * P.val(lc(V1)) % L
+    W0 = P.witness(wv)
+    P.constrain(lc(W0, (V1, L - 7)))
+    W1 = P.witness(P.val(lc(V1)))
+    W2 = P.witness(xv)
+    W3 = P.witness(9 * yv % L)
+    P.product(lc(L3), lc(R1, (L1, 2)), lc(W3, (L1, 2 * 9 % L), (R1, 0)))
+    P.reciprocal([8], [(lc(V0), [lc(W1)]), (lc((V0, L - 1)), [lc(V1)]),
+                       (lc(R1, 4), [lc(L1)]), (lc((R1, L - 1), (ONE, L - 4)), [lc(W2)])])
+    add("r1cs-mixed-pending-copies", P)
+
+    # a single allocate (pending: a_R = a_O = 0) used by a product
+    P = Prog()
+    Lp = P.allocate(7)
+    W0 = P.witness(21)
+    P.product(lc(Lp), lc(("R", 0), 3), lc(W0))
+    add("allocate-once-pending", P)
+
+    # products with constants in l, r, out, and out reading other variables
+    P = Prog()
+    V0 = P.commit(s(), s())
+    av, bv = s(), s()
+    A, B = P.witness(av), P.witness(bv)
+    C = P.witness(((av + 5) * (2 * bv + 1) - 3 * av - 11) % L)
+    P.product(lc(A, 5), lc((B, 2), 1), lc(C, (A, 3), 11))
+    P.product(lc(7), lc(B), lc((B, 7)))
+    Sq = P.witness(P.val(lc(V0)) ** 2 % L)
+    P.product(lc(V0), lc(V0), lc(Sq))
+    P.product(lc(A, (B, 2), (A, L - 1)), lc(3), lc((B, 6), (A, 3), (A, L - 3)))
+    add("products-constants", P)
+
+    # range check through a one-column 4-bit table; lookup of a committed input and of an LC
+    # that is not exactly one term; no gates at all besides the lookups (N_m = 0)
+    P = Prog()
+    V0 = P.commit(11, s())
+    t = range_table(P, 4)
+    P.lookup_value(t, 13)
+    y = P.witness(7)
+    P.lookup(t, [lc(y)])
+    P.lookup(t, [lc(y, 2)])
+    P.lookup(t, [lc(V0)])
+    P.lookup(t, [lc(5)])
+    P.lookup_value(t, 0)
+    P.lookup_value(t, 15)
+    add("range-4bit-lookups", P)
+
+    # duplicate rows (the first equal row counts), a table never looked up (no
+    # multiplicities), an unused table between used ones
+    P = Prog()
+    t0 = P.table([2, 2], [[0, 1], [1, 2]])
+    t1 = P.table([3], [[1], [2], [2], [5], [7]])
+    t2 = P.table([5], [[31], [0]])
+    t3 = range_table(P, 2)
+    P.lookup_value(t1, 2)
+    P.lookup_value(t3, 3)
+    P.lookup_value(t1, 2)
+    P.lookup_value(t1, 5)
+    y = P.witness(7)
+    P.lookup(t1, [lc(y)])
+    assert (t0, t2) == (0, 2)
+    add("tables-duplicate-and-unused", P)
+
+    # multi-column tables: XOR on 2-bit values, a split table [4, 2, 2]; components with
+    # merged coefficients, a constant, an unbounded variable merged to zero, a + 4b
+    P = Prog()
+    tr = range_table(P, 2)
+    A = P.lookup_value(tr, 2)
+    B = P.lookup_value(tr, 3)
+    C = P.witness(1)
+    P.lookup(tr, [lc(C)])
+    tx = P.table([2, 2, 2], [[i, j, i ^ j] for i in range(4) for j in range(4)])
+    P.lookup(tx, [lc(A), lc(B), lc(C)])
+    P.lookup(tx, [lc((A, 2), (A, L - 1)), lc(B), lc(C)])
+    P.lookup(tx, [lc(1), lc(B), lc(A)])
+    U = P.witness(s())
+    P.lookup(tx, [lc(A, U, (U, L - 1)), lc(B), lc(C)])
+    ts = P.table([4, 2, 2], [[n, n & 3, n >> 2] for n in range(16)])
+    P.lookup(ts, [lc(A, (B, 4)), lc(A), lc(B)])  # bound 3 + 4*3 = 15 = 2^4 - 1
+    P.lookup(ts, [lc((A, 4), 1), lc(1), lc(A)])
+    add("xor-and-split-tables", P)
+
+    # memory-style permutation, 2 components: writes added, reads subtracted, public terms
+    # with a constant coefficient, with MultiplierRight + constant (copy), with
+    # MultiplierLeft; a numerator with MultiplierRight (copy); a component MultiplierRight
+    P = Prog()
+    tr = range_table(P, 4)
+    Lm, Rm, Om = P.allocate_multiplier(5, 3)
+    P.lookup(tr, [lc(Rm)])
+    P.lookup(tr, [lc(Lm)])
+    a0, v0 = P.lookup_value(tr, 1), P.lookup_value(tr, 9)
+    a1, v1 = P.lookup_value(tr, 2), P.lookup_value(tr, 4)
+    P.reciprocal([4, 4],
+                 [(lc(1), [lc(a0), lc(v0)]), (lc(Rm), [lc(a1), lc(v1)]),
+                  (lc(L - 1), [lc(a1), lc(v1)]), (lc((Lm, L - 1)), [lc(Rm), lc(v1)])],
+                 [(lc(L - 1), [1, 9]), (lc((Rm, L - 1), 1), [2, 4]), (lc(Lm), [3, 4])])
+    add("memory-permutation-2col", P)
+
+    # MACT-style balance: amounts (committed) as numerators, asset types as unbounded poles
+    # (one committed, one a witness)
+    P = Prog()
+    t0, t1 = s(), s()
+    In0, In1 = P.commit(100, s()), P.commit(50, s())
+    Out0, Out1, Out2 = P.commit(70, s()), P.commit(30, s()), P.commit(50, s())
+    T0 = P.commit(t0, s())
+    T1 = P.witness(t1)
+    P.reciprocal([252], [(lc(In0), [lc(T0)]), (lc(In1), [lc(T1)]), (lc((Out0, L - 1)), [lc(T0)]),
+                         (lc((Out1, L - 1)), [lc(T0)]), (lc((Out2, L - 1)), [lc(T1)])])
+    add("mact-balance-weighted", P)
+
+    # many witnesses: w_O overflows n_O into l_O (N_lin > 0)
+    P = Prog()
+    V0 = P.commit(s(), s())
+    tr = range_table(P, 2)
+    ws = [P.witness(s()) for _ in range(10)]
+    P.lookup_value(tr, 1)
+    P.lookup_value(tr, 3)
+    pv = P.val(lc(ws[0])) * P.val(lc(ws[1])) % L
+    Wp = P.witness(pv)
+    P.product(lc(ws[0]), lc(ws[1]), lc(Wp))
+    P.constrain(lc(*ws, V0, -sum(P.val(lc(x)) for x in ws + [V0]) % L))
+    add("witnesses-overflow-into-lO", P)
+
+    # an argument without terms is dropped; an argument with public terms only (a constant
+    # coefficient, a witness sum, a zero-constant coefficient, an empty coefficient)
+    P = Prog()
+    av = s()
+    A, B = P.witness(av), P.witness(-(av + 2) % L)
+    P.reciprocal([3], [])
+    P.reciprocal([3, 5], [], [(lc(2), [1, 2]), (lc(A, B), [1, 2]), (lc(0), [7, 31]),
+                              (lc(), [0, 0])])
+    add("empty-and-public-only-arguments", P)
+
+    # the widest valid list (sum 252), a coefficient 2^64 - 1, row entries 2^64 - 1
+    P = Prog()
+    tr = range_table(P, 2)
+    A = P.lookup_value(tr, 1)
+    B = P.lookup_value(tr, 3)
+    t252 = P.table([252], [[U64 - 1], [0]])
+    P.lookup_value(t252, U64 - 1)
+    P.reciprocal([126, 126], [(lc(1), [lc((A, U64 - 1)), lc(B)]), (lc(1), [lc(B), lc(A)])],
+                 [(lc(L - 1), [U64 - 1, 3]), (lc(L - 1), [3, 1])])
+    add("width-sum-252-coeff-2^64-1", P)
+
+    # -- unsatisfied
+    P = Prog()
+    av, bv = s(), s()
+    A, B, C = P.witness(av), P.witness(bv), P.witness(av * bv + 1)
+    P.product(lc(A), lc(B), lc(C))
+    add("bad-product", P, False)
+
+    P = Prog()
+    A, B = P.witness(s()), P.witness(s())
+    P.reciprocal([64], [(lc(1), [lc(A)]), (lc(L - 1), [lc(B)])])
+    add("bad-reciprocal-not-vanishing", P, False)
+
+    P = Prog()
+    tr = range_table(P, 2)
+    A, B = P.lookup_value(tr, 1), P.lookup_value(tr, 2)
+    P.reciprocal([2, 2], [(lc(1), [lc(A), lc(B)]), (lc(L - 1), [lc(B), lc(A)])],
+                 [(lc(1), [1, 2]), (lc(L - 1), [2, 1])])
+    add("bad-reciprocal-public-swapped", P, False)
+
+    # -- prover errors (a lookup equal to no row)
+    P = Prog()
+    t = range_table(P, 3)
+    P.lookup_value(t, 9)
+    add("prover-error-lookup-value", P, "prover_error")
+
+    P = Prog()
+    tr = range_table(P, 2)
+    A, B, C = P.lookup_value(tr, 1), P.lookup_value(tr, 2), P.lookup_value(tr, 0)
+    tx = P.table([2, 2, 2], [[i, j, i ^ j] for i in range(4) for j in range(4)])
+    P.lookup(tx, [lc(A), lc(B), lc(C)])
+    add("prover-error-xor-tuple", P, "prover_error")
+
+    # -- construction errors (the failing operation is the last)
+    def err(name, build):
+        P = Prog()
+        build(P)
+        assert P.failed is not None
+        add(name, P)
+
+    def xor_setup(P):
+        tr = range_table(P, 2)
+        A, B = P.lookup_value(tr, 1), P.lookup_value(tr, 2)
+        tx = P.table([2, 2, 2], [[i, j, i ^ j] for i in range(4) for j in range(4)])
+        return tr, A, B, tx
+
+    def e_unbounded(P):
+        tr, A, B, tx = xor_setup(P)
+        U = P.witness(3)
+        P.fail("lookup", tx, [lc(A), lc(B), lc(U)])
+    err("err-unbounded-component", e_unbounded)
+
+    def e_bound_2w(P):
+        tr, A, B, tx = xor_setup(P)
+        t22 = P.table([2, 2], [[i, j] for i in range(4) for j in range(4)])
+        P.lookup(t22, [lc(A), lc(B)])           # bound 3 = 2^2 - 1: accepted
+        P.fail("lookup", t22, [lc(A, 1), lc(B)])  # bound 4 = 2^2: rejected
+    err("err-bound-exactly-2^w", e_bound_2w)
+
+    def e_bound_2w_sum(P):
+        tr, A, B, tx = xor_setup(P)
+        ts = P.table([4, 2, 2], [[n, n & 3, n >> 2] for n in range(16)])
+        P.lookup(ts, [lc(A, (B, 4)), lc(A), lc(B)])        # 15: accepted
+        P.fail("lookup", ts, [lc(A, (B, 4), 1), lc(A), lc(B)])  # 16: rejected
+    err("err-bound-sum-exactly-2^w", e_bound_2w_sum)
+
+    def e_coeff(P):
+        tr, A, B, tx = xor_setup(P)
+        P.reciprocal([126, 126], [(lc(1), [lc((A, U64 - 1)), lc(B)])],
+                     [(lc(L - 1), [U64 - 1, 2])])
+        P.fail("reciprocal", [126, 126], [(lc(1), [lc((A, U64)), lc(B)])])
+    err("err-coefficient-2^64", e_coeff)
+
+    def e_const(P):
+        tr, A, B, tx = xor_setup(P)
+        P.fail("reciprocal", [126, 126], [(lc(1), [lc(A, U64), lc(B)])])
+    err("err-constant-2^64", e_const)
+
+    def e_neg(P):
+        tr, A, B, tx = xor_setup(P)
+        P.fail("lookup", tx, [lc((A, L - 1), 3), lc(B), lc(1)])
+    err("err-negative-coefficient", e_neg)
+
+    def e_merged_neg(P):
+        tr, A, B, tx = xor_setup(P)
+        P.fail("lookup", tx, [lc(A, (A, L - 2), 2), lc(B), lc(A)])  # merged -1
+    err("err-merged-negative-coefficient", e_merged_neg)
+
+    def e_not_recorded(P):
+        tr = range_table(P, 2)
+        X = P.witness(1)
+        P.lookup(tr, [lc((X, 2))])  # not exactly (x, 1): no bound
+        P.lookup(tr, [lc(X, 0)])    # two terms: no bound
+        tx = P.table([2, 2, 2], [[i, j, i ^ j] for i in range(4) for j in range(4)])
+        P.fail("lookup", tx, [lc(X), lc(X), lc(0)])
+    err("err-bound-only-from-exact-term", e_not_recorded)
+
+    def e_after(P):
+        tr = range_table(P, 2)
+        X = P.witness(1)
+        tx = P.table([2, 2, 2], [[i, j, i ^ j] for i in range(4) for j in range(4)])
+        P.fail("lookup", tx, [lc(X), lc(X), lc(0)])  # X's range lookup would come later
+    err("err-bound-not-yet-recorded", e_after)
+
+    def e_recip_no_bound(P):
+        X = P.witness(1)
+        P.reciprocal([2], [(lc(1), [lc(X)])], [(lc(L - 1), [1])])  # records no bound
+        P.fail("reciprocal", [2, 2], [(lc(1), [lc(X), lc(X)])])
+    err("err-bound-not-from-reciprocal", e_recip_no_bound)
+
+    err("err-width-sum-253-table", lambda P: P.fail("table", [126, 127], [[0, 0]]))
+
+    def e_253_recip(P):
+        P.reciprocal([126, 126], [])
+        P.fail("reciprocal", [200, 53], [])
+    err("err-width-sum-253-empty-reciprocal", e_253_recip)
+    err("err-width-0", lambda P: P.fail("table", [4, 0], [[1, 0]]))
+    err("err-table-entry-ge-2^w", lambda P: P.fail("table", [3], [[0], [7], [8]]))
+    err("err-empty-table", lambda P: P.fail("table", [3], []))
+
+    def e_row_len(P):
+        P.fail("table", [3, 3], [[1, 2], [3]])
+    err("err-table-row-length", e_row_len)
+
+    def e_lv_2col(P):
+        t = P.table([2, 2], [[1, 1]])
+        P.fail("lookup_value", t, 1)
+    err("err-lookup-value-two-columns", e_lv_2col)
+
+    def e_tuple_len(P):
+        tr, A, B, tx = xor_setup(P)
+        P.fail("lookup", tx, [lc(A), lc(B)])
+    err("err-tuple-length", e_tuple_len)
+
+    def e_unknown(P):
+        tr = range_table(P, 2)
+        X = P.witness(1)
+        P.fail("lookup", 5, [lc(X)])
+    err("err-unknown-table", e_unknown)
+
+    def e_var(P):
+        A, B = P.witness(1), P.witness(2)
+        P.fail("product", lc(A), lc(B), lc(("W", 5)))
+    err("err-variable-does-not-exist", e_var)
+
+    def e_var_recip(P):
+        V0 = P.commit(1, 2)
+        X = P.witness(1)
+        P.fail("reciprocal", [3], [(lc(V0, ("V", 1)), [lc(X)])])
+    err("err-variable-does-not-exist-numerator", e_var_recip)
+
+    def e_pub_len(P):
+        tr, A, B, tx = xor_setup(P)
+        P.fail("reciprocal", [3, 3], [(lc(1), [lc(A), lc(B)])], [(lc(L - 1), [1])])
+    err("err-public-row-length", e_pub_len)
+
+    def e_pub_entry(P):
+        X = P.witness(1)
+        P.fail("reciprocal", [3], [(lc(1), [lc(X)])], [(lc(L - 1), [8])])
+    err("err-public-row-entry-ge-2^w", e_pub_entry)
+    return cases
+
+
 def main():
     rng = random.Random(20261019)
     # (|l|, |n|): odd and unequal lengths, a frozen norm vector (|n| = 1, 2, 3 with long l),
@@ -632,6 +1093,13 @@ def main():
             json.dump({"cases": cases}, f, indent=1)
             f.write("\n")
         print(f"{fname}: {len(cases)} cases")
+
+    bld_self_check()
+    cases = builder_cases(random.Random(20261024))
+    with open(os.path.join(OUT, "builder.json"), "w") as f:
+        json.dump({"cases": cases}, f, indent=1)
+        f.write("\n")
+    print(f"builder.json: {len(cases)} cases")
 
 
 if __name__ == "__main__":

@@ -69,14 +69,14 @@ impl<C: CircuitBuilder> Ops for C {
         Ok(())
     }
     fn recip(&mut self, m: usize, private: Vec<(super::LinearCombination, Vec<super::LinearCombination>)>, public: Vec<(super::LinearCombination, Vec<u64>)>) -> Result<(), R1CSError> {
-        let mut r = self.reciprocal(m)?;
+        let r = self.reciprocal(m)?;
         for (n, x) in private {
-            r.add_weighted(n, x);
+            r.add_weighted(self, n, &x)?;
         }
         for (c, row) in public {
-            r.add_public(c, row);
+            r.add_public(self, c, &row)?;
         }
-        self.finish_reciprocal(r)
+        Ok(())
     }
 }
 

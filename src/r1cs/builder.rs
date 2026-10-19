@@ -47,40 +47,33 @@ impl Cost {
     }
 }
 
-/// A reciprocal argument under construction (spec §7.2): terms `num / (X + tuple)` over
-/// tuples of `m` components, which must cancel per tuple (distinct tuples are distinct poles).
-/// Recorded by [`CircuitBuilder::finish_reciprocal`], which validates it.
-#[derive(Clone, Debug)]
-pub struct Reciprocal {
-    pub(super) m: usize,
-    pub(super) private: Vec<(LinearCombination, Vec<LinearCombination>)>,
-    pub(super) public: Vec<(LinearCombination, Vec<u64>)>,
-}
+/// A reciprocal argument (spec §7.2): a sum of terms `num / (X + tuple)` over tuples of `m`
+/// components that must vanish as a rational function in `X`, i.e. the terms cancel per
+/// tuple (a multiset equality, a lookup, a permutation). Created by
+/// [`CircuitBuilder::reciprocal`] and recorded at once; each term is validated when it is
+/// added. An argument without terms adds nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Reciprocal(pub(super) usize);
 
 impl Reciprocal {
-    /// The term `1 / (X + tuple)`.
-    pub fn add(&mut self, tuple: Vec<LinearCombination>) {
-        self.add_weighted(Scalar::ONE.into(), tuple)
+    /// Add the term `1 / (X + tuple)`.
+    pub fn add<CS: CircuitBuilder + ?Sized>(self, cs: &mut CS, tuple: &[LinearCombination]) -> Result<(), R1CSError> {
+        cs.reciprocal_term(self, Scalar::ONE.into(), tuple)
     }
 
-    /// The term `-1 / (X + tuple)`.
-    pub fn sub(&mut self, tuple: Vec<LinearCombination>) {
-        self.add_weighted((-Scalar::ONE).into(), tuple)
+    /// Add the term `-1 / (X + tuple)`.
+    pub fn sub<CS: CircuitBuilder + ?Sized>(self, cs: &mut CS, tuple: &[LinearCombination]) -> Result<(), R1CSError> {
+        cs.reciprocal_term(self, (-Scalar::ONE).into(), tuple)
     }
 
-    /// The term `num / (X + tuple)`.
-    pub fn add_weighted(&mut self, num: LinearCombination, tuple: Vec<LinearCombination>) {
-        self.private.push((num, tuple));
+    /// Add the term `num / (X + tuple)`.
+    pub fn add_weighted<CS: CircuitBuilder + ?Sized>(self, cs: &mut CS, num: LinearCombination, tuple: &[LinearCombination]) -> Result<(), R1CSError> {
+        cs.reciprocal_term(self, num, tuple)
     }
 
-    /// The term `coeff / (X + row)` for a public row.
-    pub fn add_public(&mut self, coeff: LinearCombination, row: Vec<u64>) {
-        self.public.push((coeff, row));
-    }
-
-    /// The number of components of the tuples.
-    pub fn columns(&self) -> usize {
-        self.m
+    /// Add the term `coeff / (X + row)` for a public row.
+    pub fn add_public<CS: CircuitBuilder + ?Sized>(self, cs: &mut CS, coeff: LinearCombination, row: &[u64]) -> Result<(), R1CSError> {
+        cs.reciprocal_public(self, coeff, row)
     }
 }
 
@@ -91,8 +84,9 @@ pub trait CircuitBuilder: ConstraintSystem {
     /// A free witness (BP: half a multiplier; BP++: a slot of `w_O`, no gate).
     fn witness(&mut self, v: Option<Scalar>) -> Result<Variable, R1CSError>;
 
-    /// The constraint `l * r = out` (one multiplier, one BP++ gate).
-    fn product(&mut self, l: LinearCombination, r: LinearCombination, out: LinearCombination) -> Result<(), R1CSError>;
+    /// The constraint `l * r = out` (BP: one multiplier and its two linear constraints; BP++: one
+    /// gate). Unlike [`ConstraintSystem::multiply`] it allocates no variables.
+    fn constrain_product(&mut self, l: LinearCombination, r: LinearCombination, out: LinearCombination) -> Result<(), R1CSError>;
 
     /// A public table: at least one row, all rows of the same length `m >= 1` (the columns).
     fn table(&mut self, rows: Vec<Vec<u64>>) -> Result<TableId, R1CSError>;
@@ -105,16 +99,15 @@ pub trait CircuitBuilder: ConstraintSystem {
     /// A witness that is an entry of the one-column table `t`.
     fn lookup_value(&mut self, t: TableId, v: Option<u64>) -> Result<Variable, R1CSError>;
 
-    /// Start a reciprocal argument over tuples of `m >= 1` components.
-    fn reciprocal(&mut self, m: usize) -> Result<Reciprocal, R1CSError> {
-        if m == 0 {
-            return Err(gadget_error("a reciprocal argument needs at least one column"));
-        }
-        Ok(Reciprocal { m, private: Vec::new(), public: Vec::new() })
-    }
+    /// A new reciprocal argument over tuples of `m >= 1` components; add its terms with the
+    /// methods of [`Reciprocal`].
+    fn reciprocal(&mut self, m: usize) -> Result<Reciprocal, R1CSError>;
 
-    /// Validate and record a reciprocal argument.
-    fn finish_reciprocal(&mut self, r: Reciprocal) -> Result<(), R1CSError>;
+    /// Add the term `num / (X + tuple)` to the argument `r` (`tuple` has `m` components).
+    fn reciprocal_term(&mut self, r: Reciprocal, num: LinearCombination, tuple: &[LinearCombination]) -> Result<(), R1CSError>;
+
+    /// Add the term `coeff / (X + row)` for a public row (`m` entries) to the argument `r`.
+    fn reciprocal_public(&mut self, r: Reciprocal, coeff: LinearCombination, row: &[u64]) -> Result<(), R1CSError>;
 
     /// The cost of the circuit recorded so far.
     fn cost(&self) -> Cost;
@@ -196,7 +189,7 @@ impl Builder {
         Variable::Witness(self.n_w - 1)
     }
 
-    pub(super) fn product(&mut self, l: LinearCombination, r: LinearCombination, out: LinearCombination, c: Counts) -> Result<(), R1CSError> {
+    pub(super) fn constrain_product(&mut self, l: LinearCombination, r: LinearCombination, out: LinearCombination, c: Counts) -> Result<(), R1CSError> {
         for lc in [&l, &r, &out] {
             self.check_lc(lc, c)?;
         }
@@ -236,23 +229,33 @@ impl Builder {
         Ok(())
     }
 
-    pub(super) fn finish_reciprocal(&mut self, r: Reciprocal, c: Counts) -> Result<(), R1CSError> {
-        if r.m == 0 {
+    pub(super) fn reciprocal(&mut self, m: usize) -> Result<Reciprocal, R1CSError> {
+        if m == 0 {
             return Err(gadget_error("a reciprocal argument needs at least one column"));
         }
-        for (num, tuple) in &r.private {
-            self.check_lc(num, c)?;
-            self.check_tuple(tuple, r.m, c)?;
+        self.args.push(Argument { m, private: Vec::new(), public: Vec::new() });
+        Ok(Reciprocal(self.args.len() - 1))
+    }
+
+    fn arg_columns(&self, r: Reciprocal) -> Result<usize, R1CSError> {
+        self.args.get(r.0).map(|a| a.m).ok_or_else(|| gadget_error("unknown reciprocal argument"))
+    }
+
+    pub(super) fn reciprocal_term(&mut self, r: Reciprocal, num: LinearCombination, tuple: &[LinearCombination], c: Counts) -> Result<(), R1CSError> {
+        let m = self.arg_columns(r)?;
+        self.check_lc(&num, c)?;
+        self.check_tuple(tuple, m, c)?;
+        self.args[r.0].private.push((num, tuple.to_vec()));
+        Ok(())
+    }
+
+    pub(super) fn reciprocal_public(&mut self, r: Reciprocal, coeff: LinearCombination, row: &[u64], c: Counts) -> Result<(), R1CSError> {
+        let m = self.arg_columns(r)?;
+        self.check_lc(&coeff, c)?;
+        if row.len() != m {
+            return Err(gadget_error("public row length does not match the columns"));
         }
-        for (coeff, row) in &r.public {
-            self.check_lc(coeff, c)?;
-            if row.len() != r.m {
-                return Err(gadget_error("public row length does not match the columns"));
-            }
-        }
-        if !r.private.is_empty() || !r.public.is_empty() {
-            self.args.push(Argument { m: r.m, private: r.private, public: r.public });
-        }
+        self.args[r.0].public.push((coeff, row.to_vec()));
         Ok(())
     }
 
@@ -290,6 +293,8 @@ impl Builder {
     /// multiplicities, or an error for a lookup equal to no row. Constant time in the witness:
     /// `|T|` comparisons per lookup, or an oblivious sort for large tables.
     pub(super) fn finalize(&mut self, eval: Option<&dyn Fn(&LinearCombination) -> Scalar>) -> Result<Vec<Scalar>, R1CSError> {
+        // arguments without terms add nothing (spec §7.4)
+        self.args.retain(|a| !a.private.is_empty() || !a.public.is_empty());
         let mut values = Vec::new();
         #[cfg(test)]
         let cheat = if eval.is_some() { cheat::get().multiplicities } else { None };
@@ -502,7 +507,7 @@ mod tests {
         assert!(b.lookup(t, &[Variable::MultiplierRight(2).into()], C).is_err());
         assert!(b.lookup(t, &[Variable::MultiplierOutput(1).into()], C).is_ok());
         assert!(b.lookup(t, &[Variable::Committed(1).into()], C).is_err());
-        assert!(b.product(Variable::Witness(9).into(), Scalar::ONE.into(), Scalar::ONE.into(), C).is_err());
+        assert!(b.constrain_product(Variable::Witness(9).into(), Scalar::ONE.into(), Scalar::ONE.into(), C).is_err());
         assert!(b.lookup(TableId(7), &[Scalar::ONE.into()], C).is_err());
         assert!(b.lookup(t, &[Scalar::ONE.into(), Scalar::ONE.into()], C).is_err(), "tuple length");
         assert!(b.lookup(t, &[], C).is_err(), "tuple length");
@@ -518,30 +523,24 @@ mod tests {
     fn reciprocals_are_validated() {
         let (mut b, _) = four();
         let (w0, w1, w2) = (Variable::Witness(0), Variable::Witness(1), Variable::Witness(2));
-        let new = |m: usize| Reciprocal { m, private: vec![], public: vec![] };
-        let mut r = new(2);
-        r.add(vec![w0.into(), w1.into()]);
-        r.add_public(w2.into(), vec![15, 1 << 40]);
-        assert!(b.finish_reciprocal(r.clone(), C).is_ok());
-        let mut x = r.clone();
-        x.add_public(Scalar::ONE.into(), vec![1]);
-        assert!(b.finish_reciprocal(x, C).is_err(), "row length");
-        let mut x = r.clone();
-        x.sub(vec![w2.into()]);
-        assert!(b.finish_reciprocal(x, C).is_err(), "tuple length");
-        let mut x = r.clone();
-        x.add_weighted(Variable::Witness(8).into(), vec![w0.into(), w1.into()]);
-        assert!(b.finish_reciprocal(x, C).is_err(), "unknown numerator variable");
-        let mut x = r.clone();
-        x.add(vec![w0.into(), Variable::Witness(8).into()]);
-        assert!(b.finish_reciprocal(x, C).is_err(), "unknown component variable");
-        let mut x = new(1);
-        x.add_weighted(w2.into(), vec![w2 * Scalar::from(7u64) + Scalar::ONE]);
-        assert!(b.finish_reciprocal(x, C).is_ok());
-        assert_eq!(b.args.len(), 2);
-        assert!(b.finish_reciprocal(new(3), C).is_ok());
-        assert_eq!(b.args.len(), 2, "an empty argument is dropped");
-        assert!(b.finish_reciprocal(new(0), C).is_err(), "no column");
+        let one = || LinearCombination::from(Scalar::ONE);
+        let r = b.reciprocal(2).unwrap();
+        assert!(b.reciprocal_term(r, one(), &[w0.into(), w1.into()], C).is_ok());
+        assert!(b.reciprocal_public(r, w2.into(), &[15, 1 << 40], C).is_ok());
+        assert!(b.reciprocal_public(r, one(), &[1], C).is_err(), "row length");
+        assert!(b.reciprocal_term(r, -one(), &[w2.into()], C).is_err(), "tuple length");
+        assert!(b.reciprocal_term(r, Variable::Witness(8).into(), &[w0.into(), w1.into()], C).is_err(), "unknown numerator variable");
+        assert!(b.reciprocal_term(r, one(), &[w0.into(), Variable::Witness(8).into()], C).is_err(), "unknown component variable");
+        assert!(b.reciprocal_public(r, Variable::Witness(8).into(), &[1, 2], C).is_err(), "unknown coefficient variable");
+        assert_eq!((b.args[r.0].private.len(), b.args[r.0].public.len()), (1, 1), "a failed term records nothing");
+        let x = b.reciprocal(1).unwrap();
+        assert!(b.reciprocal_term(x, w2.into(), &[w2 * Scalar::from(7u64) + Scalar::ONE], C).is_ok());
+        assert!(b.reciprocal_term(Reciprocal(9), one(), &[w0.into()], C).is_err(), "unknown argument");
+        let _empty = b.reciprocal(3).unwrap();
+        assert!(b.reciprocal(0).is_err(), "no column");
+        assert_eq!(b.args.len(), 3);
+        b.finalize(None).unwrap();
+        assert_eq!(b.args.len(), 2, "an argument without terms is dropped");
     }
 
     #[test]
@@ -588,9 +587,8 @@ mod tests {
         // + 1 pole, + 1 multiplicity, + 1 copy (l); o needs none
         assert_eq!(one.bppp_gates, base.bppp_gates + 1);
         assert_eq!(one.bppp_lin, base.bppp_lin + 1 + 1 - 1);
-        let mut x = Reciprocal { m: 2, private: vec![], public: vec![] };
-        x.add_weighted(r.into(), vec![r.into(), l + r]);
-        b.finish_reciprocal(x, C).unwrap();
+        let x = b.reciprocal(2).unwrap();
+        b.reciprocal_term(x, r.into(), &[r.into(), l + r], C).unwrap();
         let two = b.cost(2, 1);
         // + 1 pole, + 3 copies (numerator r, both components)
         assert_eq!(two.bppp_gates, one.bppp_gates + 1);

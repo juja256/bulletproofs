@@ -36,12 +36,11 @@ fn gadget<CS: CircuitBuilder>(cs: &mut CS, fault: Fault, prover: bool) -> Result
     let byte = cs.table((0..256u64).map(|x| vec![x]).collect())?;
     let b = cs.witness(v(if matches!(fault, Fault::Lookup) { 256 } else { 17 }))?;
     cs.lookup(byte, &[b.into()])?;
-    let mut arg = cs.reciprocal(2)?;
+    let arg = cs.reciprocal(2)?;
     let (a, w) = (cs.witness(v(3))?, cs.witness(v(5))?);
     let r = cs.witness(v(if matches!(fault, Fault::Reciprocal) { 6 } else { 5 }))?;
-    arg.add(vec![a.into(), w.into()]);
-    arg.sub(vec![a.into(), r.into()]);
-    cs.finish_reciprocal(arg)?;
+    arg.add(cs, &[a.into(), w.into()])?;
+    arg.sub(cs, &[a.into(), r.into()])?;
     let y = cs.witness(v(4))?;
     let x = cs.witness(v(if matches!(fault, Fault::Linear) { 9 } else { 8 }))?;
     cs.constrain(Lc::from(x) - y * Scalar::from(2u64));

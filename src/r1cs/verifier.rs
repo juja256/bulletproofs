@@ -159,9 +159,9 @@ impl<T: BorrowMut<Transcript>> CircuitBuilder for Verifier<T> {
         Ok(self.builder.witness())
     }
 
-    fn product(&mut self, l: LinearCombination, r: LinearCombination, out: LinearCombination) -> Result<(), R1CSError> {
+    fn constrain_product(&mut self, l: LinearCombination, r: LinearCombination, out: LinearCombination) -> Result<(), R1CSError> {
         let c = self.counts();
-        self.builder.product(l, r, out, c)
+        self.builder.constrain_product(l, r, out, c)
     }
 
     fn table(&mut self, rows: Vec<Vec<u64>>) -> Result<TableId, R1CSError> {
@@ -180,9 +180,18 @@ impl<T: BorrowMut<Transcript>> CircuitBuilder for Verifier<T> {
         Ok(x)
     }
 
-    fn finish_reciprocal(&mut self, r: Reciprocal) -> Result<(), R1CSError> {
+    fn reciprocal(&mut self, m: usize) -> Result<Reciprocal, R1CSError> {
+        self.builder.reciprocal(m)
+    }
+
+    fn reciprocal_term(&mut self, r: Reciprocal, num: LinearCombination, tuple: &[LinearCombination]) -> Result<(), R1CSError> {
         let c = self.counts();
-        self.builder.finish_reciprocal(r, c)
+        self.builder.reciprocal_term(r, num, tuple, c)
+    }
+
+    fn reciprocal_public(&mut self, r: Reciprocal, coeff: LinearCombination, row: &[u64]) -> Result<(), R1CSError> {
+        let c = self.counts();
+        self.builder.reciprocal_public(r, coeff, row, c)
     }
 
     fn cost(&self) -> Cost {

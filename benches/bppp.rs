@@ -230,7 +230,7 @@ fn range_bench(c: &mut Criterion) {
 fn builder_bench(c: &mut Criterion) {
     use bulletproofs::r1cs::{Backend, CircuitBuilder, ConstraintSystem, LinearCombination, Prover, R1CSError, Variable, Verifier};
     fn gadget<CS: CircuitBuilder>(cs: &mut CS, vars: &[Variable], vals: Option<&[u64]>) -> Result<(), R1CSError> {
-        let byte = cs.table((0..256u64).map(|x| vec![x]).collect(), &[8])?;
+        let byte = cs.table((0..256u64).map(|x| vec![x]).collect())?;
         for (i, x) in vars.iter().enumerate() {
             let mut sum = LinearCombination::default();
             for j in 0..4 {

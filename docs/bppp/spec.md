@@ -625,10 +625,6 @@ where BP needs its multipliers rounded up to a power of two), so the input commi
 same form in both backends. As for every BP++ input (§3.2), the proof binds the committed values
 but not that a commitment has exactly the form $v B + s \tilde B$.
 
-(Before option B, a plain R1CS was proven with the arithmetic circuit protocol §3 under
-`"bppp-r1cs v1"` and tag 2 with $(N_m, k)$, a builder circuit under `"bppp-builder v1"` and tag 3.
-Both are gone; the circuits are the same, the protocol is now §4 for both.)
-
 ### 6.2 Protocol and encoding
 
 The prover absorbs `domain_sep("bppp-r1cs v2")` after the transcript of the constraint system
@@ -698,22 +694,23 @@ or bound (§7.3).
 
 - `witness(v)` → `Witness(n_w)`, $n_w \mathrel{+}= 1$. The prover must supply $v$
   (`MissingAssignment` otherwise).
-- `product(l, r, out)` records the constraint $l \cdot r = out$.
+- `constrain_product(l, r, out)` records the constraint $l \cdot r = out$ (no variables are
+  allocated).
 - `table(rows)` → a table id ($0, 1, \dots$ in call order). Fails unless there is at least one row,
   the first row has $m \ge 1$ entries and every row has $m$ entries.
 - `lookup(t, tuple)` records that the tuple of $m$ LCs is a row of table $t$. Fails if $t$ does not
   exist or the length differs from $m$.
 - `lookup_value(t, v)`: fails unless $t$ has one column; then $x$ = `witness(v)` and
   `lookup(t, [x])`; returns $x$.
-- `reciprocal(m)` → an argument with $m \ge 1$ columns. Its methods record terms:
-  `add_weighted(num, tuple)` the private term $num / (X + tuple)$, `add(tuple)`
-  and `sub(tuple)` the same with $num = \pm 1$, and `add_public(coeff, row)` the public term
-  $coeff / (X + row)$ for a row of $m$ `u64` entries. The argument asserts that the terms cancel
-  per tuple: for every tuple value, the sum of the numerators (coefficients) of the terms whose
-  tuple has that value (component by component) is zero — the sum vanishes as a rational
-  function in which distinct tuples are distinct poles.
-- `finish_reciprocal(r)` validates and records the argument (in call order): every tuple and
-  row has $m$ entries and every variable exists. An argument without terms is dropped.
+- `reciprocal(m)` → an argument id ($0, 1, \dots$ in call order) with $m \ge 1$ columns,
+  recorded at once. Terms are added to it one by one, each validated when added (the tuple or
+  row has $m$ entries, every variable exists): `reciprocal_term(r, num, tuple)` the private
+  term $num / (X + tuple)$ (the handle's `add_weighted`; `add` and `sub` with $num = \pm 1$),
+  and `reciprocal_public(r, coeff, row)` the public term $coeff / (X + row)$ for a row of $m$
+  `u64` entries (`add_public`). The argument asserts that the terms cancel per tuple: for every
+  tuple value, the sum of the numerators (coefficients) of the terms whose tuple has that value
+  (component by component) is zero — the sum vanishes as a rational function in which distinct
+  tuples are distinct poles. An argument without terms is dropped at finalization (§7.4).
 
 Errors are `GadgetError`; a failed operation records nothing. Without builder operations the
 record is empty: BP (§7.5) adds nothing, BP++ (§7.6) lowers the plain R1CS of §6.1.
@@ -733,10 +730,6 @@ A one-component tuple is its own pole on both backends ($m = 1$: BP takes $\alph
 pole and protocol v1 if no argument has $m \ge 2$). Soundness: §4.7 for BP++; for BP the same
 Schwartz–Zippel argument over `"logup alpha"` (bpvm's LogUp).
 
-(Phase 6 packed tuples with a public base and therefore needed a *bound rule*: every component
-of a multi-column tuple had to be bounded by an earlier one-column lookup. It is gone; see
-`builder-api-notes.md`.)
-
 ### 7.4 Finalization
 
 At `prove`/`verify`, before anything is committed:
@@ -746,7 +739,8 @@ At `prove`/`verify`, before anything is committed:
    whose evaluated tuple equals row $r$ (component by component, entries as scalars), counting each lookup for the first
    equal row only, in constant time (every lookup is compared with every row, or, for large tables, a bitonic
    sort of rows and lookups); a lookup equal to no row is a `GadgetError` (prover only).
-2. The arguments $\mathcal A$ are the recorded reciprocal arguments in call order, followed by one
+2. The arguments $\mathcal A$ are the recorded reciprocal arguments with at least one term, in
+   the order of their `reciprocal` calls, followed by one
    argument per table with lookups, in id order: the private terms $+1 / (X + q)$ for
    the lookups $q$ in call order, then the public terms $(-m_r) / (X + row_r)$ in row
    order (coefficient: the LC $[(m_r, -1)]$).

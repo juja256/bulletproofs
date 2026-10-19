@@ -74,34 +74,34 @@ fn xor8<CS: CircuitBuilder>(cs: &mut CS, t: &Tables, x: Variable, y: Variable, v
 /// A memory permutation: the multiset of `(address, value)` writes equals that of the reads,
 /// with addresses and values bytes.
 fn memory<CS: CircuitBuilder>(cs: &mut CS, t: &Tables, writes: &[(u64, u64)], reads: Option<&[(u64, u64)]>, n: usize) -> Result<(), R1CSError> {
-    let mut arg = cs.reciprocal(2)?;
+    let arg = cs.reciprocal(2)?;
     for i in 0..n {
         let w = writes.get(i).copied();
         let a = cs.lookup_value(t.byte, w.map(|w| w.0))?;
         let v = cs.lookup_value(t.byte, w.map(|w| w.1))?;
-        arg.add(vec![a.into(), v.into()]);
+        arg.add(cs, &[a.into(), v.into()])?;
     }
     for i in 0..n {
         let r = reads.map(|r| r[i]);
         let a = cs.lookup_value(t.byte, r.map(|r| r.0))?;
         let v = cs.lookup_value(t.byte, r.map(|r| r.1))?;
-        arg.sub(vec![a.into(), v.into()]);
+        arg.sub(cs, &[a.into(), v.into()])?;
     }
-    cs.finish_reciprocal(arg)
+    Ok(())
 }
 
 /// A MACT-style balance: committed `(amount, asset type)` pairs, `sum_in a/(X + t) - sum_out
 /// a/(X + t) = 0`, every output amount below `2^32` (`range32`).
 fn balance<CS: CircuitBuilder>(cs: &mut CS, t: &Tables, ins: &[(Variable, Variable)], outs: &[(Variable, Variable)], out_amounts: Option<&[u64]>) -> Result<(), R1CSError> {
-    let mut arg = cs.reciprocal(1)?;
+    let arg = cs.reciprocal(1)?;
     for (a, ty) in ins {
-        arg.add_weighted((*a).into(), vec![(*ty).into()]);
+        arg.add_weighted(cs, (*a).into(), &[(*ty).into()])?;
     }
     for (i, (a, ty)) in outs.iter().enumerate() {
-        arg.add_weighted(-Lc::from(*a), vec![(*ty).into()]);
+        arg.add_weighted(cs, -Lc::from(*a), &[(*ty).into()])?;
         range32(cs, t, (*a).into(), out_amounts.map(|o| o[i]))?;
     }
-    cs.finish_reciprocal(arg)
+    Ok(())
 }
 
 /// The prover's private data; the committed inputs are `(x, a_in, t_in, a_out1, t_out1,
@@ -122,7 +122,7 @@ fn statement<CS: CircuitBuilder>(cs: &mut CS, V: &[Variable], p: Option<&Private
     let xv = cs.witness(p.map(|p| Scalar::from(p.xy.0)))?;
     let yv = cs.witness(p.map(|p| Scalar::from(p.xy.1)))?;
     let z = xor8(cs, &t, xv, yv, p.map(|p| p.xy))?;
-    cs.product(z.into(), Scalar::ONE.into(), z + Scalar::ZERO)?;
+    cs.constrain_product(z.into(), Scalar::ONE.into(), z + Scalar::ZERO)?;
     // memory permutation
     memory(cs, &t, &p.map(|p| p.writes.clone()).unwrap_or_default(), p.map(|p| &p.reads[..]), 3)?;
     // balance
@@ -244,13 +244,12 @@ fn copies<CS: CircuitBuilder>(cs: &mut CS, V: &[Variable], p: Option<[u64; 3]>) 
     cs.lookup(t, &[b.into()])?; // b < 8
     cs.lookup(t, &[a.into()])?;
     let w = cs.witness(p.map(|p| s(p[2])))?;
-    cs.product(a + 1u64, b.into(), w - V[0] + Scalar::ONE)?; // (a + 1) b = w - v + 1
+    cs.constrain_product(a + 1u64, b.into(), w - V[0] + Scalar::ONE)?; // (a + 1) b = w - v + 1
     // b / (X + (a, b)) - b / (X + (a, b)) + (2b - 10) / (X + (1, 2))
-    let mut r = cs.reciprocal(2)?;
-    r.add_weighted(b + 0u64, vec![a.into(), b.into()]);
-    r.add_weighted(-Lc::from(b), vec![a.into(), b.into()]);
-    r.add_public(b * Scalar::from(2u64) - Scalar::from(10u64), vec![1, 2]); // 0 for b = 5
-    cs.finish_reciprocal(r)
+    let r = cs.reciprocal(2)?;
+    r.add_weighted(cs, b + 0u64, &[a.into(), b.into()])?;
+    r.add_weighted(cs, -Lc::from(b), &[a.into(), b.into()])?;
+    r.add_public(cs, b * Scalar::from(2u64) - Scalar::from(10u64), &[1, 2]) // 0 for b = 5
 }
 
 fn prove_small<F>(backend: Backend, v: u64, gadget: F) -> Result<(R1CSProof, CompressedRistretto, Cost), R1CSError>
@@ -464,21 +463,17 @@ fn constraints_on_missing_variables_are_errors() {
 fn failed_operations_leave_the_plain_proof() {
     let g = |cs: &mut Prover<&mut Transcript>, x: Variable| {
         assert!(cs.table(vec![vec![]]).is_err());
-        assert!(cs.product(Variable::Witness(3).into(), x.into(), x.into()).is_err());
+        assert!(cs.constrain_product(Variable::Witness(3).into(), x.into(), x.into()).is_err());
         let r = cs.reciprocal(1)?;
-        let mut r2 = r.clone();
-        r2.add(vec![Variable::Witness(9).into()]);
-        assert!(cs.finish_reciprocal(r2).is_err());
+        assert!(r.add(cs, &[Variable::Witness(9).into()]).is_err());
         cs.constrain(x - 0u64);
         Ok(())
     };
     let gv = |cs: &mut Verifier<&mut Transcript>, x: Variable| {
         assert!(cs.table(vec![vec![]]).is_err());
-        assert!(cs.product(Variable::Witness(3).into(), x.into(), x.into()).is_err());
+        assert!(cs.constrain_product(Variable::Witness(3).into(), x.into(), x.into()).is_err());
         let r = cs.reciprocal(1)?;
-        let mut r2 = r.clone();
-        r2.add(vec![Variable::Witness(9).into()]);
-        assert!(cs.finish_reciprocal(r2).is_err());
+        assert!(r.add(cs, &[Variable::Witness(9).into()]).is_err());
         cs.constrain(x - 0u64);
         Ok(())
     };

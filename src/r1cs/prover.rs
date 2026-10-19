@@ -939,12 +939,9 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
         };
         let transcript = self.transcript.borrow_mut();
         BpppTranscript::domain_sep(transcript, b"bppp-r1cs v2");
-        let proof = if super::cheats::unchecked() {
-            reciprocal::prove_unsatisfied(&c, &gens, &V, &w, transcript, &mut rng)
-        } else {
-            reciprocal::prove(&c, &gens, &V, &w, transcript, &mut rng)
-        }
-        .map_err(R1CSError::from);
+        // the testing feature `cheats` proves unsatisfied circuits (the proof must not verify)
+        let require_satisfied = !super::cheats::unchecked();
+        let proof = reciprocal::prove_checked(&c, &gens, &V, &w, transcript, &mut rng, require_satisfied).map_err(R1CSError::from);
         clear(&mut w);
         let n_lin = c.n_lin;
         Ok((R1CSProof(ProofKind::Bppp(BpppProof { n_mm, n_lin, proof: proof? })), self.transcript))

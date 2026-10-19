@@ -83,34 +83,6 @@ where
     b.finalize(rng)
 }
 
-/// A `&mut dyn` RNG that is `RngCore + CryptoRng` (to pass either the caller's RNG or the
-/// derived one to the same code).
-pub(crate) struct DynRng<'a>(pub(crate) &'a mut dyn rand_core::CryptoRngCore);
-
-impl rand_core::RngCore for DynRng<'_> {
-    fn next_u32(&mut self) -> u32 {
-        self.0.next_u32()
-    }
-    fn next_u64(&mut self) -> u64 {
-        self.0.next_u64()
-    }
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
-        self.0.fill_bytes(dest)
-    }
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
-        self.0.try_fill_bytes(dest)
-    }
-}
-
-impl rand_core::CryptoRng for DynRng<'_> {}
-
-/// Where the prover's randomness comes from: the caller's RNG as is (the inner functions the
-/// vectors use), or derived from the transcript once the statement is absorbed (public provers).
-pub(crate) enum Randomness<'a, R> {
-    Given(&'a mut R),
-    Derived(&'a mut R),
-}
-
 /// Test transcript: hands out the given challenges in order and records every absorbed
 /// message as `(label, bytes)`, so tests check the values (against the reference), the
 /// order and what each challenge binds.

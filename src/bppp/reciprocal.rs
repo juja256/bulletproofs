@@ -20,7 +20,7 @@ use sha3::{Digest, Sha3_256};
 use super::circuit::{self, ArithmeticCircuit, CircuitProof, CircuitWitness, Slot};
 use super::gens::BpppGens;
 use super::sparse::SparseMatrix;
-use super::transcript::{BpppTranscript, DynRng, Randomness};
+use super::transcript::BpppTranscript;
 use crate::errors::ProofError;
 
 /// A public pole (spec §4.1): a polynomial in the challenge `eta`, `t(eta) = sum_e t_e eta^e`;
@@ -557,6 +557,11 @@ impl ReciprocalCircuit {
         self.poles_at(w, eta)
     }
 
+    /// The late values given in the witness itself (the one-phase prover).
+    fn given_late(&self, w: &ReciprocalWitness) -> LateWitness {
+        LateWitness { w_r: w.w_r.clone(), w_o_late: self.late_elements(&w.w_o) }
+    }
+
     /// The `LinR` elements of `w_o`, in order.
     fn late_elements(&self, w_o: &[Scalar]) -> Vec<Scalar> {
         w_o.iter().zip(&self.partition).filter(|(_, (s, _))| *s == Slot::LinR).map(|(x, _)| *x).collect()
@@ -573,7 +578,8 @@ impl ReciprocalCircuit {
     }
 }
 
-fn absorb_statement<T: BpppTranscript>(t: &mut T, c: &ReciprocalCircuit, gens: &BpppGens, V: &[CompressedRistretto]) {
+/// Absorb the statement (spec §4.4); returns the circuit digest.
+fn absorb_statement<T: BpppTranscript>(t: &mut T, c: &ReciprocalCircuit, gens: &BpppGens, V: &[CompressedRistretto]) -> [u8; 32] {
     let v2 = c.uses_eta();
     t.domain_sep(if v2 { b"bppp-reciprocal v2" } else { b"bppp-reciprocal v1" });
     let labels: [&'static [u8]; 10] =
@@ -586,10 +592,12 @@ fn absorb_statement<T: BpppTranscript>(t: &mut T, c: &ReciprocalCircuit, gens: &
     }
     t.append_point(b"G", &gens.g.compress());
     t.append_point(b"H_0", &gens.h[0].compress());
-    t.append_message(b"circuit", &c.digest());
+    let digest = c.digest();
+    t.append_message(b"circuit", &digest);
     for v in V {
         t.append_point(b"V", v);
     }
+    digest
 }
 
 fn check_gens(c: &ReciprocalCircuit, gens: &BpppGens) -> Result<(), ProofError> {
@@ -611,50 +619,39 @@ pub fn prove<T: BpppTranscript, R: RngCore + CryptoRng>(
     transcript: &mut T,
     rng: &mut R,
 ) -> Result<CircuitProof, ProofError> {
-    let fixed = |_: Scalar, _: &[Scalar]| Ok(LateWitness { w_r: w.w_r.clone(), w_o_late: c.late_elements(&w.w_o) });
-    prove_with(c, gens, V, w, fixed, transcript, Randomness::Derived(rng), true)
+    prove_checked(c, gens, V, w, transcript, rng, true)
 }
 
-/// [`prove`] without the refusal of an unsatisfied witness (feature `cheats`: the proof must
-/// not verify).
-#[cfg(feature = "cheats")]
-pub(crate) fn prove_unsatisfied<T: BpppTranscript, R: RngCore + CryptoRng>(
+/// [`prove`]; with `require_satisfied = false` an unsatisfied witness is proven instead of
+/// refused (feature `cheats` of the R1CS front end: such a proof must not verify).
+pub(crate) fn prove_checked<T: BpppTranscript, R: RngCore + CryptoRng>(
     c: &ReciprocalCircuit,
     gens: &BpppGens,
     V: &[CompressedRistretto],
     w: &ReciprocalWitness,
     transcript: &mut T,
     rng: &mut R,
+    require_satisfied: bool,
 ) -> Result<CircuitProof, ProofError> {
-    let fixed = |_: Scalar, _: &[Scalar]| Ok(LateWitness { w_r: w.w_r.clone(), w_o_late: c.late_elements(&w.w_o) });
-    prove_with(c, gens, V, w, fixed, transcript, Randomness::Derived(rng), false)
-}
-
-#[cfg(not(feature = "cheats"))]
-pub(crate) fn prove_unsatisfied<T: BpppTranscript, R: RngCore + CryptoRng>(
-    c: &ReciprocalCircuit,
-    gens: &BpppGens,
-    V: &[CompressedRistretto],
-    w: &ReciprocalWitness,
-    transcript: &mut T,
-    rng: &mut R,
-) -> Result<CircuitProof, ProofError> {
-    prove(c, gens, V, w, transcript, rng)
+    prove_with(c, gens, V, w, |_, _| Ok(c.given_late(w)), transcript, |t, d| rekeyed(t, c, d, w, rng), require_satisfied)
 }
 
 /// The prover's RNG from the transcript, the digest and the initial witness (spec §1; the late
 /// values are not known to the two-phase prover before `alpha`, and both provers must agree).
-fn rekeyed<T: BpppTranscript, R: RngCore + CryptoRng>(t: &T, c: &ReciprocalCircuit, w: &ReciprocalWitness, rng: &mut R) -> merlin::TranscriptRng {
+fn rekeyed<T: BpppTranscript, R: RngCore + CryptoRng>(t: &T, c: &ReciprocalCircuit, digest: &[u8; 32], w: &ReciprocalWitness, rng: &mut R) -> merlin::TranscriptRng {
     let early_o = w.w_o.iter().zip(&c.partition).filter(|(_, (s, _))| *s != Slot::LinR).map(|(x, _)| x);
     // tuple poles are not known before eta: hashed as 0 (spec §1)
     let mut w_d = w.w_d.clone();
     c.tuples.iter().for_each(|tp| w_d[tp.pole] = Scalar::ZERO);
     let secrets = w_d.iter().chain(&w.w_l).chain(early_o).chain(w.v.iter().flatten()).chain(&w.s);
-    let r = super::transcript::prover_rng(t, b"reciprocal", &c.digest(), secrets, rng);
+    let r = super::transcript::prover_rng(t, b"reciprocal", digest, secrets, rng);
     w_d.iter_mut().for_each(clear_on_drop::clear::Clear::clear);
     r
 }
 
+/// The prover with the caller's RNG as is (the reference vectors replay its values), and an
+/// unsatisfied witness proven unless `require_satisfied` (tests).
+#[cfg(test)]
 pub(crate) fn prove_impl<T: BpppTranscript, R: RngCore + CryptoRng>(
     c: &ReciprocalCircuit,
     gens: &BpppGens,
@@ -664,10 +661,7 @@ pub(crate) fn prove_impl<T: BpppTranscript, R: RngCore + CryptoRng>(
     rng: &mut R,
     require_satisfied: bool,
 ) -> Result<CircuitProof, ProofError> {
-    let fixed = |_: Scalar, _: &[Scalar]| {
-        Ok(LateWitness { w_r: w.w_r.clone(), w_o_late: c.late_elements(&w.w_o) })
-    };
-    prove_with(c, gens, V, w, fixed, transcript, Randomness::Given(rng), require_satisfied)
+    prove_with(c, gens, V, w, |_, _| Ok(c.given_late(w)), transcript, |_, _| rng, require_satisfied)
 }
 
 /// The values committed after `alpha` (spec §4.3, two-phase prover): `w_R`, and the elements
@@ -699,24 +693,27 @@ where
     R: RngCore + CryptoRng,
     F: FnOnce(Scalar, &[Scalar]) -> Result<LateWitness, ProofError>,
 {
-    prove_with(c, gens, V, w, late, transcript, Randomness::Derived(rng), true)
+    prove_with(c, gens, V, w, late, transcript, |t, d| rekeyed(t, c, d, w, rng), true)
 }
 
+/// The prover: `late` gives the values committed after `alpha`, `rng_for(transcript, digest)`
+/// the randomness once the statement is absorbed.
 #[allow(clippy::too_many_arguments)]
-fn prove_with<T, R, F>(
+fn prove_with<T, R, F, G>(
     c: &ReciprocalCircuit,
     gens: &BpppGens,
     V: &[CompressedRistretto],
     w: &ReciprocalWitness,
     late: F,
     transcript: &mut T,
-    randomness: Randomness<R>,
+    rng_for: G,
     require_satisfied: bool,
 ) -> Result<CircuitProof, ProofError>
 where
     T: BpppTranscript,
     R: RngCore + CryptoRng,
     F: FnOnce(Scalar, &[Scalar]) -> Result<LateWitness, ProofError>,
+    G: FnOnce(&T, &[u8; 32]) -> R,
 {
     check_gens(c, gens)?;
     c.check()?;
@@ -724,16 +721,8 @@ where
     if V.len() != c.k {
         return Err(ProofError::FormatError);
     }
-    absorb_statement(transcript, c, gens, V);
-    let mut derived;
-    let rng: &mut dyn rand_core::CryptoRngCore = match randomness {
-        Randomness::Given(r) => r,
-        Randomness::Derived(r) => {
-            derived = rekeyed(&*transcript, c, w, r);
-            &mut derived
-        }
-    };
-    let rng = &mut DynRng(rng);
+    let digest = absorb_statement(transcript, c, gens, V);
+    let rng = &mut rng_for(&*transcript, &digest);
     let o = circuit::commit_o(gens, c.n_lin, c.n_mm(), &c.partition, &w.w_o, rng);
     let (eta, w) = if c.uses_eta() {
         transcript.append_point(b"C_O", &o.C_O);
@@ -810,7 +799,7 @@ pub(crate) fn terms<T: BpppTranscript>(
     let alpha = transcript.challenge(b"alpha");
     let compiled = c.compile(eta, alpha)?;
     transcript.append_point(b"C_R", &proof.C_R);
-    proof.inner_terms(&compiled, gens, V, transcript)
+    proof.inner_terms(&compiled, V, transcript)
 }
 
 /// Parse a proof for the reciprocal circuit `c` (spec §4.6).

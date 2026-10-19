@@ -95,10 +95,6 @@ fn wip(a: &[Scalar], b: &[Scalar], mu: Scalar) -> Scalar {
     acc
 }
 
-fn split<T: Copy>(v: &[T]) -> (Vec<T>, Vec<T>) {
-    (v.iter().step_by(2).copied().collect(), v.iter().skip(1).step_by(2).copied().collect())
-}
-
 /// `e*[v]_0 + g*[v]_1`, zero-padded on the right: length `ceil(|v|/2)`.
 fn fold(v: &[Scalar], e: Scalar, g: Scalar) -> Vec<Scalar> {
     util::map_index((v.len() + 1) / 2, |i| {

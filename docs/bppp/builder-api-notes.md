@@ -1,6 +1,6 @@
 # Circuit builder: API and proof-format decisions (for discussion)
 
-Written at the end of phase 7, before the discussion the owner asked for: why the builder
+Written at the end of phase 7, before the discussion the owner asked for (answers in §4): why the builder
 (phase 6) looks as it does, what it costs, and the alternatives, with an eye on bpvm (phase 8).
 Nothing here is settled; the format changes of phase 7 that touch the builder were held back
 for this discussion.
@@ -87,9 +87,20 @@ component without a recorded bound. The rule therefore costs bpvm a real part of
 which makes option F (challenge compression in BP++: C_O, gamma, C_L, alpha, C_R; same proof
 size; components in C_L copied into C_O slots) the stronger candidate.
 
-## 4. Questions for the owner
+## 4. Questions for the owner — and the answers (2026-10-19)
 
-1. Builder on `Prover`/`Verifier` (A) or a separate builder type (D)?
-2. One BP++ encoding (B) and/or no dimensions in the encoding (C)?
-3. Bound rule: keep, relax on BP (E), or change the protocol (F)?
+1. Builder on `Prover`/`Verifier` (A) or a separate builder type (D)? **A** (bpvm keeps its
+   arithmetic gadgets; only its lookup layer moves to `table`/`lookup`/`reciprocal`).
+2. One BP++ encoding (B) and/or no dimensions in the encoding (C)? Left to us, the owner prefers
+   one proof: **B** (after F: §6 becomes the case `N_p = 0` of §7.6, one tag, no implicit builder
+   mode); **not C** (dimensions in the header let `from_bytes` reject malformed proofs early,
+   16 bytes).
+3. Bound rule: keep, relax on BP (E), or change the protocol (F)? **F**, implemented in phase 7b
+   (spec §4.1–4.7, §7.3): tuple poles compressed with a challenge `eta` after `C_O`; the bound
+   rule and the widths are gone (`table(rows)`, `reciprocal(m)`); bpvm's `bitop` costs 8 lookups
+   per 32-bit operation again (test `xor32_with_unbounded_nibbles`).
 4. Then: drop the empty `C_O` (errata 19 says it stays HVZK) and the builder overflow layout?
+   Open. Both are compatible with F if done after it: a circuit that uses `eta` always has a
+   non-empty `C_O` (the tuple components), so dropping an empty `C_O` touches v1 circuits only;
+   an overflow layout may move witnesses into `C_L` only if they are not tuple components
+   (multiplicities and numerators may move, components must stay in `C_O`).

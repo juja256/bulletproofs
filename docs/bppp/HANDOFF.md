@@ -359,4 +359,19 @@ DESIGN (milestone M6). bpvm depends on this fork by git revision.
   `cheats.rs`, merging overlapping integration tests, `msm_*` chunk parameter, the verifier's
   second compilation in `ReciprocalCircuit::check` (performance), panics of `SparseMatrix` on
   reachable input. Tests: 162 (bppp parallel yoloproofs cheats), 157, 74, 34.
+- 2026-10-20 — BP++ verifier parallelised (owner: the multi-threaded BP++ verifier was slower
+  than BP's). Profiling (macOS `sample`) and fixes, proofs unchanged: `ReciprocalCircuit::check`
+  checks the compiled shape from the dimensions (`circuit::Shape`, shared with
+  `ArithmeticCircuit::check`) instead of compiling a second time — test
+  `shape_check_agrees_with_compiling` against the old definition (`check_by_compiling`) on
+  every vector case and boundary mutations; pole factors by one batch inversion; parallel
+  `add_transposed` (column ranges, no extra memory), `VecPoly::eval`, weights, tuple rows of
+  `compile` and the R1CS lowering (chunks in bounded waves, `util::map_in_order`);
+  `BufHasher` for digests; `sha3` feature `asm` (ARMv8 SHA3 instructions, runtime
+  detection). Review (most capable model): 0 Critical, 0 Important; minors fixed (version floors
+  sha3 0.10.7 / keccak 0.1.6, stronger shape test, debug assertions). bpvm with `parallel`:
+  verify sha256 0.71 → 0.39 s (BP 0.43), ec_mini 2.20 → 1.15 s (BP 1.06), ec_add 32.0 → 15.6 s
+  (BP 16.4); prove ec_add 159 → 132 s (BP 166). Heap peaks unchanged (`mem_profile`). The
+  remaining sequential part is the circuit digest (SHA3, before any challenge; parallel tree
+  hashing would change the format). Tests: 165, 160, 74, 34.
 

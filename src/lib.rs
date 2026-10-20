@@ -24,6 +24,7 @@ mod notes {
     mod r1cs_proof {}
 }
 
+pub mod curve;
 mod errors;
 mod generators;
 mod inner_product_proof;
@@ -31,6 +32,7 @@ mod linear_proof;
 mod range_proof;
 mod transcript;
 
+pub use crate::curve::{Curve, Ristretto};
 pub use crate::errors::ProofError;
 pub use crate::generators::{BulletproofGens, BulletproofGensShare, PedersenGens};
 pub use crate::linear_proof::LinearProof;

@@ -15,11 +15,10 @@ use alloc::vec::Vec;
 use curve25519_dalek::ristretto::CompressedRistretto;
 use curve25519_dalek::scalar::Scalar;
 use rand_core::{CryptoRng, RngCore};
-use sha3::{Digest, Sha3_256};
 
 use super::circuit::{self, ArithmeticCircuit, CircuitProof, CircuitWitness, Slot};
 use super::gens::BpppGens;
-use super::sparse::SparseMatrix;
+use super::sparse::{BufHasher, SparseMatrix};
 use super::transcript::BpppTranscript;
 use crate::errors::ProofError;
 use crate::{BulletproofGens, PedersenGens};
@@ -369,18 +368,24 @@ impl ReciprocalCircuit {
         // check() has made the widths of w_m and w_l n_w
         let mut w_l = self.w_l.clone();
         let mut a_l = self.a_l.clone();
-        // w_D,i - sum_j eta^j x_ij = 0
-        for tp in &self.tuples {
-            let mut terms = vec![(tp.pole, Scalar::ONE)];
-            let mut a = Scalar::ZERO;
-            let mut e = Scalar::ONE;
-            for x in &tp.components {
-                terms.extend(x.terms.iter().map(|(c, v)| (*c, -e * v)));
-                a -= e * x.constant;
-                e *= eta;
+        // w_D,i - sum_j eta^j x_ij = 0, built in parallel chunks (the same rows, in order)
+        let m_max = self.tuples.iter().map(|tp| tp.components.len()).max().unwrap_or(0);
+        let pows: Vec<Scalar> = core::iter::successors(Some(Scalar::ONE), |e| Some(e * eta)).take(m_max).collect();
+        const CHUNK: usize = 4096;
+        let n_t = self.tuples.len();
+        let chunks = crate::util::map_index((n_t + CHUNK - 1) / CHUNK, |k| {
+            let mut m = SparseMatrix::new(n_w);
+            let mut a: Vec<Scalar> = Vec::with_capacity(CHUNK);
+            for tp in &self.tuples[k * CHUNK..((k + 1) * CHUNK).min(n_t)] {
+                let components = || tp.components.iter().zip(&pows);
+                m.push_row(core::iter::once((tp.pole, Scalar::ONE)).chain(components().flat_map(|(x, e)| x.terms.iter().map(move |(c, v)| (*c, -e * v)))));
+                a.push(components().map(|(x, e)| -(e * x.constant)).sum());
             }
-            w_l.push_row(terms);
-            a_l.push(a);
+            (m, a)
+        });
+        for (m, a) in chunks {
+            w_l.extend_rows(&m);
+            a_l.extend(a);
         }
         // the factors of all terms with a pole, in row order (terms, then constants), at once
         let poles = || self.recip.iter().flat_map(|row| row.terms.iter().map(|(_, _, p)| p).chain(row.consts.iter().map(|(_, p)| p)));
@@ -427,7 +432,7 @@ impl ReciprocalCircuit {
     /// The reciprocal circuit digest (spec §4.4).
     pub fn digest(&self) -> [u8; 32] {
         let v2 = self.uses_eta();
-        let mut h = Sha3_256::new();
+        let mut h = BufHasher::new();
         h.update(if v2 { &b"bppp-reciprocal-digest v2"[..] } else { &b"bppp-reciprocal-digest v1"[..] });
         for x in self.dims() {
             h.update(x.to_le_bytes());
@@ -445,7 +450,7 @@ impl ReciprocalCircuit {
         for a in self.a_n.iter().chain(&self.a_m).chain(&self.a_l) {
             h.update(a.as_bytes());
         }
-        let pole = |h: &mut Sha3_256, p: &Option<Pole>| match p {
+        let pole = |h: &mut BufHasher, p: &Option<Pole>| match p {
             None => h.update([0u8]),
             Some(t) => {
                 h.update([1u8]);
@@ -482,7 +487,7 @@ impl ReciprocalCircuit {
                 h.update(x.constant.as_bytes());
             }
         }
-        h.finalize().into()
+        h.finalize()
     }
 
     fn check_witness(&self, w: &ReciprocalWitness) -> Result<(), ProofError> {

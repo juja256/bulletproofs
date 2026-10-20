@@ -10,11 +10,10 @@ use alloc::vec::Vec;
 use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
 use curve25519_dalek::scalar::Scalar;
 use rand_core::{CryptoRng, RngCore};
-use sha3::{Digest, Sha3_256};
 
 use super::gens::{BpppGens, H_FIXED};
 use super::poly::{pow_signed, Poly, VecPoly};
-use super::sparse::SparseMatrix;
+use super::sparse::{BufHasher, SparseMatrix};
 pub(crate) use super::terms::Terms;
 use super::transcript::BpppTranscript;
 use super::wnla::{self, WnlaProof, WnlaStatement};
@@ -120,15 +119,16 @@ fn flag(f: bool) -> Scalar {
 }
 
 fn ip(a: &[Scalar], b: &[Scalar]) -> Scalar {
-    a.iter().zip(b).map(|(x, y)| x * y).sum()
+    let n = a.len().min(b.len());
+    util::inner_product_par(&a[..n], &b[..n])
 }
 
 fn scaled(v: &[Scalar], x: Scalar) -> Vec<Scalar> {
-    v.iter().map(|a| a * x).collect()
+    util::map_index(v.len(), |i| v[i] * x)
 }
 
 fn added(a: &[Scalar], b: &[Scalar]) -> Vec<Scalar> {
-    a.iter().zip(b).map(|(x, y)| x + y).collect()
+    util::map_index(a.len().min(b.len()), |i| a[i] + b[i])
 }
 
 /// The dimensions of an arithmetic circuit that [`ArithmeticCircuit::check`] validates besides
@@ -238,7 +238,7 @@ impl ArithmeticCircuit {
 
     /// The circuit digest absorbed by [`prove`] and [`CircuitProof::verify`] (spec §3.9).
     pub fn digest(&self) -> [u8; 32] {
-        let mut h = Sha3_256::new();
+        let mut h = BufHasher::new();
         h.update(b"bppp-circuit-digest v1");
         for x in self.dims() {
             h.update(x.to_le_bytes());
@@ -252,7 +252,7 @@ impl ArithmeticCircuit {
         for a in self.a_l.iter().chain(&self.a_m) {
             h.update(a.as_bytes());
         }
-        h.finalize().into()
+        h.finalize()
     }
 
     /// Whether `w` satisfies the circuit (and both have the right shape).
@@ -309,8 +309,8 @@ impl Weights {
         let mut y = vec![Scalar::ZERO; 2 * n_m + c.n_o];
         c.w_l.add_transposed(&lam, &mut y);
         c.w_m.add_transposed(&scaled(&mu_vec, -Scalar::ONE), &mut y);
-        let c_nl = (0..n_m).map(|t| y[t] * mu_inv_vec[t]).collect();
-        let c_nr = (0..n_m).map(|t| y[n_m + t] * mu_inv_vec[t]).collect();
+        let c_nl = util::map_index(n_m, |t| y[t] * mu_inv_vec[t]);
+        let c_nr = util::map_index(n_m, |t| y[n_m + t] * mu_inv_vec[t]);
         let mut c_no = vec![Scalar::ZERO; n_m];
         let (mut c_lo, mut c_ll, mut c_lr) = (vec![Scalar::ZERO; n_lin], vec![Scalar::ZERO; n_lin], vec![Scalar::ZERO; n_lin]);
         for (i, &(slot, t)) in c.partition.iter().enumerate() {

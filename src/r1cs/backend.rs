@@ -268,22 +268,36 @@ mod bppp_backend {
             w_l.push_row(vec![(col_o(n_r + j), -Scalar::ONE)]);
             a_l.push(Scalar::ZERO);
         }
-        for q in 0..store.len() {
+        // the R1CS constraints, lowered in parallel chunks (the same rows, in order)
+        const CHUNK: usize = 1 << 12;
+        let n_q = store.len();
+        let chunks = crate::util::map_index((n_q + CHUNK - 1) / CHUNK, |k| -> Result<(SparseMatrix, Vec<Scalar>), R1CSError> {
+            let mut m = SparseMatrix::new(n_cols);
+            let mut constants = Vec::with_capacity(CHUNK);
             let mut terms = Vec::new();
-            let mut constant = Scalar::ZERO;
-            for (x, c) in store.row(q) {
-                match (x, values) {
-                    (Variable::One(), _) => constant += c,
-                    (_, v) => {
-                        terms.push((col(x)?, c));
-                        if let Some(v) = v {
-                            constant -= c * v.var(x);
+            for q in k * CHUNK..((k + 1) * CHUNK).min(n_q) {
+                terms.clear();
+                let mut constant = Scalar::ZERO;
+                for (x, c) in store.row(q) {
+                    match (x, values) {
+                        (Variable::One(), _) => constant += c,
+                        (_, v) => {
+                            terms.push((col(x)?, c));
+                            if let Some(v) = v {
+                                constant -= c * v.var(x);
+                            }
                         }
                     }
                 }
+                m.push_row(terms.iter().copied());
+                constants.push(constant);
             }
-            w_l.push_row(terms);
-            a_l.push(constant);
+            Ok((m, constants))
+        });
+        for chunk in chunks {
+            let (m, constants) = chunk?;
+            w_l.extend_rows(&m);
+            a_l.extend(constants);
         }
         let neg = -Scalar::ONE;
         let push_eq = |w_l: &mut SparseMatrix, a_l: &mut Vec<Scalar>, first: usize, lc: &LinearCombination| -> Result<(), R1CSError> {

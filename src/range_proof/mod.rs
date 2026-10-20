@@ -13,14 +13,13 @@ use core::iter;
 use core::marker::PhantomData;
 
 use ff::Field as _;
-use merlin::Transcript;
 
 use crate::curve::{Curve, Field, PointEncoding, Ristretto};
 
 use crate::errors::ProofError;
 use crate::generators::{BulletproofGens, PedersenGens};
 use crate::inner_product_proof::InnerProductProof;
-use crate::transcript::TranscriptProtocol;
+use crate::transcript::{TranscriptBackend, TranscriptProtocol};
 use crate::util;
 
 use rand_core::{CryptoRng, RngCore};
@@ -133,10 +132,10 @@ impl<C: Curve> RangeProof<C> {
     /// );
     /// # }
     /// ```
-    pub fn prove_single_with_rng<T: RngCore + CryptoRng>(
+    pub fn prove_single_with_rng<T: RngCore + CryptoRng, X: TranscriptBackend>(
         bp_gens: &BulletproofGens<C>,
         pc_gens: &PedersenGens<C>,
-        transcript: &mut Transcript,
+        transcript: &mut X,
         v: u64,
         v_blinding: &C::Scalar,
         n: usize,
@@ -159,10 +158,10 @@ impl<C: Curve> RangeProof<C> {
     /// This is a convenience wrapper around [`RangeProof::prove_single_with_rng`],
     /// passing in a threadsafe RNG.
     #[cfg(feature = "std")]
-    pub fn prove_single(
+    pub fn prove_single<X: TranscriptBackend>(
         bp_gens: &BulletproofGens<C>,
         pc_gens: &PedersenGens<C>,
-        transcript: &mut Transcript,
+        transcript: &mut X,
         v: u64,
         v_blinding: &C::Scalar,
         n: usize,
@@ -232,10 +231,10 @@ impl<C: Curve> RangeProof<C> {
     /// );
     /// # }
     /// ```
-    pub fn prove_multiple_with_rng<T: RngCore + CryptoRng>(
+    pub fn prove_multiple_with_rng<T: RngCore + CryptoRng, X: TranscriptBackend>(
         bp_gens: &BulletproofGens<C>,
         pc_gens: &PedersenGens<C>,
-        transcript: &mut Transcript,
+        transcript: &mut X,
         values: &[u64],
         blindings: &[C::Scalar],
         n: usize,
@@ -292,10 +291,10 @@ impl<C: Curve> RangeProof<C> {
     /// This is a convenience wrapper around [`RangeProof::prove_multiple_with_rng`],
     /// passing in a threadsafe RNG.
     #[cfg(feature = "std")]
-    pub fn prove_multiple(
+    pub fn prove_multiple<X: TranscriptBackend>(
         bp_gens: &BulletproofGens<C>,
         pc_gens: &PedersenGens<C>,
-        transcript: &mut Transcript,
+        transcript: &mut X,
         values: &[u64],
         blindings: &[C::Scalar],
         n: usize,
@@ -314,11 +313,11 @@ impl<C: Curve> RangeProof<C> {
     /// Verifies a rangeproof for a given value commitment \\(V\\).
     ///
     /// This is a convenience wrapper around `verify_multiple` for the `m=1` case.
-    pub fn verify_single_with_rng<T: RngCore + CryptoRng>(
+    pub fn verify_single_with_rng<T: RngCore + CryptoRng, X: TranscriptBackend>(
         &self,
         bp_gens: &BulletproofGens<C>,
         pc_gens: &PedersenGens<C>,
-        transcript: &mut Transcript,
+        transcript: &mut X,
         V: &C::Compressed,
         n: usize,
         rng: &mut T,
@@ -331,11 +330,11 @@ impl<C: Curve> RangeProof<C> {
     /// This is a convenience wrapper around [`RangeProof::verify_single_with_rng`],
     /// passing in a threadsafe RNG.
     #[cfg(feature = "std")]
-    pub fn verify_single(
+    pub fn verify_single<X: TranscriptBackend>(
         &self,
         bp_gens: &BulletproofGens<C>,
         pc_gens: &PedersenGens<C>,
-        transcript: &mut Transcript,
+        transcript: &mut X,
         V: &C::Compressed,
         n: usize,
     ) -> Result<(), ProofError> {
@@ -343,11 +342,11 @@ impl<C: Curve> RangeProof<C> {
     }
 
     /// Verifies an aggregated rangeproof for the given value commitments.
-    pub fn verify_multiple_with_rng<T: RngCore + CryptoRng>(
+    pub fn verify_multiple_with_rng<T: RngCore + CryptoRng, X: TranscriptBackend>(
         &self,
         bp_gens: &BulletproofGens<C>,
         pc_gens: &PedersenGens<C>,
-        transcript: &mut Transcript,
+        transcript: &mut X,
         value_commitments: &[C::Compressed],
         n: usize,
         rng: &mut T,
@@ -461,11 +460,11 @@ impl<C: Curve> RangeProof<C> {
     /// This is a convenience wrapper around [`RangeProof::verify_multiple_with_rng`],
     /// passing in a threadsafe RNG.
     #[cfg(feature = "std")]
-    pub fn verify_multiple(
+    pub fn verify_multiple<X: TranscriptBackend>(
         &self,
         bp_gens: &BulletproofGens<C>,
         pc_gens: &PedersenGens<C>,
-        transcript: &mut Transcript,
+        transcript: &mut X,
         value_commitments: &[C::Compressed],
         n: usize,
     ) -> Result<(), ProofError> {
@@ -612,6 +611,7 @@ fn delta<F: Field>(n: usize, m: usize, y: &F, z: &F) -> F {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use merlin::Transcript;
     use curve25519_dalek::scalar::Scalar;
 
     use crate::generators::PedersenGens;

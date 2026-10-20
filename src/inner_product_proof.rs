@@ -8,11 +8,10 @@ use alloc::vec::Vec;
 use core::iter;
 
 use ff::Field as _;
-use merlin::Transcript;
 
 use crate::curve::{Curve, Field, PointEncoding, Ristretto};
 use crate::errors::ProofError;
-use crate::transcript::TranscriptProtocol;
+use crate::transcript::{TranscriptBackend, TranscriptProtocol};
 use crate::util;
 
 #[derive(Clone, Debug)]
@@ -60,8 +59,8 @@ impl<C: Curve> InnerProductProof<C> {
     ///
     /// The lengths of the vectors must all be the same, and must all be
     /// either 0 or a power of 2.
-    pub fn create(
-        transcript: &mut Transcript,
+    pub fn create<X: TranscriptBackend>(
+        transcript: &mut X,
         Q: &C::Point,
         G_factors: &[C::Scalar],
         H_factors: &[C::Scalar],
@@ -74,8 +73,8 @@ impl<C: Curve> InnerProductProof<C> {
     }
 
     /// As [`InnerProductProof::create`], but reads the generators from slices.
-    pub fn create_from_slices(
-        transcript: &mut Transcript,
+    pub fn create_from_slices<X: TranscriptBackend>(
+        transcript: &mut X,
         Q: &C::Point,
         G_factors: &[C::Scalar],
         H_factors: &[C::Scalar],
@@ -109,8 +108,8 @@ impl<C: Curve> InnerProductProof<C> {
     /// The folded generators are then materialised once, each as a \\(2^r\\)-term combination,
     /// and the remaining rounds fold as usual. The proof is the same as with folding in every
     /// round; the input generators are not copied and only \\(2n/2^r\\) points are allocated.
-    pub(crate) fn create_with_factor_fns<GF, HF>(
-        transcript: &mut Transcript,
+    pub(crate) fn create_with_factor_fns<GF, HF, X: TranscriptBackend>(
+        transcript: &mut X,
         Q: &C::Point,
         gf: GF,
         hf: HF,
@@ -263,10 +262,10 @@ impl<C: Curve> InnerProductProof<C> {
     /// Computes three vectors of verification scalars \\([u\_{i}^{2}]\\), \\([u\_{i}^{-2}]\\) and \\([s\_{i}]\\) for combined multiscalar multiplication
     /// in a parent protocol. See [inner product protocol notes](index.html#verification-equation) for details.
     /// The verifier must provide the input length \\(n\\) explicitly to avoid unbounded allocation within the inner product proof.
-    pub(crate) fn verification_scalars(
+    pub(crate) fn verification_scalars<X: TranscriptBackend>(
         &self,
         n: usize,
-        transcript: &mut Transcript,
+        transcript: &mut X,
     ) -> Result<(Vec<C::Scalar>, Vec<C::Scalar>, Vec<C::Scalar>), ProofError> {
         let lg_n = self.L_vec.len();
         if lg_n >= 32 {
@@ -338,10 +337,10 @@ impl<C: Curve> InnerProductProof<C> {
     /// method to combine inner product verification with other checks
     /// in a single multiscalar multiplication.
     #[allow(dead_code)]
-    pub fn verify<IG, IH>(
+    pub fn verify<IG, IH, X: TranscriptBackend>(
         &self,
         n: usize,
-        transcript: &mut Transcript,
+        transcript: &mut X,
         G_factors: IG,
         H_factors: IH,
         P: &C::Point,
@@ -501,6 +500,7 @@ pub fn inner_product<F: crate::curve::Field>(a: &[F], b: &[F]) -> F {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use merlin::Transcript;
     use curve25519_dalek::ristretto::RistrettoPoint;
     use curve25519_dalek::scalar::Scalar;
     use curve25519_dalek::traits::VartimeMultiscalarMul;

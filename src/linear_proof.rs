@@ -5,13 +5,12 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use ff::Field as _;
-use merlin::Transcript;
 use rand_core::{CryptoRng, RngCore};
 
 use crate::curve::{Curve, Field, PointEncoding, Ristretto};
 use crate::errors::ProofError;
 use crate::inner_product_proof::inner_product;
-use crate::transcript::TranscriptProtocol;
+use crate::transcript::{TranscriptBackend, TranscriptProtocol};
 use crate::util;
 
 /// A linear proof, which is an "lightweight" version of a Bulletproofs inner-product proof
@@ -36,8 +35,8 @@ impl<C: Curve> LinearProof<C> {
     ///
     /// The lengths of the vectors must all be the same, and must all be either 0 or a power of 2.
     /// The proof is created with respect to the bases \\(G\\).
-    pub fn create<T: RngCore + CryptoRng>(
-        transcript: &mut Transcript,
+    pub fn create<T: RngCore + CryptoRng, X: TranscriptBackend>(
+        transcript: &mut X,
         rng: &mut T,
         // Commitment to witness
         commitment: &C::Compressed,
@@ -139,9 +138,9 @@ impl<C: Curve> LinearProof<C> {
         })
     }
 
-    pub fn verify(
+    pub fn verify<X: TranscriptBackend>(
         &self,
-        transcript: &mut Transcript,
+        transcript: &mut X,
         // Commitment to witness
         commitment: &C::Compressed,
         // Generator vector
@@ -209,8 +208,8 @@ impl<C: Curve> LinearProof<C> {
     }
 
     /// Appends the public data to the transcript.
-    fn append_statement(
-        transcript: &mut Transcript,
+    fn append_statement<X: TranscriptBackend>(
+        transcript: &mut X,
         commitment: &C::Compressed,
         b_vec: &[C::Scalar],
         G: &[C::Point],
@@ -235,10 +234,10 @@ impl<C: Curve> LinearProof<C> {
     /// Also computes \\(b_0\\) which is the base case for public vector \\(b\\).
     ///
     /// The verifier must provide the input length \\(n\\) explicitly to avoid unbounded allocation.
-    pub(crate) fn verification_scalars(
+    pub(crate) fn verification_scalars<X: TranscriptBackend>(
         &self,
         n: usize,
-        transcript: &mut Transcript,
+        transcript: &mut X,
         mut b_vec: Vec<C::Scalar>,
     ) -> Result<(Vec<C::Scalar>, Vec<C::Scalar>, C::Scalar), ProofError> {
         let lg_n = self.L_vec.len();
@@ -388,6 +387,7 @@ impl<C: Curve> LinearProof<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use merlin::Transcript;
     use core::iter;
     use curve25519_dalek::ristretto::RistrettoPoint;
     use curve25519_dalek::scalar::Scalar;

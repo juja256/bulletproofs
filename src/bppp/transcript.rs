@@ -3,8 +3,9 @@
 use merlin::Transcript;
 
 use crate::curve::{Curve, Field, PointEncoding};
+use crate::transcript::TranscriptBackend;
 
-/// What the BP++ protocols need from a transcript. `merlin::Transcript` in production; the
+/// What the BP++ protocols need from a transcript: every [`TranscriptBackend`] in production; the
 /// test-vector tests use a replaying transcript (fixed challenges, recorded messages).
 pub trait BpppTranscript {
     /// Absorb a domain separator.
@@ -37,27 +38,27 @@ pub trait BpppTranscript {
     }
 }
 
-impl BpppTranscript for Transcript {
+impl<T: TranscriptBackend> BpppTranscript for T {
     fn domain_sep(&mut self, label: &'static [u8]) {
-        Transcript::append_message(self, b"dom-sep", label);
+        TranscriptBackend::append_message(self, b"dom-sep", label);
     }
 
     fn append_u64(&mut self, label: &'static [u8], x: u64) {
-        Transcript::append_u64(self, label, x);
+        TranscriptBackend::append_u64(self, label, x);
     }
 
     fn append_message(&mut self, label: &'static [u8], m: &[u8]) {
-        Transcript::append_message(self, label, m);
+        TranscriptBackend::append_message(self, label, m);
     }
 
     fn challenge<S: Field>(&mut self, label: &'static [u8]) -> S {
         let mut buf = [0u8; 64];
-        self.challenge_bytes(label, &mut buf);
+        TranscriptBackend::challenge_bytes(self, label, &mut buf);
         S::from_wide(&buf)
     }
 
     fn rng_builder(&self) -> merlin::TranscriptRngBuilder {
-        self.build_rng()
+        TranscriptBackend::build_rng(self)
     }
 }
 

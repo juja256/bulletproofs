@@ -60,7 +60,10 @@ pub(crate) fn msm(s: &[Scalar], p: &[ProjectivePoint]) -> ProjectivePoint {
     assert_eq!(s.len(), p.len());
     let n = s.len();
     if n < NAIVE_MAX {
-        return s.iter().zip(p).map(|(s, p)| p * s).sum();
+        // k256's Straus with GLV: the doublings shared by the few terms
+        use k256::elliptic_curve::ops::LinearCombinationExt;
+        let pairs: Vec<(ProjectivePoint, Scalar)> = p.iter().copied().zip(s.iter().copied()).collect();
+        return ProjectivePoint::lincomb_ext(&pairs[..]);
     }
     msm_window(s, p, window(n))
 }

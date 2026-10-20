@@ -180,6 +180,61 @@ random given the transcript; same proofs, faster proving; constant time is the d
 `cheats` is for tests only: `r1cs::cheats::with_unchecked_prover` makes the prover skip its
 own checks, so that a soundness test can check that the verifier rejects the result.
 
+The `secp256k1` feature (this fork) adds the curve secp256k1 (see [Curves](#curves)).
+
+## Curves
+
+Every proof of the crate (range, linear, aggregated range proofs, R1CS and the circuit
+builder on both backends, all of Bulletproofs++) runs over **ristretto255** (the default,
+byte-identical to upstream) or, with the `secp256k1` feature, over **secp256k1** (on
+[k256](https://crates.io/crates/k256)). The curve is a type parameter that defaults to
+ristretto255 and is inferred from the generators:
+
+```rust,ignore
+use bulletproofs::secp256k1::{BulletproofGens, PedersenGens, RangeProof};
+
+let pc_gens = PedersenGens::for_curve();          // B = H of secp256k1-zkp, B_blinding = G
+let bp_gens = BulletproofGens::for_curve(64, 1);
+let (proof, committed) = RangeProof::prove_single(&bp_gens, &pc_gens, &mut transcript, v, &blinding, 64)?;
+```
+
+- `bulletproofs::secp256k1` names the types over secp256k1 (`RangeProof`, `r1cs::Prover`,
+  `bppp::RangeProof`, ...); generically, `RangeProof<C>`, `Prover<'g, T, C>`,
+  `bppp::CircuitProof<C>` with `C: curve::Curve`.
+- `new` and `default` constructors are the ristretto255 ones; `for_curve` is generic.
+  `Verifier::new` is ristretto255, `Verifier::<_, C>::for_curve` any curve.
+- Encodings on secp256k1: points are SEC1 compressed (33 bytes, the identity 33 zero bytes),
+  scalars 32 bytes big-endian. A proof of one curve does not parse as the other, and every
+  transcript of a curve other than ristretto255 absorbs the curve's name.
+- Secret scalars go through k256's constant-time multiscalar multiplication (`lincomb`, GLV);
+  public ones through a variable-time Pippenger with batch-affine bucket sums.
+- Gadgets for both curves: `fn g<F: Field, CS: CircuitBuilder<F>>` (see
+  [Writing gadgets for both backends](#writing-gadgets-for-both-backends)).
+
+Proof sizes and times on one core of an Apple M4 Pro
+(`cargo run --release --example curves_table --features "yoloproofs bppp secp256k1"`; R1CS:
+a chain of multiplications):
+
+| curve | proof | size | prove | verify |
+|---|---|---|---|---|
+| ristretto255 | range 64 bits, BP | 672 B | 4.29 ms | 571 µs |
+| ristretto255 | range 64 bits, BP++ | 416 B | 2.09 ms | 313 µs |
+| ristretto255 | R1CS 2^10, bp | 1057 B | 69.16 ms | 5.88 ms |
+| ristretto255 | R1CS 2^14, bp | 1313 B | 1.02 s | 73.20 ms |
+| ristretto255 | R1CS 2^10, bppp | 817 B | 68.73 ms | 4.14 ms |
+| ristretto255 | R1CS 2^14, bppp | 1073 B | 1.08 s | 53.26 ms |
+| secp256k1 | range 64 bits, BP | 688 B | 14.50 ms | 1.55 ms |
+| secp256k1 | range 64 bits, BP++ | 426 B | 3.08 ms | 572 µs |
+| secp256k1 | R1CS 2^10, bp | 1085 B | 151.67 ms | 9.83 ms |
+| secp256k1 | R1CS 2^14, bp | 1349 B | 2.18 s | 83.23 ms |
+| secp256k1 | R1CS 2^10, bppp | 837 B | 127.61 ms | 5.78 ms |
+| secp256k1 | R1CS 2^14, bppp | 1101 B | 2.00 s | 51.09 ms |
+
+Proving on secp256k1 is 1.5–3.5 times slower (most for the small BP range proof, about twice
+for circuits): k256's constant-time multiscalar multiplication costs 12.7 µs per term against
+7.1 for curve25519-dalek (2^14 terms). Verification is closer (variable time: 2.3 against
+1.8 µs per term at 2^14, 1.8 against 1.8 at 2^17; small multiplications are slower).
+
 ### Prover and verifier optimisations in this fork
 
 Compared to upstream, the R1CS prover needs about 3x less memory and is faster, the

@@ -304,6 +304,9 @@ fn sum_of_powers_slow<F: Field>(x: &F, n: usize) -> F {
 
 /// `x` as a field element (`ff` converts only from `u64`).
 pub fn from_u128<F: Field>(x: u128) -> F {
+    if x >> 64 == 0 {
+        return F::from(x as u64);
+    }
     let two64 = F::from(u64::MAX) + F::ONE;
     F::from((x >> 64) as u64) * two64 + F::from(x as u64)
 }

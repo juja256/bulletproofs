@@ -20,8 +20,10 @@ pub trait Field:
     /// The scalar a canonical encoding gives; `None` for a value at least the field order.
     fn from_bytes32(bytes: &[u8; 32]) -> Option<Self>;
     /// Invert every entry in place (Montgomery's trick) and return the inverse of their
-    /// product; the entries must be non-zero. Constant time.
+    /// product; the entries must be non-zero. Constant time; the partial products (secret
+    /// when the entries are) are wiped.
     fn batch_invert(s: &mut [Self]) -> Self {
+        use zeroize::Zeroize;
         let mut acc = Self::ONE;
         let mut prefix = alloc::vec::Vec::with_capacity(s.len());
         for x in s.iter() {
@@ -30,16 +32,24 @@ pub trait Field:
         }
         let all = acc.invert().unwrap_or(Self::ZERO);
         let mut inv = all;
-        for (x, p) in s.iter_mut().zip(prefix).rev() {
+        for (x, p) in s.iter_mut().zip(prefix.iter()).rev() {
             let next = inv * *x;
             *x = inv * p;
             inv = next;
         }
+        prefix.zeroize();
+        acc.zeroize();
+        inv.zeroize();
         all
     }
 }
 
 /// An encoded group element as it appears in proofs and transcripts.
+///
+/// The identity has an encoding: `Self::default()` (all zero bytes). One-phase R1CS proofs send
+/// it for their empty second-phase commitments, and a commitment to zero with a zero blinding
+/// is the identity; places where the identity is not allowed reject it with
+/// [`PointEncoding::is_identity`].
 pub trait PointEncoding:
     Copy + Clone + Debug + PartialEq + Eq + Default + Send + Sync + serde::Serialize + serde::de::DeserializeOwned
 {
@@ -47,7 +57,7 @@ pub trait PointEncoding:
     fn as_bytes(&self) -> &[u8];
     /// `bytes` as an encoding (`None` for the wrong length); no curve check.
     fn from_slice(bytes: &[u8]) -> Option<Self>;
-    /// Whether this is the encoding of the identity (rejected in proofs).
+    /// Whether this is the encoding of the identity, `Self::default()`.
     fn is_identity(&self) -> bool;
 }
 
@@ -64,9 +74,10 @@ pub trait Curve: Copy + Clone + Debug + Default + PartialEq + Eq + Send + Sync +
     /// Length of an encoded point.
     const POINT_BYTES: usize;
 
-    /// The encoding of `p`.
+    /// The encoding of `p`; total: the identity encodes as `Compressed::default()`.
     fn compress(p: &Self::Point) -> Self::Compressed;
-    /// The point `c` encodes; `None` if it encodes no point.
+    /// The point `c` encodes (the identity for `Compressed::default()`); `None` if it encodes
+    /// no point.
     fn decompress(c: &Self::Compressed) -> Option<Self::Point>;
     /// A point from 64 uniformly random bytes (generator derivation).
     fn point_from_uniform(bytes: &[u8; 64]) -> Self::Point;

@@ -62,11 +62,6 @@ impl<F: Field> From<F> for LinearCombination<F> {
     }
 }
 
-impl<F: Field> From<u64> for LinearCombination<F> {
-    fn from(s: u64) -> LinearCombination<F> {
-        LinearCombination { terms: vec![(Variable::One(), F::from(s))] }
-    }
-}
 
 // Arithmetic on variables produces linear combinations: generic over the field when the
 // other operand names it (a linear combination or a field element), over ristretto255's
@@ -139,29 +134,6 @@ impl Sub<Variable> for Variable {
     }
 }
 
-impl Add<u64> for Variable {
-    type Output = LinearCombination<Scalar>;
-
-    fn add(self, other: u64) -> Self::Output {
-        LinearCombination::from(self) + other
-    }
-}
-
-impl Sub<u64> for Variable {
-    type Output = LinearCombination<Scalar>;
-
-    fn sub(self, other: u64) -> Self::Output {
-        LinearCombination::from(self) - other
-    }
-}
-
-impl Mul<u64> for Variable {
-    type Output = LinearCombination<Scalar>;
-
-    fn mul(self, other: u64) -> Self::Output {
-        self * Scalar::from(other)
-    }
-}
 
 impl Neg for Variable {
     type Output = LinearCombination<Scalar>;
@@ -280,10 +252,48 @@ impl<F: Field> Mul<F> for LinearCombination<F> {
     }
 }
 
-impl<F: Field> Mul<u64> for LinearCombination<F> {
-    type Output = Self;
+/// Integer constants of every width, as upstream (`From<S: Into<Scalar>>`): generic for
+/// linear combinations, ristretto255 with a variable on the left.
+macro_rules! integer_constants {
+    ($($t:ty),*) => {$(
+        impl<F: Field> From<$t> for LinearCombination<F> {
+            fn from(s: $t) -> LinearCombination<F> {
+                LinearCombination { terms: vec![(Variable::One(), crate::util::from_u128(s as u128))] }
+            }
+        }
 
-    fn mul(self, other: u64) -> Self::Output {
-        self * F::from(other)
-    }
+        impl<F: Field> Mul<$t> for LinearCombination<F> {
+            type Output = Self;
+
+            fn mul(self, other: $t) -> Self::Output {
+                self * crate::util::from_u128::<F>(other as u128)
+            }
+        }
+
+        impl Add<$t> for Variable {
+            type Output = LinearCombination<Scalar>;
+
+            fn add(self, other: $t) -> Self::Output {
+                LinearCombination::from(self) + other
+            }
+        }
+
+        impl Sub<$t> for Variable {
+            type Output = LinearCombination<Scalar>;
+
+            fn sub(self, other: $t) -> Self::Output {
+                LinearCombination::from(self) - other
+            }
+        }
+
+        impl Mul<$t> for Variable {
+            type Output = LinearCombination<Scalar>;
+
+            fn mul(self, other: $t) -> Self::Output {
+                self * Scalar::from(other)
+            }
+        }
+    )*};
 }
+
+integer_constants!(u8, u16, u32, u64, u128);

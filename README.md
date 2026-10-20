@@ -206,8 +206,10 @@ let (proof, committed) = RangeProof::prove_single(&bp_gens, &pc_gens, &mut trans
 - Encodings on secp256k1: points are SEC1 compressed (33 bytes, the identity 33 zero bytes),
   scalars 32 bytes big-endian. A proof of one curve does not parse as the other, and every
   transcript of a curve other than ristretto255 absorbs the curve's name.
-- Secret scalars go through k256's constant-time multiscalar multiplication (`lincomb`, GLV);
-  public ones through a variable-time Pippenger with batch-affine bucket sums.
+- Commitments to secrets go through k256's constant-time multiscalar multiplication
+  (`lincomb`, GLV); public scalars through a variable-time Pippenger with batch-affine bucket
+  sums. As upstream on ristretto255, the inner-product argument (and the BP++ norm argument
+  with `bppp-vartime`) handles its blinded vectors `l(x)`, `r(x)` in variable time.
 - Gadgets for both curves: `fn g<F: Field, CS: CircuitBuilder<F>>` (see
   [Writing gadgets for both backends](#writing-gadgets-for-both-backends)).
 

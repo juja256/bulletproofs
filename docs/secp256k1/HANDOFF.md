@@ -18,8 +18,8 @@ encodings, range proofs over Elements commitments. Not in scope: MACT for Elemen
 | phase | what | where | state |
 |---|---|---|---|
 | 1 | generic refactoring: `Curve`, `Field`, `PointEncoding`; every protocol generic, ristretto byte-identical | `src/curve/`, `transcript.rs`, `generators.rs`, `util.rs`, `inner_product_proof.rs`, `linear_proof.rs`, `range_proof/`, `bppp/`, `r1cs/` | branch `secp256k1`, commits `706b84a..` + review fixes; reviewed (fable), done |
-| 2 | `Secp256k1` on k256: encodings, CT MSM (k256 `lincomb_ext`), VT Pippenger, all protocols, vectors, facade, README, benches | `src/curve/secp256k1.rs`, `src/curve/pippenger.rs` | next |
-| 3 | Elements: `generator_generate` (SvdW), encodings 0x08/0x09 and 0x0a/0x0b, BP/BP++ range proofs over Elements commitments | `src/curve/elements.rs` *(planned)* | after 2 |
+| 2 | `Secp256k1` on k256: encodings, CT MSM (k256 `lincomb_ext`), VT Pippenger, all protocols, vectors, facade, README, benches | `src/curve/secp256k1.rs`, `src/curve/pippenger.rs`, `tests/curves.rs`, `ref/gen_vectors.py --curve secp256k1`, `src/lib.rs` (`secp256k1`), `examples/curves_table.rs` | commits `91887ce..` + review fixes; reviewed (fable), done |
+| 3 | Elements: `generator_generate` (SvdW), encodings 0x08/0x09 and 0x0a/0x0b, BP/BP++ range proofs over Elements commitments | `src/curve/elements.rs` *(planned)* | next |
 
 The plan (Ukrainian) and the research report live in the owner's knowledge base; the plan's
 tasks are numbered 1.1–3.4 there, Task 1–14 in the ledger.
@@ -73,3 +73,19 @@ tasks are numbered 1.1–3.4 there, Task 1–14 in the ledger.
   `Field::batch_invert` wipes its partial products. For phase 2: secp256k1 encodes the
   identity as 33 zero bytes and back; k256 needs `serde` (and `std` for
   `precomputed-tables`); `[u8; 33]` needs a hand-written serde impl.
+- 2026-10-20 — the fork moved to github.com/juja256/bulletproofs (local `origin`; the old
+  remote is `zero-art`, to be reset to `d27dde0` by the owner).
+- 2026-10-20 — phase 2 done (tasks 6–10): `Secp256k1` on k256 (SEC1 33-byte points, the
+  identity as 33 zero bytes, big-endian scalars, RFC 9380 generators, B = H of
+  secp256k1-zkp); a variable-time Pippenger with batch-affine buckets (2.32 µs/term at 2^14,
+  1.81 at 2^17; dalek 1.83, 1.84); every protocol on secp256k1 with malformed-input tests;
+  BP++ vectors over the secp256k1 order from the reference (`--curve secp256k1`), replayed by
+  generic tests; facade `bulletproofs::secp256k1`; README "Curves" with sizes and times.
+  Proving on secp256k1 is 1.5–3.5x slower (k256 CT MSM 12.7 vs 7.1 µs/term), verifying close.
+- 2026-10-20 — phase 2 review (fable): 0 Critical, 1 Important: k256 0.13's `batch_normalize`
+  panics on identities computed by arithmetic (it compares an unnormalized z with zero), so the
+  Pippenger now passes identities as the constant (`computed_identities_are_inputs`); README
+  says that the inner-product argument works in variable time on blinded vectors. The suite
+  runs the curve tests in debug (k256's magnitude assertions). Deferred: per-protocol tests of
+  the curve label (lengths already separate the curves), one window too many, the VT chunk
+  size of `msm_index`.

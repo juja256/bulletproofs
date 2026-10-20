@@ -184,3 +184,93 @@ mod r1cs {
         assert!(verify(Counting::new(b"r"), Backend::Bp, false, &proof, &V).is_err());
     }
 }
+
+#[cfg(feature = "sha256-transcript")]
+mod sha256 {
+    use super::*;
+    use bulletproofs::curve::{Curve, Field};
+    use bulletproofs::Sha256Transcript;
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+
+    fn hex(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{:02x}", x)).collect()
+    }
+
+    /// Labels are `&'static`; the vectors' labels live for the test.
+    fn leak(s: &str) -> &'static [u8] {
+        Box::leak(unhex(s).into_boxed_slice())
+    }
+
+    fn scalar_hex<C: Curve>(t: &mut Sha256Transcript, label: &'static [u8]) -> String {
+        let mut buf = [0u8; 64];
+        t.challenge_bytes(label, &mut buf);
+        hex(&C::Scalar::from_wide(&buf).to_bytes32())
+    }
+
+    #[test]
+    fn sha256_transcript_matches_the_reference_kats() {
+        let v: serde_json::Value = serde_json::from_str(include_str!("vectors/transcript/sha256.json")).unwrap();
+        let mut checked = 0;
+        for case in v["cases"].as_array().unwrap() {
+            let mut t = Sha256Transcript::new(leak(case["label"].as_str().unwrap()));
+            let expected = case["outputs"].as_array().unwrap();
+            let mut k = 0;
+            for op in case["ops"].as_array().unwrap() {
+                let op = op.as_array().unwrap();
+                let label = || leak(op[1].as_str().unwrap());
+                let got = match op[0].as_str().unwrap() {
+                    "append" => {
+                        t.append_message(label(), &unhex(op[2].as_str().unwrap()));
+                        continue;
+                    }
+                    "u64" => {
+                        t.append_u64(label(), op[2].as_u64().unwrap());
+                        continue;
+                    }
+                    "challenge" => {
+                        let mut d = vec![0u8; op[2].as_u64().unwrap() as usize];
+                        t.challenge_bytes(label(), &mut d);
+                        hex(&d)
+                    }
+                    "scalar_ristretto" => scalar_hex::<Ristretto>(&mut t, label()),
+                    #[cfg(feature = "secp256k1")]
+                    "scalar_secp256k1" => scalar_hex::<bulletproofs::curve::Secp256k1>(&mut t, label()),
+                    #[cfg(not(feature = "secp256k1"))]
+                    "scalar_secp256k1" => {
+                        let mut d = [0u8; 64];
+                        t.challenge_bytes(label(), &mut d);
+                        k += 1;
+                        continue;
+                    }
+                    // the prover's RNG seed is not public; the next challenge checks that
+                    // deriving it leaves the transcript unchanged
+                    "rng_digest" => {
+                        let _ = t.build_rng();
+                        k += 1;
+                        continue;
+                    }
+                    other => panic!("unknown op {}", other),
+                };
+                assert_eq!(got, expected[k].as_str().unwrap(), "case {} output {}", case["name"], k);
+                k += 1;
+                checked += 1;
+            }
+            assert_eq!(k, expected.len());
+        }
+        assert!(checked >= 20);
+    }
+
+    #[test]
+    fn sha256_transcript_clone_replays() {
+        let mut t = Sha256Transcript::new(b"clone");
+        t.append_message(b"a", b"before the clone");
+        let mut u = t.clone();
+        let (mut x, mut y) = ([0u8; 64], [0u8; 64]);
+        t.challenge_bytes(b"c", &mut x);
+        u.challenge_bytes(b"c", &mut y);
+        assert_eq!(x, y);
+    }
+}

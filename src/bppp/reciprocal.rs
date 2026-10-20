@@ -249,6 +249,33 @@ impl ReciprocalCircuit {
     /// Check the shape, the rules of spec §4.1 (numerators and pole terms on initial columns
     /// only) and the shape of the compiled circuit.
     pub fn check(&self) -> Result<(), ProofError> {
+        self.check_rules()?;
+        // the compiled circuit (spec §4.2) has n_p + n_m multiplications, the rows of W_l, one
+        // row per tuple pole and one per reciprocal row, and the matrices checked above
+        let n_l = self.w_l.n_rows().checked_add(self.tuples.len()).and_then(|x| x.checked_add(self.recip.len()));
+        let shape = circuit::Shape {
+            n_m: self.n_mm(),
+            n_o: self.n_o,
+            n_v: self.n_v,
+            n_lin: self.n_lin,
+            k: self.k,
+            n_l: n_l.ok_or(ProofError::FormatError)?,
+            f_l: self.f_l,
+            f_m: self.f_m,
+        };
+        shape.check(&self.partition)
+    }
+
+    /// [`ReciprocalCircuit::check`] by compiling the circuit with dummy coefficients and
+    /// checking the result (the definition the shape check above must agree with).
+    #[cfg(test)]
+    pub(crate) fn check_by_compiling(&self) -> Result<(), ProofError> {
+        self.check_rules()?;
+        self.compile_with(|t: &[Scalar]| Some(vec![Scalar::ONE; t.len()]), Scalar::ONE, Scalar::ONE)?.check()
+    }
+
+    /// The shape of the matrices and the rules of spec §4.1.
+    fn check_rules(&self) -> Result<(), ProofError> {
         let bad = Err(ProofError::FormatError);
         let n_mm = self.n_p.checked_add(self.n_m).ok_or(ProofError::FormatError)?;
         let n_w = n_mm.checked_mul(2).and_then(|x| x.checked_add(self.n_o)).ok_or(ProofError::FormatError)?;
@@ -324,13 +351,14 @@ impl ReciprocalCircuit {
                 return bad;
             }
         }
-        self.compile_with(|_| Some(Scalar::ONE), Scalar::ONE, Scalar::ONE)?.check()
+        Ok(())
     }
 
-    /// The compiled circuit, with `coef(t)` the factor of a term with a pole of value `t`
-    /// (`None` when undefined), `alpha` the coefficient subtracted at the reciprocal columns,
-    /// and `eta` the challenge of the tuple poles and pole polynomials.
-    fn compile_with<F: Fn(Scalar) -> Option<Scalar>>(&self, coef: F, alpha: Scalar, eta: Scalar) -> Result<ArithmeticCircuit, ProofError> {
+    /// The compiled circuit, with `coef(t)` the factors of the terms with poles of values `t`
+    /// (in row order: terms, then constants; `None` when one is undefined), `alpha` the
+    /// coefficient subtracted at the reciprocal columns, and `eta` the challenge of the tuple
+    /// poles and pole polynomials.
+    fn compile_with<F: FnOnce(&[Scalar]) -> Option<Vec<Scalar>>>(&self, coef: F, alpha: Scalar, eta: Scalar) -> Result<ArithmeticCircuit, ProofError> {
         let n_mm = self.n_mm();
         let n_w = 2 * n_mm + self.n_o;
         let mut w_m = SparseMatrix::new(n_w);
@@ -354,20 +382,15 @@ impl ReciprocalCircuit {
             w_l.push_row(terms);
             a_l.push(a);
         }
-        let factor = |pole: &Option<Pole>| match pole {
-            None => Ok(Scalar::ONE),
-            Some(t) => coef(t.eval(eta)).ok_or(ProofError::VerificationError),
-        };
+        // the factors of all terms with a pole, in row order (terms, then constants), at once
+        let poles = || self.recip.iter().flat_map(|row| row.terms.iter().map(|(_, _, p)| p).chain(row.consts.iter().map(|(_, p)| p)));
+        let values: Vec<Scalar> = poles().flatten().map(|t| t.eval(eta)).collect();
+        let mut factors = coef(&values).ok_or(ProofError::VerificationError)?.into_iter();
+        let mut factor = |pole: &Option<Pole>| pole.as_ref().map_or(Scalar::ONE, |_| factors.next().expect("one factor per pole"));
         for row in &self.recip {
-            let mut terms = Vec::with_capacity(row.terms.len());
-            for (c, v, pole) in &row.terms {
-                terms.push((*c, v * factor(pole)?));
-            }
+            let terms: Vec<(usize, Scalar)> = row.terms.iter().map(|(c, v, pole)| (*c, v * factor(pole))).collect();
             w_l.push_row(terms);
-            let mut a = Scalar::ZERO;
-            for (v, pole) in &row.consts {
-                a += v * factor(pole)?;
-            }
+            let a = row.consts.iter().map(|(v, pole)| v * factor(pole)).sum();
             a_l.push(a);
         }
         Ok(ArithmeticCircuit {
@@ -389,18 +412,16 @@ impl ReciprocalCircuit {
     /// The compiled circuit for the challenges `eta` (ignored by a circuit that does not use
     /// it) and `alpha` (spec §4.2); an error if a public pole has `alpha + t(eta) = 0`.
     fn compile(&self, eta: Scalar, alpha: Scalar) -> Result<ArithmeticCircuit, ProofError> {
-        self.compile_with(
-            |t| {
-                let d = alpha + t;
-                if d == Scalar::ZERO {
-                    None
-                } else {
-                    Some(d.invert())
-                }
-            },
-            alpha,
-            eta,
-        )
+        // 1 / (alpha + t) for every pole value t, by one batch inversion (public values)
+        let inverses = |t: &[Scalar]| {
+            let mut d: Vec<Scalar> = t.iter().map(|t| alpha + t).collect();
+            if d.iter().any(|d| *d == Scalar::ZERO) {
+                return None;
+            }
+            Scalar::batch_invert(&mut d);
+            Some(d)
+        };
+        self.compile_with(inverses, alpha, eta)
     }
 
     /// The reciprocal circuit digest (spec §4.4).

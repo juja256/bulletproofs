@@ -20,6 +20,7 @@ encodings, range proofs over Elements commitments. Not in scope: MACT for Elemen
 | 1 | generic refactoring: `Curve`, `Field`, `PointEncoding`; every protocol generic, ristretto byte-identical | `src/curve/`, `transcript.rs`, `generators.rs`, `util.rs`, `inner_product_proof.rs`, `linear_proof.rs`, `range_proof/`, `bppp/`, `r1cs/` | branch `secp256k1`, commits `706b84a..` + review fixes; reviewed (fable), done |
 | 2 | `Secp256k1` on k256: encodings, CT MSM (k256 `lincomb_ext`), VT Pippenger, all protocols, vectors, facade, README, benches | `src/curve/secp256k1.rs`, `src/curve/pippenger.rs`, `tests/curves.rs`, `ref/gen_vectors.py --curve secp256k1`, `src/lib.rs` (`secp256k1`), `examples/curves_table.rs` | commits `91887ce..` + review fixes; reviewed (fable), done |
 | 3 | Elements: `generator_generate` (SvdW), encodings 0x08/0x09 and 0x0a/0x0b, BP/BP++ range proofs over Elements commitments (task 13, BP++ generators à la secp256k1-zkp, skipped by the owner) | `src/elements.rs`, `PedersenGens::with_value_generator`, `tests/elements.rs`, `ref/extract_elements_vectors.py` | commits `e01bff4..` + review fixes; reviewed (fable), done |
+| — | Transcripts: `TranscriptBackend` (every protocol generic over the transcript, Merlin the default), `TranscriptRef` (R1CS), `Sha256Transcript` for Simplicity verifiers | `src/transcript/`, `docs/sha256-transcript.md`, `ref/sha256_transcript.py`, `tests/transcript.rs`, `tests/vectors/transcript/` | branch `sha256-transcript`, commits `8ef3ea7..` |
 
 The plan (Ukrainian) and the research report live in the owner's knowledge base; the plan's
 tasks are numbered 1.1–3.4 there, Task 1–14 in the ledger.
@@ -101,3 +102,12 @@ tasks are numbered 1.1–3.4 there, Task 1–14 in the ledger.
   hash >= p edge case is documented as unspecified and `fe_mod_p` tested. Open for the Simplicity
   design: transcript (SHA-256) and the point encoding it absorbs, binding the value generator in
   BP, generators the Simplicity jets can derive (SvdW / generator_generate) or constants.
+- 2026-10-20 — transcripts (plan: the owner's knowledge base, `research/2026-10-20-sha256-transcript-plan.md`):
+  `TranscriptBackend` (object safe; `Clone` only for the MPC dealer), implemented by
+  `merlin::Transcript` and `Sha256Transcript`; every protocol takes `&mut T`; R1CS holds its
+  transcript through `TranscriptRef`, and `ConstraintSystem::transcript()` leases
+  `&mut dyn TranscriptBackend` (an associated type would have broken `dyn ConstraintSystem`).
+  `Sha256Transcript` (feature `sha256-transcript`, on with `secp256k1`): tagged init block,
+  records `0x41`/`0x43` with le32 lengths, outputs `finalize(copy ‖ le64(i))`; KATs from an
+  independent Python reference; full secp256k1 proofs (BP++ range, R1CS on both backends) with
+  traces checked by Python. All existing bytes unchanged; bpvm passes its 29 tests unchanged.

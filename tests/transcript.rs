@@ -688,3 +688,18 @@ mod full_proofs {
         }
     }
 }
+
+/// The example of README's «Transcripts», through the facade.
+#[cfg(all(feature = "secp256k1", feature = "bppp"))]
+#[test]
+fn readme_transcripts_example() {
+    use bulletproofs::bppp::RangeStatement;
+    use bulletproofs::secp256k1::{bppp, BulletproofGens, PedersenGens, Scalar, Sha256Transcript};
+    let mut rng = ChaCha20Rng::seed_from_u64(15);
+    let (v, blinding) = (42u64, <Scalar as bulletproofs::curve::ff::Field>::random(&mut rng));
+    let st = RangeStatement::new(16, vec![(0, 1 << 64)]).unwrap();
+    let pc_gens = PedersenGens::for_curve();
+    let bp_gens = BulletproofGens::for_curve(st.generators_capacity(), 1);
+    let (proof, commitments) = bppp::RangeProof::prove(&st, &pc_gens, &bp_gens, &[v], &[blinding], &mut Sha256Transcript::new(b"app"), &mut rng).unwrap();
+    proof.verify(&st, &pc_gens, &bp_gens, &commitments, &mut Sha256Transcript::new(b"app")).unwrap();
+}

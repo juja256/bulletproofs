@@ -532,35 +532,46 @@ mod tests {
         }
     }
 
-    #[test]
-    fn matches_reference_vectors() {
-        let file: serde_json::Value =
-            serde_json::from_str(include_str!("../../tests/vectors/bppp/wnla.json")).unwrap();
+    fn reference_vectors<C: Curve>()
+    where
+        C::Scalar: crate::bppp::testutil::TestScalar,
+    {
+        use crate::bppp::testutil::{label_gens, sym_point, vectors};
+        let file = vectors::<C>(
+            include_str!("../../tests/vectors/bppp/wnla.json"),
+            include_str!("../../tests/vectors/bppp/secp256k1/wnla.json"),
+        );
         for case in file["cases"].as_array().unwrap() {
             let a = case["a"].as_u64().unwrap() as usize;
             let b = case["b"].as_u64().unwrap() as usize;
-            let (G, H, N) = (gens("G", 1)[0], gens("H", a), gens("N", b));
-            let c = scs(&case["c"]);
-            let st = WnlaStatement::<Ristretto> { g: &G, h: &H, n: &N, c: &c, rho: sc(&case["rho"]) };
-            let gammas = scs(&case["gammas"]);
-            let (l, n) = (scs(&case["l"]), scs(&case["n"]));
+            let (G, H, N) = (label_gens::<C>("G", 1)[0], label_gens::<C>("H", a), label_gens::<C>("N", b));
+            let c: Vec<C::Scalar> = scs(&case["c"]);
+            let st = WnlaStatement::<C> { g: &G, h: &H, n: &N, c: &c, rho: sc(&case["rho"]) };
+            let gammas: Vec<C::Scalar> = scs(&case["gammas"]);
+            let (l, n): (Vec<C::Scalar>, Vec<C::Scalar>) = (scs(&case["l"]), scs(&case["n"]));
             let proof = prove_unbound(&st, &mut Replay::new(gammas.clone()), l.clone(), n.clone(), false).unwrap();
-            let point = |p: &serde_json::Value| {
-                (G * sc(&p["g"])
-                    + RistrettoPoint::multiscalar_mul(scs(&p["h"]), &H)
-                    + RistrettoPoint::multiscalar_mul(scs(&p["n"]), &N))
-                .compress()
-            };
+            let point = |p: &serde_json::Value| sym_point::<C>(p, &G, &H, &N);
             let rounds = case["rounds"].as_array().unwrap();
             assert_eq!(proof.X.len(), rounds.len(), "case {a}x{b}");
             for (r, round) in rounds.iter().enumerate() {
                 assert_eq!(proof.X[r], point(&round["X"]), "X_{r}, case {a}x{b}");
                 assert_eq!(proof.R[r], point(&round["R"]), "R_{r}, case {a}x{b}");
             }
-            assert_eq!(proof.l, scs(&case["l_final"]));
-            assert_eq!(proof.n, scs(&case["n_final"]));
+            assert_eq!(proof.l, scs::<C::Scalar>(&case["l_final"]));
+            assert_eq!(proof.n, scs::<C::Scalar>(&case["n_final"]));
             proof.verify(&st, &st.commit(&l, &n), &mut Replay::new(gammas)).unwrap();
         }
+    }
+
+    #[test]
+    fn matches_reference_vectors() {
+        reference_vectors::<Ristretto>();
+    }
+
+    #[cfg(feature = "secp256k1")]
+    #[test]
+    fn matches_reference_vectors_secp256k1() {
+        reference_vectors::<crate::curve::Secp256k1>();
     }
 
     /// A standalone verifier must bind the commitment: otherwise a prover fixes `X_r`, `R_r`

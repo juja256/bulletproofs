@@ -14,13 +14,19 @@ import itertools
 import random
 
 L = 2**252 + 27742317777372353535851937790883648493
+# Byte order of a scalar's 32-byte encoding (digests, the builder's programs): little-endian
+# for ristretto255 (curve25519-dalek), big-endian for secp256k1 (k256).
+ENDIAN = "little"
+
+# The group order of secp256k1.
+N_SECP256K1 = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141
 
 
-def use_field(modulus):
-    """Switch the scalar field (the secp256k1-zkp cross-check runs the same code over the
-    secp256k1 group order)."""
-    global L
-    L = modulus
+def use_field(modulus, endian="little"):
+    """Switch the scalar field (the secp256k1-zkp cross-check and the secp256k1 vectors run the
+    same code over the secp256k1 group order)."""
+    global L, ENDIAN
+    L, ENDIAN = modulus, endian
 
 
 def inv(x):
@@ -964,7 +970,7 @@ def _u64(x):
 
 
 def _scalar(x):
-    return (x % L).to_bytes(32, "little")
+    return (x % L).to_bytes(32, ENDIAN)
 
 
 def recip_digest(rc):
@@ -1536,7 +1542,7 @@ def bld_parse_var(x):
 
 def bld_parse_scalar(h):
     assert isinstance(h, str) and len(h) == 64
-    x = int.from_bytes(bytes.fromhex(h), "little")
+    x = int.from_bytes(bytes.fromhex(h), ENDIAN)
     assert x < L, "non-canonical scalar"
     return x
 

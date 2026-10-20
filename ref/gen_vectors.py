@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
-"""Writes tests/vectors/bppp/*.json from the reference (python3 ref/gen_vectors.py).
-Deterministic: the same output on every run."""
+"""Writes tests/vectors/bppp/*.json from the reference (python3 ref/gen_vectors.py), and with
+`--curve secp256k1` the same cases over the secp256k1 group order to
+tests/vectors/bppp/secp256k1/*.json (the reference's points are symbolic, so the vectors depend
+only on the group order and the scalars' byte order). Deterministic: the same output on every
+run."""
 
 import copy
 import json
@@ -10,6 +13,7 @@ import sys
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import bppp_ref  # noqa: E402
 from bppp_ref import (L, ONE, SLOTS, U64, Builder, BuilderError,  # noqa: E402
                       BuilderProverError, ReciprocalError, Sym, bld_agreement_check, bld_apply,
                       bld_costs, bld_finalize, bld_lower, bld_parse_lc, bld_run_program,
@@ -26,8 +30,9 @@ OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tests", "v
 
 
 def hx(x):
-    """A scalar as 32 little-endian bytes in hex (curve25519-dalek Scalar::to_bytes)."""
-    return (x % L).to_bytes(32, "little").hex()
+    """A scalar as its 32-byte encoding in hex: little-endian for ristretto255
+    (curve25519-dalek `Scalar::to_bytes`), big-endian for secp256k1 (k256)."""
+    return (x % L).to_bytes(32, bppp_ref.ENDIAN).hex()
 
 
 def wnla_case(rng, a, b):
@@ -1530,6 +1535,13 @@ def builder_cases(rng):
 
 
 def main():
+    global L, OUT
+    if sys.argv[1:] == ["--curve", "secp256k1"]:
+        bppp_ref.use_field(bppp_ref.N_SECP256K1, "big")
+        L = bppp_ref.L
+        OUT = os.path.join(OUT, "secp256k1")
+    elif sys.argv[1:]:
+        sys.exit("usage: gen_vectors.py [--curve secp256k1]")
     rng = random.Random(20261019)
     # (|l|, |n|): odd and unequal lengths, a frozen norm vector (|n| = 1, 2, 3 with long l),
     # stops on ties (3x3, 5x1) and an empty l.

@@ -474,23 +474,28 @@ mod tests {
         assert!(RangeProof(proof).verify(&st, &pc, &bp, &V, &mut Transcript::new(b"r")).is_err());
     }
 
-    fn same_witness(a: &ReciprocalWitness, b: &ReciprocalWitness) -> bool {
+    fn same_witness<F: Field>(a: &ReciprocalWitness<F>, b: &ReciprocalWitness<F>) -> bool {
         a.w_d == b.w_d && a.w_l == b.w_l && a.w_r == b.w_r && a.w_o == b.w_o && a.v == b.v && a.s == b.s
     }
 
     /// The circuits built from the statements equal the reference's field by field, honest
     /// witnesses match, and the proofs reproduce `tests/vectors/bppp/range.json`.
-    #[test]
-    fn matches_reference_vectors() {
+    fn reference_vectors<C: Curve>()
+    where
+        C::Scalar: crate::bppp::testutil::TestScalar,
+    {
         use crate::bppp::testutil::{self, int, scs};
-        let file: serde_json::Value = serde_json::from_str(include_str!("../../tests/vectors/bppp/range.json")).unwrap();
+        let file = testutil::vectors::<C>(
+            include_str!("../../tests/vectors/bppp/range.json"),
+            include_str!("../../tests/vectors/bppp/secp256k1/range.json"),
+        );
         for case in file["cases"].as_array().unwrap() {
             let name = case["name"].as_str().unwrap();
             let ranges: Vec<(u64, u128)> = case["ranges"].as_array().unwrap().iter().map(|r| (int(&r[0]) as u64, int(&r[1]))).collect();
             let st = RangeStatement::new(case["base"].as_u64().unwrap(), ranges).unwrap();
-            let (c, info) = st.circuit();
+            let (c, info) = st.circuit::<C::Scalar>();
             assert_eq!(c, testutil::recip_circuit(case), "{}: circuit", name);
-            let w = testutil::recip_witness(case);
+            let w = testutil::recip_witness::<C::Scalar>(case);
             if case["satisfied"].as_bool().unwrap() {
                 let values: Vec<u64> = case["values"].as_array().unwrap().iter().map(|v| int(v) as u64).collect();
                 let digits: Vec<Vec<u64>> = values
@@ -499,11 +504,22 @@ mod tests {
                     .zip(&info.layouts)
                     .map(|((&v, &(a, _)), l)| decompose((v - a) as u128, l))
                     .collect();
-                let ours = info.witness(&values, &scs(&case["blindings"]), &digits);
+                let ours = info.witness(&values, &scs::<C::Scalar>(&case["blindings"]), &digits);
                 assert!(same_witness(&ours, &w), "{}: witness", name);
             }
-            testutil::run_recip_case(case, &c, &w);
+            testutil::run_recip_case::<C>(case, &c, &w);
         }
+    }
+
+    #[test]
+    fn matches_reference_vectors() {
+        reference_vectors::<Ristretto>();
+    }
+
+    #[cfg(feature = "secp256k1")]
+    #[test]
+    fn matches_reference_vectors_secp256k1() {
+        reference_vectors::<crate::curve::Secp256k1>();
     }
 
     #[test]

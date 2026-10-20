@@ -103,7 +103,7 @@ fn matches_reference_vectors() {
         serde_json::from_str(include_str!("../../tests/vectors/bppp/reciprocal.json")).unwrap();
     let mut invalid = 0;
     for case in file["cases"].as_array().unwrap() {
-        let c = testutil::recip_circuit(case);
+        let c = crate::bppp::testutil::recip_circuit(case);
         assert_eq!(c.w_l.n_rows(), case["n_l"].as_u64().unwrap() as usize);
         if case["shape_ok"].as_bool() == Some(false) {
             assert!(c.check().is_err(), "{}: shape", case["name"]);
@@ -702,4 +702,58 @@ fn digest_covers_reciprocal_rows() {
     let mut x = c.clone();
     x.recip[0].terms[0].1 = Scalar::from(2u64);
     assert_ne!(x.digest(), d, "coefficient");
+}
+
+/// The shape check of the compiled circuit, computed from the dimensions, agrees with
+/// compiling and checking: every vector case (shape-invalid ones included) and mutations of
+/// the dimensions, flags and partition.
+#[test]
+fn shape_check_agrees_with_compiling() {
+    let file: serde_json::Value = serde_json::from_str(include_str!("../../tests/vectors/bppp/reciprocal.json")).unwrap();
+    let (mut ok, mut bad) = (0, 0);
+    for case in file["cases"].as_array().unwrap() {
+        let c = crate::bppp::testutil::recip_circuit(case);
+        let mut variants = vec![c.clone()];
+        let mut push = |f: &dyn Fn(&mut ReciprocalCircuit)| {
+            let mut x = c.clone();
+            f(&mut x);
+            variants.push(x);
+        };
+        push(&|x| x.n_v = 0);
+        push(&|x| x.n_v = x.n_lin + 1);
+        push(&|x| x.n_v = x.n_lin + 2);
+        push(&|x| x.k += 1);
+        push(&|x| x.k += 1000);
+        push(&|x| {
+            x.f_l = false;
+            x.f_m = false;
+        });
+        push(&|x| x.f_l = !x.f_l);
+        push(&|x| x.f_m = !x.f_m);
+        push(&|x| x.n_lin = 0);
+        push(&|x| x.n_m = 0);
+        push(&|x| {
+            x.n_p = 0;
+            x.n_m = 0;
+        });
+        if !c.partition.is_empty() {
+            push(&|x| x.partition[0].1 = x.n_lin + x.n_p + x.n_m);
+            push(&|x| x.partition[0].0 = Slot::NormO);
+            push(&|x| x.partition[0].0 = Slot::LinR);
+            push(&|x| x.partition[0].1 = x.n_lin.saturating_sub(1));
+        }
+        if c.partition.len() > 1 {
+            push(&|x| x.partition[1] = x.partition[0]);
+        }
+        for v in &variants {
+            let (new, old) = (v.check(), v.check_by_compiling());
+            assert_eq!(new.is_ok(), old.is_ok(), "{}: {:?} vs {:?}", case["name"], new, old);
+            if new.is_ok() {
+                ok += 1;
+            } else {
+                bad += 1;
+            }
+        }
+    }
+    assert!(ok > 20 && bad > 100, "{} accepted, {} rejected", ok, bad);
 }

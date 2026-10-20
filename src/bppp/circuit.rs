@@ -131,6 +131,56 @@ fn added(a: &[Scalar], b: &[Scalar]) -> Vec<Scalar> {
     a.iter().zip(b).map(|(x, y)| x + y).collect()
 }
 
+/// The dimensions of an arithmetic circuit that [`ArithmeticCircuit::check`] validates besides
+/// its matrices; a reciprocal form circuit checks the shape of its compiled circuit with it,
+/// without compiling (spec §4.2).
+pub(crate) struct Shape {
+    pub(crate) n_m: usize,
+    pub(crate) n_o: usize,
+    pub(crate) n_v: usize,
+    pub(crate) n_lin: usize,
+    pub(crate) k: usize,
+    /// Rows of `W_l`.
+    pub(crate) n_l: usize,
+    pub(crate) f_l: bool,
+    pub(crate) f_m: bool,
+}
+
+impl Shape {
+    /// Dimensions, flags and an injective partition in range.
+    pub(crate) fn check(&self, partition: &[(Slot, usize)]) -> Result<(), ProofError> {
+        let bad = Err(ProofError::FormatError);
+        let kv = self.k.checked_mul(self.n_v).ok_or(ProofError::FormatError)?;
+        if self.n_m == 0 || self.n_v == 0 || self.n_v > self.n_lin.saturating_add(1) {
+            return bad;
+        }
+        if (self.f_l && self.n_l < kv) || (self.f_m && self.n_m < kv) {
+            return bad;
+        }
+        // Inputs that enter no constraint would not be checked at all.
+        if self.k > 0 && !self.f_l && !self.f_m {
+            return bad;
+        }
+        if partition.len() != self.n_o {
+            return bad;
+        }
+        // injective and in range; memory proportional to n_o, not to n_m or n_lin
+        let mut used: Vec<(u8, usize)> = Vec::with_capacity(self.n_o);
+        for &(slot, t) in partition {
+            let bound = if slot == Slot::NormO { self.n_m } else { self.n_lin };
+            if t >= bound {
+                return bad;
+            }
+            used.push((slot as u8, t));
+        }
+        used.sort_unstable();
+        if used.windows(2).any(|p| p[0] == p[1]) {
+            return bad;
+        }
+        Ok(())
+    }
+}
+
 fn draw<R: RngCore + CryptoRng>(rng: &mut R, n: usize) -> Vec<Scalar> {
     (0..n).map(|_| Scalar::random(rng)).collect()
 }
@@ -148,46 +198,15 @@ impl ArithmeticCircuit {
 
     /// Check the shape: dimensions, matrix sizes, flags and an injective partition.
     pub fn check(&self) -> Result<(), ProofError> {
-        let bad = Err(ProofError::FormatError);
-        let n_w = self.n_m.checked_mul(2).and_then(|x| x.checked_add(self.n_o));
-        let kv = self.k.checked_mul(self.n_v);
-        let (n_w, kv) = match (n_w, kv) {
-            (Some(n_w), Some(kv)) => (n_w, kv),
-            _ => return bad,
-        };
-        if self.n_m == 0 || self.n_v == 0 || self.n_v > self.n_lin.saturating_add(1) {
-            return bad;
-        }
+        let n_w = self.n_m.checked_mul(2).and_then(|x| x.checked_add(self.n_o)).ok_or(ProofError::FormatError)?;
         if self.w_l.n_cols() != n_w || self.w_m.n_cols() != n_w || self.w_m.n_rows() != self.n_m {
-            return bad;
+            return Err(ProofError::FormatError);
         }
         if self.a_l.len() != self.n_l() || self.a_m.len() != self.n_m {
-            return bad;
+            return Err(ProofError::FormatError);
         }
-        if (self.f_l && self.n_l() < kv) || (self.f_m && self.n_m < kv) {
-            return bad;
-        }
-        // Inputs that enter no constraint would not be checked at all.
-        if self.k > 0 && !self.f_l && !self.f_m {
-            return bad;
-        }
-        if self.partition.len() != self.n_o {
-            return bad;
-        }
-        // injective and in range; memory proportional to n_o, not to n_m or n_lin
-        let mut used: Vec<(u8, usize)> = Vec::with_capacity(self.n_o);
-        for &(slot, t) in &self.partition {
-            let bound = if slot == Slot::NormO { self.n_m } else { self.n_lin };
-            if t >= bound {
-                return bad;
-            }
-            used.push((slot as u8, t));
-        }
-        used.sort_unstable();
-        if used.windows(2).any(|p| p[0] == p[1]) {
-            return bad;
-        }
-        Ok(())
+        let shape = Shape { n_m: self.n_m, n_o: self.n_o, n_v: self.n_v, n_lin: self.n_lin, k: self.k, n_l: self.n_l(), f_l: self.f_l, f_m: self.f_m };
+        shape.check(&self.partition)
     }
 
     fn check_witness(&self, w: &CircuitWitness) -> Result<(), ProofError> {

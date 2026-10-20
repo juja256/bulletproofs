@@ -19,7 +19,7 @@ use crate::errors::MPCError;
 use crate::generators::{BulletproofGens, PedersenGens};
 use crate::inner_product_proof;
 use crate::range_proof::RangeProof;
-use crate::transcript::TranscriptProtocol;
+use crate::transcript::{TranscriptBackend, TranscriptProtocol};
 
 use rand_core::{CryptoRng, RngCore};
 
@@ -35,13 +35,13 @@ pub struct Dealer {}
 
 impl Dealer {
     /// Creates a new dealer coordinating `m` parties proving `n`-bit ranges.
-    pub fn new<'a, 'b, C: Curve>(
+    pub fn new<'a, 'b, C: Curve, X: TranscriptBackend>(
         bp_gens: &'b BulletproofGens<C>,
         pc_gens: &'b PedersenGens<C>,
-        transcript: &'a mut Transcript,
+        transcript: &'a mut X,
         n: usize,
         m: usize,
-    ) -> Result<DealerAwaitingBitCommitments<'a, 'b, C>, MPCError> {
+    ) -> Result<DealerAwaitingBitCommitments<'a, 'b, C, X>, MPCError> {
         if !(n == 8 || n == 16 || n == 32 || n == 64) {
             return Err(MPCError::InvalidBitsize);
         }
@@ -84,23 +84,23 @@ impl Dealer {
 }
 
 /// A dealer waiting for the parties to send their [`BitCommitment`]s.
-pub struct DealerAwaitingBitCommitments<'a, 'b, C: Curve = Ristretto> {
+pub struct DealerAwaitingBitCommitments<'a, 'b, C: Curve = Ristretto, X: TranscriptBackend = Transcript> {
     bp_gens: &'b BulletproofGens<C>,
     pc_gens: &'b PedersenGens<C>,
-    transcript: &'a mut Transcript,
+    transcript: &'a mut X,
     /// The dealer keeps a copy of the initial transcript state, so
     /// that it can attempt to verify the aggregated proof at the end.
-    initial_transcript: Transcript,
+    initial_transcript: X,
     n: usize,
     m: usize,
 }
 
-impl<'a, 'b, C: Curve> DealerAwaitingBitCommitments<'a, 'b, C> {
+impl<'a, 'b, C: Curve, X: TranscriptBackend> DealerAwaitingBitCommitments<'a, 'b, C, X> {
     /// Receive each party's [`BitCommitment`]s and compute the [`BitChallenge`].
     pub fn receive_bit_commitments(
         self,
         bit_commitments: Vec<BitCommitment<C>>,
-    ) -> Result<(DealerAwaitingPolyCommitments<'a, 'b, C>, BitChallenge<C>), MPCError> {
+    ) -> Result<(DealerAwaitingPolyCommitments<'a, 'b, C, X>, BitChallenge<C>), MPCError> {
         if self.m != bit_commitments.len() {
             return Err(MPCError::WrongNumBitCommitments);
         }
@@ -141,11 +141,11 @@ impl<'a, 'b, C: Curve> DealerAwaitingBitCommitments<'a, 'b, C> {
 
 /// A dealer which has sent the [`BitChallenge`] to the parties and
 /// is waiting for their [`PolyCommitment`]s.
-pub struct DealerAwaitingPolyCommitments<'a, 'b, C: Curve = Ristretto> {
+pub struct DealerAwaitingPolyCommitments<'a, 'b, C: Curve = Ristretto, X: TranscriptBackend = Transcript> {
     n: usize,
     m: usize,
-    transcript: &'a mut Transcript,
-    initial_transcript: Transcript,
+    transcript: &'a mut X,
+    initial_transcript: X,
     bp_gens: &'b BulletproofGens<C>,
     pc_gens: &'b PedersenGens<C>,
     bit_challenge: BitChallenge<C>,
@@ -156,13 +156,13 @@ pub struct DealerAwaitingPolyCommitments<'a, 'b, C: Curve = Ristretto> {
     S: C::Point,
 }
 
-impl<'a, 'b, C: Curve> DealerAwaitingPolyCommitments<'a, 'b, C> {
+impl<'a, 'b, C: Curve, X: TranscriptBackend> DealerAwaitingPolyCommitments<'a, 'b, C, X> {
     /// Receive [`PolyCommitment`]s from the parties and compute the
     /// [`PolyChallenge`].
     pub fn receive_poly_commitments(
         self,
         poly_commitments: Vec<PolyCommitment<C>>,
-    ) -> Result<(DealerAwaitingProofShares<'a, 'b, C>, PolyChallenge<C>), MPCError> {
+    ) -> Result<(DealerAwaitingProofShares<'a, 'b, C, X>, PolyChallenge<C>), MPCError> {
         if self.m != poly_commitments.len() {
             return Err(MPCError::WrongNumPolyCommitments);
         }
@@ -202,11 +202,11 @@ impl<'a, 'b, C: Curve> DealerAwaitingPolyCommitments<'a, 'b, C> {
 /// A dealer which has sent the [`PolyChallenge`] to the parties and
 /// is waiting to aggregate their [`ProofShare`]s into a
 /// [`RangeProof`].
-pub struct DealerAwaitingProofShares<'a, 'b, C: Curve = Ristretto> {
+pub struct DealerAwaitingProofShares<'a, 'b, C: Curve = Ristretto, X: TranscriptBackend = Transcript> {
     n: usize,
     m: usize,
-    transcript: &'a mut Transcript,
-    initial_transcript: Transcript,
+    transcript: &'a mut X,
+    initial_transcript: X,
     bp_gens: &'b BulletproofGens<C>,
     pc_gens: &'b PedersenGens<C>,
     bit_challenge: BitChallenge<C>,
@@ -219,7 +219,7 @@ pub struct DealerAwaitingProofShares<'a, 'b, C: Curve = Ristretto> {
     T_2: C::Point,
 }
 
-impl<'a, 'b, C: Curve> DealerAwaitingProofShares<'a, 'b, C> {
+impl<'a, 'b, C: Curve, X: TranscriptBackend> DealerAwaitingProofShares<'a, 'b, C, X> {
     /// Assembles proof shares into an `RangeProof`.
     ///
     /// Used as a helper function by `receive_trusted_shares` (which

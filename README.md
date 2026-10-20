@@ -357,9 +357,11 @@ All three traits take the scalar field as a parameter that defaults to ristretto
 curve. In generic code:
 
 - values are `F::from(u64)`, linear combinations `LinearCombination<F>`;
-- `lc - var`, `lc + F`, `var * F`, `var + lc` and `var - F` are generic;
-- `var + var`, `var - var`, `-var` and `var * u64` produce ristretto255 linear combinations
-  (two variables do not name a field): write `lc(a) + b` with `bulletproofs::r1cs::lc`;
+- `lc ± var`, `lc ± F`, `lc ± u64`, `lc * F`, `var * F`, `var ± lc` and `var ± F` are
+  generic;
+- `var ± var`, `-var`, `var ± u64`, `var * u64` (any integer width) and `Scalar ± * var`
+  produce ristretto255 linear combinations (they do not name a field): write `lc(a) + b`
+  with `bulletproofs::r1cs::lc`;
 - `Prover::new(&pc, ..)` takes its curve from the Pedersen generators;
   `Verifier::new(..)` is the ristretto255 verifier, `Verifier::<_, C>::for_curve(..)` the one
   over `C`.

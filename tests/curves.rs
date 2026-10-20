@@ -116,3 +116,66 @@ mod bppp {
         bppp_range_roundtrip::<Ristretto>();
     }
 }
+
+/// The identity's encoding (the `Curve` contract): `compress` is total, the identity encodes as
+/// `Compressed::default()`, which decodes back to it and is the only encoding `is_identity`
+/// accepts. One-phase R1CS proofs send the identity for the second-phase commitments.
+#[cfg(feature = "yoloproofs")]
+mod identity {
+    use bulletproofs::curve::group::Group;
+    use bulletproofs::curve::{Curve, PointEncoding, Ristretto};
+    use bulletproofs::r1cs::{ConstraintSystem, Prover, R1CSProof, Verifier};
+    use bulletproofs::{BulletproofGens, PedersenGens};
+    use merlin::Transcript;
+
+    pub fn identity_contract<C: Curve>() {
+        let id = C::compress(&C::Point::identity());
+        assert_eq!(id, C::Compressed::default());
+        assert!(id.is_identity());
+        assert_eq!(C::decompress(&id), Some(C::Point::identity()));
+        let (b, _) = C::default_pedersen();
+        assert!(!C::compress(&b).is_identity());
+    }
+
+    /// `x * y = 12` without randomized constraints: a one-phase proof, round trip and verify.
+    pub fn one_phase_r1cs<C: Curve>() {
+        let pc = PedersenGens::<C>::for_curve();
+        let bp = BulletproofGens::<C>::for_curve(8, 1);
+        let mut t = Transcript::new(b"one phase");
+        let mut prover = Prover::new(&pc, &mut t);
+        let (cx, x) = prover.commit(C::Scalar::from(3u64), C::Scalar::from(5u64));
+        let (cy, y) = prover.commit(C::Scalar::from(4u64), C::Scalar::from(6u64));
+        let (_, _, o) = prover.multiply(x.into(), y.into());
+        prover.constrain(o - C::Scalar::from(12u64));
+        let proof = R1CSProof::<C>::from_bytes(&prover.prove(&bp).unwrap().to_bytes()).unwrap();
+        let mut t = Transcript::new(b"one phase");
+        let mut verifier = Verifier::<_, C>::for_curve(&mut t);
+        let (x, y) = (verifier.commit(cx), verifier.commit(cy));
+        let (_, _, o) = verifier.multiply(x.into(), y.into());
+        verifier.constrain(o - C::Scalar::from(12u64));
+        verifier.verify(&proof, &pc, &bp).unwrap();
+    }
+
+    #[test]
+    fn ristretto_identity_contract() {
+        identity_contract::<Ristretto>();
+        one_phase_r1cs::<Ristretto>();
+    }
+}
+
+/// Upstream ristretto255 gadgets with integer constants of every width still compile.
+#[cfg(feature = "yoloproofs")]
+mod upstream_integers {
+    use bulletproofs::r1cs::{ConstraintSystem, LinearCombination, Variable};
+
+    #[allow(dead_code)]
+    fn gadget<CS: ConstraintSystem>(cs: &mut CS, a: Variable, b: Variable) {
+        cs.constrain(a * 2u32 + 1u8 - b);
+        cs.constrain(a + 1u16 - (b - 1u128));
+        cs.constrain(LinearCombination::from(3u32) - a * 4u8);
+        cs.constrain(LinearCombination::from(a) * 2u16 - b * 7u128);
+    }
+
+    #[test]
+    fn upstream_integer_constants_compile() {}
+}

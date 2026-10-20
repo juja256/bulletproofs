@@ -85,6 +85,7 @@ pub mod elements;
 #[cfg(feature = "secp256k1")]
 pub mod secp256k1 {
     pub use crate::curve::{Secp256k1, Secp256k1Compressed};
+    pub use crate::elements;
 
     /// A scalar (big-endian in proofs).
     pub type Scalar = k256::Scalar;

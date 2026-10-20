@@ -38,8 +38,8 @@ fn fmt(s: f64) -> String {
     }
 }
 
-fn row(curve: &str, what: &str, size: usize, prove: f64, verify: f64) {
-    println!("| {} | {} | {} B | {} | {} |", curve, what, size, fmt(prove), fmt(verify));
+fn row(curve: &str, proof: &str, backend: &str, size: usize, prove: f64, verify: f64) {
+    println!("| {} | {} | {} | {} B | {} | {} |", curve, proof, backend, size, fmt(prove), fmt(verify));
 }
 
 fn range<C: Curve>(runs: usize) {
@@ -50,14 +50,14 @@ fn range<C: Curve>(runs: usize) {
     let (proof, v) = RangeProof::<C>::prove_single_with_rng(&bp, &pc, &mut Transcript::new(b"t"), 7, &b, 64, &mut rng).unwrap();
     let prove = median(|| drop(RangeProof::<C>::prove_single_with_rng(&bp, &pc, &mut Transcript::new(b"t"), 7, &b, 64, &mut rng)), runs);
     let verify = median(|| proof.verify_single(&bp, &pc, &mut Transcript::new(b"t"), &v, 64).unwrap(), runs);
-    row(C::NAME, "range 64 bits, BP", proof.to_bytes().len(), prove, verify);
+    row(C::NAME, "range 64 bits", "BP", proof.to_bytes().len(), prove, verify);
 
     let st = RangeStatement::new(16, vec![(0, 1 << 64)]).unwrap();
     let bp = BulletproofGens::<C>::for_curve(st.generators_capacity(), 1);
     let (proof, v) = BpppRangeProof::<C>::prove(&st, &pc, &bp, &[7], &[b], &mut Transcript::new(b"t"), &mut rng).unwrap();
     let prove = median(|| drop(BpppRangeProof::<C>::prove(&st, &pc, &bp, &[7], &[b], &mut Transcript::new(b"t"), &mut rng)), runs);
     let verify = median(|| proof.verify(&st, &pc, &bp, &v, &mut Transcript::new(b"t")).unwrap(), runs);
-    row(C::NAME, "range 64 bits, BP++", proof.to_bytes().len(), prove, verify);
+    row(C::NAME, "range 64 bits", "BP++", proof.to_bytes().len(), prove, verify);
 }
 
 /// A chain of multiplications `x_{i+1} = x_i * y_i`, `x_0` committed: the prover passes the
@@ -108,7 +108,8 @@ fn r1cs<C: Curve>(n: usize, backend: Backend, runs: usize) {
     );
     let bytes = proof.to_bytes();
     assert!(R1CSProof::<C>::from_bytes(&bytes).is_ok());
-    row(C::NAME, &format!("R1CS 2^{}, {}", n.trailing_zeros(), backend), bytes.len(), prove, verify);
+    let backend = if backend == Backend::Bp { "BP" } else { "BP++" };
+    row(C::NAME, &format!("R1CS 2^{}", n.trailing_zeros()), backend, bytes.len(), prove, verify);
 }
 
 fn table<C: Curve>() {
@@ -120,8 +121,8 @@ fn table<C: Curve>() {
 }
 
 fn main() {
-    println!("| curve | proof | size | prove | verify |");
-    println!("|---|---|---|---|---|");
+    println!("| curve | proof | backend | size | prove | verify |");
+    println!("|---|---|---|---|---|---|");
     table::<Ristretto>();
     table::<Secp256k1>();
 }

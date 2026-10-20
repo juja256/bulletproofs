@@ -1,6 +1,7 @@
 //! Tests of `bppp::circuit`.
 
 use super::*;
+use crate::bppp::testutil::{sc, scs, slot, sparse_from, ScalarRng};
 use crate::bppp::transcript::Replay;
 use crate::{BulletproofGens, PedersenGens};
 use merlin::Transcript;
@@ -140,57 +141,6 @@ fn prove_and_verify(c: &ArithmeticCircuit, w: &CircuitWitness, rng: &mut ChaCha2
     proof.verify(c, &g, &V, &mut Transcript::new(b"test"))
 }
 
-/// Hands out the given scalars to `Scalar::random` (32 bytes little-endian, then 32 zero
-/// bytes: the wide reduction returns the scalar itself).
-struct ScalarRng(alloc::collections::VecDeque<u8>);
-
-impl ScalarRng {
-    fn new(scalars: &[Scalar]) -> Self {
-        let mut q = alloc::collections::VecDeque::new();
-        for s in scalars {
-            q.extend(s.to_bytes().iter());
-            q.extend([0u8; 32].iter());
-        }
-        ScalarRng(q)
-    }
-}
-
-impl rand_core::RngCore for ScalarRng {
-    fn next_u32(&mut self) -> u32 {
-        unimplemented!()
-    }
-    fn next_u64(&mut self) -> u64 {
-        unimplemented!()
-    }
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
-        dest.iter_mut().for_each(|b| *b = self.0.pop_front().expect("more randomness than in the vector"));
-    }
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
-        self.fill_bytes(dest);
-        Ok(())
-    }
-}
-
-impl rand_core::CryptoRng for ScalarRng {}
-
-fn sc(v: &serde_json::Value) -> Scalar {
-    use core::convert::TryInto;
-    let b: [u8; 32] = hex::decode(v.as_str().unwrap()).unwrap().try_into().unwrap();
-    Scalar::from_canonical_bytes(b).unwrap()
-}
-
-fn scs(v: &serde_json::Value) -> Vec<Scalar> {
-    v.as_array().unwrap().iter().map(sc).collect()
-}
-
-fn sparse_from(v: &serde_json::Value, cols: usize) -> SparseMatrix {
-    let mut m = SparseMatrix::new(cols);
-    for row in v.as_array().unwrap() {
-        m.push_row(row.as_array().unwrap().iter().map(|t| (t[0].as_u64().unwrap() as usize, sc(&t[1]))));
-    }
-    m
-}
-
 /// The prover reproduces the independent Python reference (`ref/bppp_ref.py`,
 /// `tests/vectors/bppp/circuit.json`) given its randomness and challenges, and the
 /// verifier accepts exactly the satisfied cases.
@@ -204,13 +154,6 @@ fn matches_reference_vectors() {
         let u = |k: &str| case[k].as_u64().unwrap() as usize;
         let (n_m, n_o, n_lin) = (u("n_m"), u("n_o"), u("n_lin"));
         let n_w = 2 * n_m + n_o;
-        let slot = |s: &str| match s {
-            "nO" => Slot::NormO,
-            "lO" => Slot::LinO,
-            "lL" => Slot::LinL,
-            "lR" => Slot::LinR,
-            _ => panic!("slot {}", s),
-        };
         let c = ArithmeticCircuit {
             n_m,
             n_o,

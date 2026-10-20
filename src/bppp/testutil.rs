@@ -65,7 +65,7 @@ pub fn int(v: &Value) -> u128 {
     }
 }
 
-fn sparse_from(v: &Value, cols: usize) -> SparseMatrix {
+pub fn sparse_from(v: &Value, cols: usize) -> SparseMatrix {
     let mut m = SparseMatrix::new(cols);
     for row in v.as_array().unwrap() {
         m.push_row(row.as_array().unwrap().iter().map(|t| (t[0].as_u64().unwrap() as usize, sc(&t[1]))));
@@ -104,7 +104,7 @@ fn tuples(v: &Value) -> Vec<TuplePole> {
         .unwrap_or_default()
 }
 
-fn slot(s: &str) -> Slot {
+pub fn slot(s: &str) -> Slot {
     match s {
         "nO" => Slot::NormO,
         "lO" => Slot::LinO,

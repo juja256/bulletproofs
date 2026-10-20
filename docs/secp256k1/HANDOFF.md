@@ -73,7 +73,7 @@ tasks are numbered 1.1–3.4 there, Task 1–14 in the ledger.
   `Field::batch_invert` wipes its partial products. For phase 2: secp256k1 encodes the
   identity as 33 zero bytes and back; k256 needs `serde` (and `std` for
   `precomputed-tables`); `[u8; 33]` needs a hand-written serde impl.
-- 2026-10-20 — the fork moved to github.com/juja256/bulletproofs (local `origin`; the old
+- 2026-10-20 — the fork moved to [juja256/bulletproofs](https://github.com/juja256/bulletproofs) (local `origin`; the old
   remote is `zero-art`, to be reset to `d27dde0` by the owner).
 - 2026-10-20 — phase 2 done (tasks 6–10): `Secp256k1` on k256 (SEC1 33-byte points, the
   identity as 33 zero bytes, big-endian scalars, RFC 9380 generators, B = H of

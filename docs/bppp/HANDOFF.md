@@ -7,11 +7,10 @@ cannot see). Keep the **Progress log** at the end up to date.
 
 ## Goal
 
-A complete Bulletproofs++ (Eagen, Kanjalkar, Ruffing, Nick, ePrint 2022/510,
-<https://eprint.iacr.org/2022/510>) behind the `bppp` feature: norm argument, arithmetic
+A complete Bulletproofs++ (Eagen, Kanjalkar, Ruffing, Nick, [ePrint 2022/510](https://eprint.iacr.org/2022/510)) behind the `bppp` feature: norm argument, arithmetic
 circuits, reciprocal form circuits, range proofs, multi-asset transactions, a BP++ backend for
 the existing R1CS front end, a circuit builder shared by both backends, performance work, and
-then the zkVM `bpvm` (github.com/juja256/bpvm, a separate repository) on BP++.
+then the zkVM [bpvm](https://github.com/juja256/bpvm) (a separate repository) on BP++.
 
 ## Status
 
@@ -164,7 +163,7 @@ Deferred from phase 6 (with the review's grading):
   gates, or `LinL`), measured costs replacing the estimates of the old phase-6 plan
   (XOR32 ≈ 5 gates ignored both BP's `|T|/2` multiplicity multipliers and BP++'s `N_lin`).
 
-## Then: phase 8 — bpvm on BP++ (repository github.com/juja256/bpvm)
+## Then: phase 8 — bpvm on BP++ ([repository](https://github.com/juja256/bpvm))
 
 Port the chips to `CircuitBuilder` (6a gives this for BP immediately), add
 `bpvm prove --backend bp|bppp`, measure fib / sha256 / ec_mini / ec_add, update README and

@@ -145,10 +145,18 @@ fn cost_of(n: &RedeemNode) -> u64 {
 /// encode and decode it, check the CMR, run it again, and check its cost against the budget.
 pub(crate) fn execute_text(program: &str, witness: &HashMap<Arc<str>, Value>, env: &Env) -> Result<Report, ExecError> {
     let forest = Forest::parse::<Elements>(program).map_err(|e| ExecError::Parse(e.to_string()))?;
-    execute_forest(&forest, witness, env)
+    execute_forest(&forest, witness, env, true)
 }
 
-pub(crate) fn execute_forest(forest: &Forest, witness: &HashMap<Arc<str>, Value>, env: &Env) -> Result<Report, ExecError> {
+/// [`execute_text`] without the budget check: for parts of programs (gadget tests), whose
+/// small witnesses pay for little.
+#[cfg(test)]
+pub(crate) fn execute_text_unbudgeted(program: &str, witness: &HashMap<Arc<str>, Value>, env: &Env) -> Result<Report, ExecError> {
+    let forest = Forest::parse::<Elements>(program).map_err(|e| ExecError::Parse(e.to_string()))?;
+    execute_forest(&forest, witness, env, false)
+}
+
+pub(crate) fn execute_forest(forest: &Forest, witness: &HashMap<Arc<str>, Value>, env: &Env, budgeted: bool) -> Result<Report, ExecError> {
     types::Context::with_context(|ctx| {
         let node = forest.to_witness_node(&ctx, witness).ok_or_else(|| ExecError::Parse("no main".into()))?;
         let program = node.finalize_pruned(env).map_err(|e| ExecError::Finalize(e.to_string()))?;
@@ -165,7 +173,7 @@ pub(crate) fn execute_forest(forest: &Forest, witness: &HashMap<Arc<str>, Value>
         let bounds = decoded.bounds();
         let cost_mwu = cost_of(&decoded);
         let budget_mwu = 1000 * (w.len() as u64 + 50);
-        if cost_mwu > budget_mwu {
+        if budgeted && cost_mwu > budget_mwu {
             return Err(ExecError::Budget { cost_mwu, budget_mwu });
         }
         Ok(Report {

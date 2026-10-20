@@ -12,7 +12,7 @@ const APPEND: u8 = 0x41;
 const CHALLENGE: u8 = 0x43;
 const RNG: u8 = 0x52;
 /// At most 64 output blocks, so that the counter's first byte (< 64) never equals a record's
-/// first byte (`APPEND`, `CHALLENGE`, `RNG`).
+/// first byte (`APPEND`, `CHALLENGE`) or the RNG suffix (`RNG`).
 const MAX_CHALLENGE_BYTES: usize = 2048;
 
 /// A Fiat–Shamir transcript built on SHA-256 alone, for verifiers that have no Keccak (and so
@@ -51,18 +51,22 @@ impl Sha256Transcript {
     }
 }
 
-impl TranscriptBackend for Sha256Transcript {
-    fn append_message(&mut self, label: &'static [u8], message: &[u8]) {
+impl Sha256Transcript {
+    /// Absorb a labeled message (as [`TranscriptBackend::append_message`]; callable without
+    /// importing the trait).
+    pub fn append_message(&mut self, label: &'static [u8], message: &[u8]) {
         self.record(APPEND, label);
         self.ctx.update(le32(message.len()));
         self.ctx.update(message);
     }
 
-    fn append_u64(&mut self, label: &'static [u8], x: u64) {
+    /// Absorb a labeled integer, as `append_message(label, le64(x))`.
+    pub fn append_u64(&mut self, label: &'static [u8], x: u64) {
         self.append_message(label, &x.to_le_bytes());
     }
 
-    fn challenge_bytes(&mut self, label: &'static [u8], dest: &mut [u8]) {
+    /// Fill `dest` (1 to 2048 bytes) with challenge bytes.
+    pub fn challenge_bytes(&mut self, label: &'static [u8], dest: &mut [u8]) {
         assert!(
             (1..=MAX_CHALLENGE_BYTES).contains(&dest.len()),
             "a challenge has 1 to 2048 bytes"
@@ -76,12 +80,31 @@ impl TranscriptBackend for Sha256Transcript {
         }
     }
 
-    fn build_rng(&self) -> merlin::TranscriptRngBuilder {
+    /// The prover's RNG builder (see [`TranscriptBackend::build_rng`]).
+    pub fn build_rng(&self) -> merlin::TranscriptRngBuilder {
         let mut c = self.ctx.clone();
         c.update([RNG]);
         let mut t = merlin::Transcript::new(b"sha256-transcript-rng");
         t.append_message(b"state", &c.finalize());
         t.build_rng()
+    }
+}
+
+impl TranscriptBackend for Sha256Transcript {
+    fn append_message(&mut self, label: &'static [u8], message: &[u8]) {
+        Sha256Transcript::append_message(self, label, message)
+    }
+
+    fn append_u64(&mut self, label: &'static [u8], x: u64) {
+        Sha256Transcript::append_u64(self, label, x)
+    }
+
+    fn challenge_bytes(&mut self, label: &'static [u8], dest: &mut [u8]) {
+        Sha256Transcript::challenge_bytes(self, label, dest)
+    }
+
+    fn build_rng(&self) -> merlin::TranscriptRngBuilder {
+        Sha256Transcript::build_rng(self)
     }
 }
 

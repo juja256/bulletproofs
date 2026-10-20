@@ -724,3 +724,95 @@ fn gadgets_can_pass_the_leased_transcript_to_protocols() {
     assert!(nested.verify_single(&bp, &pc, p.transcript(), &com, 8).is_err());
     assert!(nested2.verify(&st, &pc, &bp2, &V, p.transcript()).is_err());
 }
+
+#[cfg(feature = "sha256-transcript")]
+mod sha256_more {
+    use rand_chacha::rand_core::{RngCore, SeedableRng};
+    use rand_chacha::ChaCha20Rng;
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+
+    /// The prover's RNG is Merlin's, keyed with the reference's RNG digest
+    /// (`finalize(copy ‖ 0x52)`, the KAT case `rng_digest`).
+    #[test]
+    fn sha256_rng_is_keyed_with_the_reference_digest() {
+        use bulletproofs::Sha256Transcript;
+        let v: serde_json::Value = serde_json::from_str(include_str!("vectors/transcript/sha256.json")).unwrap();
+        let case = v["cases"].as_array().unwrap().iter().find(|c| c["name"] == "rng_digest").unwrap();
+        assert_eq!(case["label"], "726e67");
+        let mut t = Sha256Transcript::new(b"rng");
+        t.append_message(b"m", b"x");
+        let digest = unhex(case["outputs"][0].as_str().unwrap());
+        let mut m = merlin::Transcript::new(b"sha256-transcript-rng");
+        m.append_message(b"state", &digest);
+        let (mut a, mut b) = ([0u8; 64], [0u8; 64]);
+        t.build_rng().finalize(&mut ChaCha20Rng::seed_from_u64(3)).fill_bytes(&mut a);
+        m.build_rng().finalize(&mut ChaCha20Rng::seed_from_u64(3)).fill_bytes(&mut b);
+        assert_eq!(a, b);
+    }
+
+    /// The transcript's own methods: no trait import needed, and no ambiguity when both
+    /// `TranscriptBackend` and `BpppTranscript` are in scope.
+    #[test]
+    fn sha256_methods_need_no_import() {
+        let mut t = bulletproofs::Sha256Transcript::new(b"m");
+        t.append_message(b"a", b"b");
+        t.append_u64(b"n", 7);
+        let mut c = [0u8; 32];
+        t.challenge_bytes(b"c", &mut c);
+        assert_ne!(c, [0u8; 32]);
+    }
+
+    #[cfg(feature = "bppp")]
+    #[test]
+    fn sha256_methods_are_unambiguous_with_both_traits() {
+        #[allow(unused_imports)]
+        use bulletproofs::bppp::BpppTranscript;
+        #[allow(unused_imports)]
+        use bulletproofs::TranscriptBackend;
+        let mut t = bulletproofs::Sha256Transcript::new(b"m");
+        t.append_message(b"a", b"b");
+        t.append_u64(b"n", 7);
+        let mut c = [0u8; 32];
+        t.challenge_bytes(b"c", &mut c);
+        let mut u = bulletproofs::Sha256Transcript::new(b"m");
+        TranscriptBackend::append_message(&mut u, b"a", b"b");
+        TranscriptBackend::append_u64(&mut u, b"n", 7);
+        let mut d = [0u8; 32];
+        TranscriptBackend::challenge_bytes(&mut u, b"c", &mut d);
+        assert_eq!(c, d);
+    }
+
+    /// Challenges drawn after an R1CS proof agree between prover and verifier and depend on
+    /// the proof.
+    #[cfg(feature = "yoloproofs")]
+    #[test]
+    fn sha256_challenges_after_a_proof_depend_on_it() {
+        use bulletproofs::r1cs::{lc, ConstraintSystem, Prover, Verifier};
+        use bulletproofs::{BulletproofGens, PedersenGens, Sha256Transcript};
+        use curve25519_dalek::scalar::Scalar;
+        let (pc, bp) = (PedersenGens::default(), BulletproofGens::new(8, 1));
+        let after = |seed: u64| {
+            let mut p = Prover::new(&pc, Sha256Transcript::new(b"after"));
+            let (cx, x) = p.commit(Scalar::from(3u8), Scalar::from(seed));
+            let (_, _, o) = p.multiply(lc(x), lc(x));
+            p.constrain(lc(o) - Scalar::from(9u8));
+            let (proof, mut pt) = p.prove_with_rng_and_return_transcript(&bp, &mut ChaCha20Rng::seed_from_u64(seed)).unwrap();
+            let mut v = Verifier::new(Sha256Transcript::new(b"after"));
+            let x = v.commit(cx);
+            let (_, _, o) = v.multiply(lc(x), lc(x));
+            v.constrain(lc(o) - Scalar::from(9u8));
+            let mut vt = v.verify_and_return_transcript(&proof, &pc, &bp).unwrap();
+            let (mut a, mut b) = ([0u8; 32], [0u8; 32]);
+            pt.append_message(b"more", b"data");
+            vt.append_message(b"more", b"data");
+            pt.challenge_bytes(b"after", &mut a);
+            vt.challenge_bytes(b"after", &mut b);
+            assert_eq!(a, b);
+            a
+        };
+        assert_ne!(after(1), after(2));
+    }
+}

@@ -182,6 +182,9 @@ own checks, so that a soundness test can check that the verifier rejects the res
 
 The `secp256k1` feature (this fork) adds the curve secp256k1 (see [Curves](#curves)).
 
+The `sha256-transcript` feature (this fork, on with `secp256k1`) adds `Sha256Transcript`, a
+Fiat–Shamir transcript on SHA-256 alone (see [Transcripts](#transcripts)).
+
 ### Prover and verifier optimisations in this fork
 
 Compared to upstream, the R1CS prover needs about 3x less memory and is faster, the
@@ -296,7 +299,44 @@ Elements displays. The BP range proof does not absorb the value generator into i
 (BP++ does): append the asset generator to the transcript before proving and verifying.
 
 These are compatible commitments, not compatible proofs: the proofs are this crate's (BP or
-BP++ with Merlin transcripts), not Elements' own range proof format.
+BP++ with this crate's transcripts), not Elements' own range proof format.
+
+## Transcripts
+
+Every protocol takes its Fiat–Shamir transcript as `&mut T` for any `T: TranscriptBackend`
+(R1CS: the transcript or a `&mut` of it). The type is inferred from the argument, so code that
+passes a `merlin::Transcript` is unchanged and its proofs are byte-identical to upstream.
+
+- **`merlin::Transcript`** (the default): STROBE over Keccak-f, as upstream.
+- **`Sha256Transcript`** (feature `sha256-transcript`, on with `secp256k1`; also
+  `bulletproofs::secp256k1::Sha256Transcript`): a running SHA-256 with length-prefixed
+  records. It is for verifiers that have SHA-256 but no Keccak, such as a Simplicity program
+  on Liquid. The byte format, the constants a verifier embeds and the cost of a challenge are
+  in [docs/sha256-transcript.md](docs/sha256-transcript.md).
+- Any other type that implements `TranscriptBackend` (`append_message`, `append_u64`,
+  `challenge_bytes`, `build_rng`); the MPC dealer also needs `Clone`, and the R1CS prover
+  and verifier take an owned one through `TranscriptRef` (a `&mut` always works).
+
+A proof verifies only under the transcript type and label it was made with.
+
+```rust,ignore
+use bulletproofs::bppp::RangeStatement;
+use bulletproofs::secp256k1::{bppp, BulletproofGens, PedersenGens, Sha256Transcript};
+
+let st = RangeStatement::new(16, vec![(0, 1 << 64)]).unwrap();
+let pc_gens = PedersenGens::for_curve();
+let bp_gens = BulletproofGens::for_curve(st.generators_capacity(), 1);
+let (proof, commitments) = bppp::RangeProof::prove(&st, &pc_gens, &bp_gens, &[v], &[blinding], &mut Sha256Transcript::new(b"app"), &mut rng)?;
+proof.verify(&st, &pc_gens, &bp_gens, &commitments, &mut Sha256Transcript::new(b"app"))?;
+```
+
+Test vectors:
+[tests/vectors/transcript/sha256.json](tests/vectors/transcript/sha256.json) holds known answers
+from the independent reference [ref/sha256_transcript.py](ref/sha256_transcript.py). The
+`secp256k1-*.json` files next to it hold full secp256k1 proofs (BP++ range, R1CS on both
+backends) with the trace of every message and challenge;
+`python3 -I ref/sha256_transcript.py --check-trace tests/vectors/transcript/secp256k1-*.json`
+recomputes the challenges.
 
 ## Bulletproofs++ (experimental)
 
@@ -445,7 +485,7 @@ calls *is* the statement.
 | `allocate_multiplier(Some((a, b)))` | Creates a multiplication gate from the values `a`, `b` directly: wires `(left, right, out)` with `out = a * b`, without linear combinations as inputs. |
 | `constrain(lc)` | Asserts `lc = 0`. Free on both backends: it adds a row to the linear part, no gate. |
 | `eval(lc)` | The value of a linear combination: `Some` for the prover, `None` for the verifier. For computing the witness inside a gadget. |
-| `transcript()` | The Fiat–Shamir transcript, to bind extra public data into the proof. |
+| `transcript()` | The Fiat–Shamir transcript (`&mut dyn TranscriptBackend`), to bind extra public data into the proof: `cs.transcript().append_message(b"label", data)` with `use bulletproofs::TranscriptBackend;`. |
 | `metrics()` | Counts multipliers and constraints of the plain R1CS part. |
 
 ### `RandomizableConstraintSystem`: constraints with challenges (upstream, BP only)
@@ -486,7 +526,7 @@ So `output` is a permutation of `input` when the argument with `add(x)` for ever
 
 | method | what it does |
 |---|---|
-| `Prover::new(&pc_gens, transcript)` | A prover over the curve of the Pedersen generators. |
+| `Prover::new(&pc_gens, transcript)` | A prover over the curve of the Pedersen generators. The transcript is a `merlin::Transcript`, a `Sha256Transcript` (see [Transcripts](#transcripts)) or a `&mut` of any `TranscriptBackend`. |
 | `Verifier::new(transcript)`, `Verifier::<_, C>::for_curve(transcript)` | A verifier over ristretto255, or over any curve `C`. |
 | `prover.commit(v, blinding)` | Commits to a secret input: returns the public commitment `V = v * B + blinding * B_blinding` and the variable that stands for `v` in the circuit. |
 | `verifier.commit(V)` | The verifier's side: the variable for the committed input `V`. |

@@ -50,11 +50,6 @@ pub fn msm_slices(scalars: &[Scalar], points: &[RistrettoPoint], chunk: usize, v
     scalars.chunks(chunk).zip(points.chunks(chunk)).map(msm).fold(RistrettoPoint::identity(), |a, b| a + b)
 }
 
-/// [`msm_slices`] in variable time: for public scalars only.
-pub fn vartime_msm_slices(scalars: &[Scalar], points: &[RistrettoPoint], chunk: usize) -> RistrettoPoint {
-    msm_slices(scalars, points, chunk, true)
-}
-
 /// $\sum_v s_v P_v$ over `v in 0..len` with the terms given by `term(v)`, by chunks of
 /// `chunk` terms (in parallel with `parallel`). Constant time unless `vartime` (for public
 /// scalars only).

@@ -4,7 +4,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use k256::elliptic_curve::group::Curve as _;
+use k256::elliptic_curve::group::{Curve as _, Group};
 use k256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
 use k256::{AffinePoint, EncodedPoint, FieldElement, ProjectivePoint, Scalar};
 
@@ -185,8 +185,15 @@ pub(crate) fn msm_window(s: &[Scalar], p: &[ProjectivePoint], c: usize) -> Proje
             digits_t[j * n + i] = d;
         }
     }
+    // k256 0.13's batch_normalize compares an unnormalized z with zero limb by limb, so an
+    // identity computed by arithmetic (q - q) would reach its batch inversion and panic: the
+    // identities go in as the constant
+    let p: Vec<ProjectivePoint> = p
+        .iter()
+        .map(|q| if bool::from(q.is_identity()) { ProjectivePoint::IDENTITY } else { *q })
+        .collect();
     let mut affine = vec![AffinePoint::IDENTITY; n];
-    ProjectivePoint::batch_normalize(p, &mut affine);
+    ProjectivePoint::batch_normalize(&p, &mut affine);
     let xy: Vec<Option<Xy>> = affine.iter().map(Xy::from_affine).collect();
     let window_sum = |j: usize| {
         let d = &digits_t[j * n..(j + 1) * n];
@@ -279,6 +286,23 @@ mod tests {
                 msm_window(&s, &p, c);
             }
             println!("c = {} (chosen {}): {:.2} us/term", c, window(n), t.elapsed().as_secs_f64() * 1e6 / 5.0 / n as f64);
+        }
+    }
+
+    /// Identities computed by arithmetic (`q - q`, `q * 0`; k256's `batch_normalize` mistakes
+    /// their unnormalized z for non-zero) are inputs like any other.
+    #[test]
+    fn computed_identities_are_inputs() {
+        let mut rng = ChaCha20Rng::seed_from_u64(6);
+        for n in [5usize, 40, 300] {
+            let s: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
+            let mut p: Vec<ProjectivePoint> = (0..n).map(|_| ProjectivePoint::random(&mut rng)).collect();
+            let q = ProjectivePoint::random(&mut rng);
+            p[0] = q - q;
+            p[1] = q * Scalar::ZERO;
+            p[2] = q + (-q);
+            let naive: ProjectivePoint = s.iter().zip(&p).map(|(s, p)| p * s).sum();
+            assert_eq!(msm(&s, &p), naive, "n = {}", n);
         }
     }
 

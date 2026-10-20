@@ -258,6 +258,16 @@ mod tests {
             assert_eq!(Secp256k1::msm_ct(&s, &p), naive, "{}", n);
             assert_eq!(Secp256k1::msm_vt(&s, &p), naive, "{}", n);
         }
+        // identities computed by arithmetic among the inputs
+        let q = ProjectivePoint::random(&mut rng);
+        let s: Vec<Scalar> = (0..40).map(|_| Scalar::random(&mut rng)).collect();
+        let mut p: Vec<ProjectivePoint> = (0..40).map(|_| ProjectivePoint::random(&mut rng)).collect();
+        p[0] = q - q;
+        p[1] = q * Scalar::ZERO;
+        let naive: ProjectivePoint = s.iter().zip(&p).map(|(s, p)| p * s).sum();
+        assert_eq!(Secp256k1::msm_ct(&s, &p), naive);
+        assert_eq!(Secp256k1::msm_vt(&s, &p), naive);
+        assert_eq!(Secp256k1::compress(&(q - q)), Secp256k1Compressed::default());
     }
 
     #[test]

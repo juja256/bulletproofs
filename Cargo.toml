@@ -127,3 +127,7 @@ harness = false
 name = "bppp"
 harness = false
 required-features = ["bppp"]
+
+[[bench]]
+name = "curves"
+harness = false

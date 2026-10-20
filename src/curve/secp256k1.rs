@@ -177,8 +177,7 @@ impl Curve for Secp256k1 {
 
     /// Variable time: for public scalars only.
     fn msm_vt(s: &[Scalar], p: &[ProjectivePoint]) -> ProjectivePoint {
-        // until the variable-time Pippenger (task 7): the constant-time multiplication
-        Self::msm_ct(s, p)
+        super::pippenger::msm(s, p)
     }
 }
 

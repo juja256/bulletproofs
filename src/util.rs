@@ -1,5 +1,7 @@
 #![deny(missing_docs)]
 #![allow(non_snake_case)]
+// Some helpers serve only the optional R1CS and BP++ code.
+#![allow(dead_code)]
 
 extern crate alloc;
 
@@ -109,6 +111,24 @@ pub fn inner_product_par(a: &[Scalar], b: &[Scalar]) -> Scalar {
     })
     .into_iter()
     .sum()
+}
+
+/// `for i in 0..n { consume(build(i)) }`, with `build` in parallel (with `parallel`) in waves
+/// of a few items per thread, so that at most one wave of results is held at a time; `consume`
+/// sees the results in order.
+pub fn map_in_order<T: Send, F: Fn(usize) -> T + Sync + Send>(n: usize, build: F, mut consume: impl FnMut(T)) {
+    #[cfg(feature = "parallel")]
+    let wave = 4 * rayon::current_num_threads();
+    #[cfg(not(feature = "parallel"))]
+    let wave = 1;
+    let mut start = 0;
+    while start < n {
+        let len = wave.min(n - start);
+        for t in map_index(len, |j| build(start + j)) {
+            consume(t);
+        }
+        start += len;
+    }
 }
 
 /// `(0..n).map(f).collect()`, in parallel with `parallel`.

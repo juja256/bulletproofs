@@ -271,7 +271,7 @@ mod bppp_backend {
         // the R1CS constraints, lowered in parallel chunks (the same rows, in order)
         const CHUNK: usize = 1 << 12;
         let n_q = store.len();
-        let chunks = crate::util::map_index((n_q + CHUNK - 1) / CHUNK, |k| -> Result<(SparseMatrix, Vec<Scalar>), R1CSError> {
+        let build = |k: usize| -> Result<(SparseMatrix, Vec<Scalar>), R1CSError> {
             let mut m = SparseMatrix::new(n_cols);
             let mut constants = Vec::with_capacity(CHUNK);
             let mut terms = Vec::new();
@@ -293,11 +293,20 @@ mod bppp_backend {
                 constants.push(constant);
             }
             Ok((m, constants))
+        };
+        let mut first_error = None;
+        crate::util::map_in_order((n_q + CHUNK - 1) / CHUNK, build, |chunk| match chunk {
+            Ok((m, constants)) if first_error.is_none() => {
+                w_l.extend_rows(&m);
+                a_l.extend(constants);
+            }
+            Ok(_) => {}
+            Err(e) => {
+                first_error.get_or_insert(e);
+            }
         });
-        for chunk in chunks {
-            let (m, constants) = chunk?;
-            w_l.extend_rows(&m);
-            a_l.extend(constants);
+        if let Some(e) = first_error {
+            return Err(e);
         }
         let neg = -Scalar::ONE;
         let push_eq = |w_l: &mut SparseMatrix, a_l: &mut Vec<Scalar>, first: usize, lc: &LinearCombination| -> Result<(), R1CSError> {

@@ -124,14 +124,14 @@ fn commitments(g: &BpppGens, w: &CircuitWitness) -> Vec<CompressedRistretto> {
 }
 
 /// The prover without its satisfiability check, to test what the verifier rejects.
-fn prove_unchecked<T: BpppTranscript, R: RngCore + CryptoRng>(
-    c: &ArithmeticCircuit,
-    g: &BpppGens,
-    V: &[CompressedRistretto],
-    w: &CircuitWitness,
+fn prove_unchecked<C: Curve, T: BpppTranscript, R: RngCore + CryptoRng>(
+    c: &ArithmeticCircuit<C::Scalar>,
+    g: &BpppGens<C>,
+    V: &[C::Compressed],
+    w: &CircuitWitness<C::Scalar>,
     t: &mut T,
     rng: &mut R,
-) -> Result<CircuitProof, ProofError> {
+) -> Result<CircuitProof<C>, ProofError> {
     prove_impl(c, g, V, w, t, |_, _| rng, false)
 }
 
@@ -148,17 +148,21 @@ fn prove_and_verify(c: &ArithmeticCircuit, w: &CircuitWitness, rng: &mut ChaCha2
 /// The prover reproduces the independent Python reference (`ref/bppp_ref.py`,
 /// `tests/vectors/bppp/circuit.json`) given its randomness and challenges, and the
 /// verifier accepts exactly the satisfied cases.
-#[test]
-fn matches_reference_vectors() {
-    let file: serde_json::Value =
-        serde_json::from_str(include_str!("../../tests/vectors/bppp/circuit.json")).unwrap();
-    let pc = PedersenGens::default();
+fn reference_vectors<C: Curve>()
+where
+    C::Scalar: crate::bppp::testutil::TestScalar,
+{
+    let file = crate::bppp::testutil::vectors::<C>(
+        include_str!("../../tests/vectors/bppp/circuit.json"),
+        include_str!("../../tests/vectors/bppp/secp256k1/circuit.json"),
+    );
+    let pc = PedersenGens::<C>::for_curve();
     for case in file["cases"].as_array().unwrap() {
         let name = case["name"].as_str().unwrap();
         let u = |k: &str| case[k].as_u64().unwrap() as usize;
         let (n_m, n_o, n_lin) = (u("n_m"), u("n_o"), u("n_lin"));
         let n_w = 2 * n_m + n_o;
-        let c = ArithmeticCircuit {
+        let c = ArithmeticCircuit::<C::Scalar> {
             n_m,
             n_o,
             n_v: u("n_v"),
@@ -186,24 +190,18 @@ fn matches_reference_vectors() {
             s: scs(&case["s"]),
         };
         assert_eq!(c.is_satisfied(&w), case["satisfied"].as_bool().unwrap(), "{}", name);
-        let bp = BulletproofGens::new(crate::bppp::gens::capacity(n_lin, n_m), 1);
+        let bp = BulletproofGens::<C>::for_curve(crate::bppp::gens::capacity(n_lin, n_m), 1);
         let g = BpppGens::new(&pc, &bp, n_lin, n_m).unwrap();
-        let point = |p: &serde_json::Value| {
-            use curve25519_dalek::traits::MultiscalarMul;
-            (g.g * sc(&p["g"])
-                + RistrettoPoint::multiscalar_mul(scs(&p["h"]), &g.h)
-                + RistrettoPoint::multiscalar_mul(scs(&p["n"]), g.n))
-            .compress()
-        };
-        let V: Vec<CompressedRistretto> = w.v.iter().zip(&w.s).map(|(v, s)| g.commit_input(v, *s).compress()).collect();
+        let point = |p: &serde_json::Value| crate::bppp::testutil::sym_point::<C>(p, &g.g, &g.h, g.n);
+        let V: Vec<C::Compressed> = w.v.iter().zip(&w.s).map(|(v, s)| C::compress(&g.commit_input(v, *s))).collect();
         for (i, p) in case["V"].as_array().unwrap().iter().enumerate() {
             assert_eq!(V[i], point(p), "{}: V_{}", name, i);
         }
         let r = &case["rand"];
-        let randomness: Vec<Scalar> =
+        let randomness: Vec<C::Scalar> =
             ["r_O", "r_L", "r_R", "l_S", "n_S"].iter().flat_map(|k| scs(&r[*k])).collect();
         let ch = &case["chal"];
-        let challenges: Vec<Scalar> = ["rho", "lambda", "beta", "delta", "tau"]
+        let challenges: Vec<C::Scalar> = ["rho", "lambda", "beta", "delta", "tau"]
             .iter()
             .map(|k| sc(&ch[*k]))
             .chain(scs(&case["gammas"]))
@@ -222,11 +220,22 @@ fn matches_reference_vectors() {
             assert_eq!(proof.wnla.X[i], point(&round["X"]), "{}: X_{}", name, i);
             assert_eq!(proof.wnla.R[i], point(&round["R"]), "{}: R_{}", name, i);
         }
-        assert_eq!(proof.wnla.l, scs(&case["l_final"]), "{}: l", name);
-        assert_eq!(proof.wnla.n, scs(&case["n_final"]), "{}: n", name);
+        assert_eq!(proof.wnla.l, scs::<C::Scalar>(&case["l_final"]), "{}: l", name);
+        assert_eq!(proof.wnla.n, scs::<C::Scalar>(&case["n_final"]), "{}: n", name);
         let verdict = proof.verify(&c, &g, &V, &mut Replay::new(challenges)).is_ok();
         assert_eq!(verdict, case["verifies"].as_bool().unwrap(), "{}: verdict", name);
     }
+}
+
+#[test]
+fn matches_reference_vectors() {
+    reference_vectors::<Ristretto>();
+}
+
+#[cfg(feature = "secp256k1")]
+#[test]
+fn matches_reference_vectors_secp256k1() {
+    reference_vectors::<crate::curve::Secp256k1>();
 }
 
 #[test]

@@ -361,3 +361,51 @@ mod malformed {
         });
     }
 }
+
+/// A proof of one curve given to the other does not parse (the lengths differ), and the same
+/// statement on the two curves draws different challenges (the `curve` label in the
+/// transcript) (Review Focus 2).
+#[cfg(all(feature = "secp256k1", feature = "yoloproofs"))]
+mod bound_to_curve {
+    use bulletproofs::curve::{Curve, Ristretto, Secp256k1};
+    use bulletproofs::r1cs::{Backend, ConstraintSystem, Prover, R1CSError, R1CSProof};
+    use bulletproofs::{BulletproofGens, PedersenGens};
+    use merlin::Transcript;
+
+    fn product_proof<C: Curve>(backend: Backend) -> Vec<u8> {
+        let pc = PedersenGens::<C>::for_curve();
+        let bp = BulletproofGens::<C>::for_curve(16, 1);
+        let mut t = Transcript::new(b"bound");
+        let mut prover = Prover::new(&pc, &mut t);
+        prover.set_backend(backend);
+        let (_, x) = prover.commit(C::Scalar::from(3u64), C::Scalar::from(5u64));
+        let (_, y) = prover.commit(C::Scalar::from(4u64), C::Scalar::from(6u64));
+        let (_, _, o) = prover.multiply(x.into(), y.into());
+        prover.constrain(o - C::Scalar::from(12u64));
+        prover.prove(&bp).unwrap().to_bytes()
+    }
+
+    fn challenge_after_prover<C: Curve>() -> [u8; 32] {
+        let pc = PedersenGens::<C>::for_curve();
+        let mut t = Transcript::new(b"bound");
+        drop(Prover::new(&pc, &mut t));
+        let mut c = [0u8; 32];
+        t.challenge_bytes(b"probe", &mut c);
+        c
+    }
+
+    #[test]
+    fn proofs_are_bound_to_the_curve() {
+        let mut backends = vec![Backend::Bp];
+        #[cfg(feature = "bppp")]
+        backends.push(Backend::Bppp);
+        for backend in backends {
+            let r = product_proof::<Ristretto>(backend);
+            let s = product_proof::<Secp256k1>(backend);
+            assert!(R1CSProof::<Ristretto>::from_bytes(&r).is_ok() && R1CSProof::<Secp256k1>::from_bytes(&s).is_ok());
+            assert!(matches!(R1CSProof::<Secp256k1>::from_bytes(&r), Err(R1CSError::FormatError)), "{}", backend);
+            assert!(matches!(R1CSProof::<Ristretto>::from_bytes(&s), Err(R1CSError::FormatError)), "{}", backend);
+        }
+        assert_ne!(challenge_after_prover::<Ristretto>(), challenge_after_prover::<Secp256k1>());
+    }
+}

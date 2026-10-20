@@ -5,8 +5,7 @@
 
 #![allow(non_snake_case)]
 
-use curve25519_dalek::ristretto::CompressedRistretto;
-use curve25519_dalek::scalar::Scalar;
+use ff::Field as _;
 use merlin::Transcript;
 use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha20Rng;
@@ -15,6 +14,7 @@ use serde_json::Value;
 use super::builder::{CircuitBuilder, Cost, TableId};
 use super::{Backend, LinearCombination, Prover, R1CSError, Variable, Verifier};
 use crate::bppp::testutil;
+use crate::curve::{Curve, Field, Ristretto};
 use crate::{BulletproofGens, PedersenGens};
 
 fn var(v: &Value) -> Variable {
@@ -31,11 +31,11 @@ fn var(v: &Value) -> Variable {
     }
 }
 
-fn lc(v: &Value) -> LinearCombination {
+fn lc<F: Field>(v: &Value) -> LinearCombination<F> {
     v.as_array().unwrap().iter().map(|t| (var(&t[0]), testutil::sc(&t[1]))).collect()
 }
 
-fn lcs(v: &Value) -> Vec<LinearCombination> {
+fn lcs<F: Field>(v: &Value) -> Vec<LinearCombination<F>> {
     v.as_array().unwrap().iter().map(lc).collect()
 }
 
@@ -45,11 +45,11 @@ fn ints(v: &Value) -> Vec<u64> {
 
 /// Run the program; `commit(cs, v, s)` commits an input. Returns the index and error of the
 /// first failing operation.
-fn run<CS: CircuitBuilder>(
+fn run<F: Field, CS: CircuitBuilder<F>>(
     cs: &mut CS,
     program: &[Value],
     prover: bool,
-    commit: &mut dyn FnMut(&mut CS, Scalar, Scalar) -> Variable,
+    commit: &mut dyn FnMut(&mut CS, F, F) -> Variable,
 ) -> Result<(), (usize, R1CSError)> {
     let val = |op: &Value, k: &str| if prover { Some(testutil::sc(&op[k])) } else { None };
     for (i, op) in program.iter().enumerate() {
@@ -99,7 +99,7 @@ fn run<CS: CircuitBuilder>(
     Ok(())
 }
 
-fn prover_run<'a>(pc: &'a PedersenGens, t: &'a mut Transcript, program: &[Value], backend: Backend) -> (Prover<'a, &'a mut Transcript>, Vec<CompressedRistretto>, Result<(), (usize, R1CSError)>) {
+fn prover_run<'a, C: Curve>(pc: &'a PedersenGens<C>, t: &'a mut Transcript, program: &[Value], backend: Backend) -> (Prover<'a, &'a mut Transcript, C>, Vec<C::Compressed>, Result<(), (usize, R1CSError)>) {
     let mut p = Prover::new(pc, t);
     p.set_backend(backend);
     let mut V = Vec::new();
@@ -111,26 +111,31 @@ fn prover_run<'a>(pc: &'a PedersenGens, t: &'a mut Transcript, program: &[Value]
     (p, V, r)
 }
 
-fn verifier_run<'a>(t: &'a mut Transcript, program: &[Value], V: &[CompressedRistretto], backend: Backend) -> (Verifier<&'a mut Transcript>, Result<(), (usize, R1CSError)>) {
-    let mut v = Verifier::new(t);
+fn verifier_run<'a, C: Curve>(t: &'a mut Transcript, program: &[Value], V: &[C::Compressed], backend: Backend) -> (Verifier<&'a mut Transcript, C>, Result<(), (usize, R1CSError)>) {
+    let mut v = Verifier::<_, C>::for_curve(t);
     v.set_backend(backend);
     let mut it = V.iter();
     let r = run(&mut v, program, false, &mut |cs, _, _| cs.commit(*it.next().unwrap()));
     (v, r)
 }
 
-#[test]
-fn builder_matches_reference_vectors() {
-    let file: Value = serde_json::from_str(include_str!("../../tests/vectors/bppp/builder.json")).unwrap();
-    let pc = PedersenGens::default();
-    let bp = BulletproofGens::new(4096, 1);
+fn builder_vectors<C: Curve>()
+where
+    C::Scalar: testutil::TestScalar,
+{
+    let file = testutil::vectors::<C>(
+        include_str!("../../tests/vectors/bppp/builder.json"),
+        include_str!("../../tests/vectors/bppp/secp256k1/builder.json"),
+    );
+    let pc = PedersenGens::<C>::for_curve();
+    let bp = BulletproofGens::<C>::for_curve(4096, 1);
     let mut proven = 0;
     for case in file["cases"].as_array().unwrap() {
         let name = case["name"].as_str().unwrap();
         let program = case["program"].as_array().unwrap();
         let (mut t1, mut t2) = (Transcript::new(b"v"), Transcript::new(b"v"));
         let (mut p, V, pr) = prover_run(&pc, &mut t1, program, Backend::Bppp);
-        let (mut v, vr) = verifier_run(&mut t2, program, &V, Backend::Bppp);
+        let (mut v, vr) = verifier_run::<C>(&mut t2, program, &V, Backend::Bppp);
         if let Some(at) = case["error"].as_u64() {
             let at = at as usize;
             assert_eq!(at, program.len() - 1, "{}: the failing op is the last", name);
@@ -158,8 +163,8 @@ fn builder_matches_reference_vectors() {
         };
         assert_eq!(p.cost(), want, "{}: prover cost", name);
         assert_eq!(v.cost(), want, "{}: verifier cost", name);
-        let c = testutil::recip_circuit(case);
-        let w = testutil::recip_witness(case);
+        let c = testutil::recip_circuit::<C::Scalar>(case);
+        let w = testutil::recip_witness::<C::Scalar>(case);
         let cv = v.lower_builder_bppp().unwrap();
         assert_eq!(cv, c, "{}: verifier's circuit", name);
         let (cp, wp) = p.lower_builder_bppp().unwrap();
@@ -170,7 +175,7 @@ fn builder_matches_reference_vectors() {
         );
         if case["prover_a_l"].is_null() {
             assert_eq!(cp, c, "{}: prover's circuit", name);
-            testutil::run_recip_case(case, &c, &w);
+            testutil::run_recip_case::<C>(case, &c, &w);
         } else {
             // A violated R1CS constraint (spec §6.2): the prover recomputes the constants from
             // its witness and proves its own circuit, which the vector's proof data replays;
@@ -184,18 +189,18 @@ fn builder_matches_reference_vectors() {
             pc_case["digest"] = case["prover_digest"].clone();
             pc_case["satisfied"] = Value::Bool(true);
             pc_case["verifies"] = Value::Bool(true);
-            let proof = testutil::run_recip_case(&pc_case, &cp, &w);
-            let pcg = PedersenGens::default();
-            let bpg = BulletproofGens::new(c.gens_capacity(), 1);
+            let proof = testutil::run_recip_case::<C>(&pc_case, &cp, &w);
+            let pcg = PedersenGens::<C>::for_curve();
+            let bpg = BulletproofGens::<C>::for_curve(c.gens_capacity(), 1);
             let g = crate::bppp::BpppGens::new(&pcg, &bpg, c.n_lin, c.n_p + c.n_m).unwrap();
-            let V: Vec<CompressedRistretto> = w.v.iter().zip(&w.s).map(|(v, s)| g.commit_input(v, *s).compress()).collect();
+            let V: Vec<C::Compressed> = w.v.iter().zip(&w.s).map(|(v, s)| C::compress(&g.commit_input(v, *s))).collect();
             let ch = &case["chal"];
             // the challenges in protocol order (v2 starts with eta, as in run_recip_case)
             let names: &[&str] = if c.uses_eta() { &["eta", "alpha", "rho", "lambda", "beta", "delta", "tau"] } else { &["alpha", "rho", "lambda", "beta", "delta", "tau"] };
-            let challenges: Vec<Scalar> = names.iter().map(|k| testutil::sc(&ch[*k])).chain(testutil::scs(&case["gammas"])).collect();
+            let challenges: Vec<C::Scalar> = names.iter().map(|k| testutil::sc(&ch[*k])).chain(testutil::scs(&case["gammas"])).collect();
             let replay = &mut crate::bppp::transcript::Replay::new(challenges);
             assert!(crate::bppp::reciprocal::verify(&proof, &c, &g, &V, replay).is_err(), "{}: the verifier's circuit", name);
-            let eta = if c.uses_eta() { testutil::sc(&ch["eta"]) } else { Scalar::ZERO };
+            let eta = if c.uses_eta() { testutil::sc(&ch["eta"]) } else { C::Scalar::ZERO };
             assert!(!c.is_satisfied(&w, eta, testutil::sc(&ch["alpha"])), "{}", name);
         }
 
@@ -206,7 +211,7 @@ fn builder_matches_reference_vectors() {
             let (p, V, _) = prover_run(&pc, &mut t1, program, backend);
             let proof = p.prove_with_rng(&bp, &mut ChaCha20Rng::seed_from_u64(9));
             let verdict = proof.map(|proof| {
-                let (v, _) = verifier_run(&mut t2, program, &V, backend);
+                let (v, _) = verifier_run::<C>(&mut t2, program, &V, backend);
                 v.verify(&proof, &pc, &bp).is_ok()
             });
             assert_eq!(verdict.unwrap_or(false), satisfied, "{}: {:?} proof", name, backend);
@@ -214,4 +219,15 @@ fn builder_matches_reference_vectors() {
         proven += 1;
     }
     assert!(proven >= 10, "too few proven cases");
+}
+
+#[test]
+fn builder_matches_reference_vectors() {
+    builder_vectors::<Ristretto>();
+}
+
+#[cfg(feature = "secp256k1")]
+#[test]
+fn builder_matches_reference_vectors_secp256k1() {
+    builder_vectors::<crate::curve::Secp256k1>();
 }

@@ -324,19 +324,24 @@ mod tests {
 
     /// The circuits built from the statements equal the reference's field by field, honest
     /// witnesses match, and the proofs reproduce `tests/vectors/bppp/mact.json`.
-    #[test]
-    fn matches_reference_vectors() {
+    fn reference_vectors<C: Curve>()
+    where
+        C::Scalar: crate::bppp::testutil::TestScalar,
+    {
         use crate::bppp::testutil::{self, int, sc};
-        let file: serde_json::Value = serde_json::from_str(include_str!("../../tests/vectors/bppp/mact.json")).unwrap();
+        let file = testutil::vectors::<C>(
+            include_str!("../../tests/vectors/bppp/mact.json"),
+            include_str!("../../tests/vectors/bppp/secp256k1/mact.json"),
+        );
         for case in file["cases"].as_array().unwrap() {
             let name = case["name"].as_str().unwrap();
             let u = |k: &str| case[k].as_u64().unwrap() as usize;
             let st = MactStatement::new(case["base"].as_u64().unwrap(), u("n_in"), u("n_out")).unwrap();
-            let (c, info) = st.circuit();
+            let (c, info) = st.circuit::<C::Scalar>();
             assert_eq!(c, testutil::recip_circuit(case), "{}: circuit", name);
-            let w = testutil::recip_witness(case);
+            let w = testutil::recip_witness::<C::Scalar>(case);
             if case["satisfied"].as_bool().unwrap() {
-                let parse = |v: &serde_json::Value| -> Vec<MactEntry> {
+                let parse = |v: &serde_json::Value| -> Vec<MactEntry<C::Scalar>> {
                     v.as_array()
                         .unwrap()
                         .iter()
@@ -344,7 +349,7 @@ mod tests {
                         .collect()
                 };
                 let (ins, outs) = (parse(&case["inputs"]), parse(&case["outputs"]));
-                let entries: Vec<MactEntry> = ins.iter().chain(&outs).copied().collect();
+                let entries: Vec<MactEntry<C::Scalar>> = ins.iter().chain(&outs).copied().collect();
                 let digits: Vec<Vec<u64>> = outs.iter().map(|e| decompose(e.amount as u128, &info.layout)).collect();
                 let ours = info.witness(&entries, &digits);
                 assert!(
@@ -353,8 +358,19 @@ mod tests {
                     name
                 );
             }
-            testutil::run_recip_case(case, &c, &w);
+            testutil::run_recip_case::<C>(case, &c, &w);
         }
+    }
+
+    #[test]
+    fn matches_reference_vectors() {
+        reference_vectors::<Ristretto>();
+    }
+
+    #[cfg(feature = "secp256k1")]
+    #[test]
+    fn matches_reference_vectors_secp256k1() {
+        reference_vectors::<crate::curve::Secp256k1>();
     }
 
     /// A field-negative output (-5) balanced by an honest-looking range decomposition of

@@ -100,14 +100,18 @@ fn inputs(g: &BpppGens, w: &ReciprocalWitness) -> Vec<CompressedRistretto> {
 /// The prover reproduces the independent Python reference
 /// (`tests/vectors/bppp/reciprocal.json`): reciprocals, commitments, norm argument; the
 /// verifier accepts exactly the satisfied cases.
-#[test]
-fn matches_reference_vectors() {
+fn reference_vectors<C: crate::curve::Curve>()
+where
+    C::Scalar: crate::bppp::testutil::TestScalar,
+{
     use crate::bppp::testutil;
-    let file: serde_json::Value =
-        serde_json::from_str(include_str!("../../tests/vectors/bppp/reciprocal.json")).unwrap();
+    let file = testutil::vectors::<C>(
+        include_str!("../../tests/vectors/bppp/reciprocal.json"),
+        include_str!("../../tests/vectors/bppp/secp256k1/reciprocal.json"),
+    );
     let mut invalid = 0;
     for case in file["cases"].as_array().unwrap() {
-        let c = crate::bppp::testutil::recip_circuit(case);
+        let c = testutil::recip_circuit::<C::Scalar>(case);
         assert_eq!(c.w_l.n_rows(), case["n_l"].as_u64().unwrap() as usize);
         if case["shape_ok"].as_bool() == Some(false) {
             assert!(c.check().is_err(), "{}: shape", case["name"]);
@@ -115,9 +119,20 @@ fn matches_reference_vectors() {
             continue;
         }
         c.check().unwrap_or_else(|e| panic!("{}: {:?}", case["name"], e));
-        testutil::run_recip_case(case, &c, &testutil::recip_witness(case));
+        testutil::run_recip_case::<C>(case, &c, &testutil::recip_witness(case));
     }
     assert!(invalid >= 2, "shape-invalid v2 cases");
+}
+
+#[test]
+fn matches_reference_vectors() {
+    reference_vectors::<crate::curve::Ristretto>();
+}
+
+#[cfg(feature = "secp256k1")]
+#[test]
+fn matches_reference_vectors_secp256k1() {
+    reference_vectors::<crate::curve::Secp256k1>();
 }
 
 #[test]
@@ -716,7 +731,7 @@ fn shape_check_agrees_with_compiling() {
     let file: serde_json::Value = serde_json::from_str(include_str!("../../tests/vectors/bppp/reciprocal.json")).unwrap();
     let (mut ok, mut bad) = (0, 0);
     for case in file["cases"].as_array().unwrap() {
-        let c = crate::bppp::testutil::recip_circuit(case);
+        let c = crate::bppp::testutil::recip_circuit::<Scalar>(case);
         let mut variants = vec![c.clone()];
         let mut push = |f: &dyn Fn(&mut ReciprocalCircuit)| {
             let mut x = c.clone();

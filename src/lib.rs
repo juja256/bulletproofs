@@ -38,6 +38,8 @@ pub use crate::generators::{BulletproofGens, BulletproofGensShare, PedersenGens}
 pub use crate::linear_proof::LinearProof;
 pub use crate::range_proof::RangeProof;
 pub use crate::transcript::{TranscriptBackend, TranscriptRef};
+#[cfg(feature = "sha256-transcript")]
+pub use crate::transcript::Sha256Transcript;
 
 #[cfg_attr(feature = "docs", doc(include = "../docs/aggregation-api.md"))]
 pub mod range_proof_mpc {
@@ -87,6 +89,9 @@ pub mod elements;
 pub mod secp256k1 {
     pub use crate::curve::{Secp256k1, Secp256k1Compressed};
     pub use crate::elements;
+    /// The transcript for proofs checked by a Simplicity verifier (SHA-256 only); every
+    /// protocol also takes `merlin::Transcript`.
+    pub use crate::transcript::Sha256Transcript;
 
     /// A scalar (big-endian in proofs).
     pub type Scalar = k256::Scalar;

@@ -75,6 +75,14 @@ impl Curve for Ristretto {
     fn msm_vt(s: &[Scalar], p: &[RistrettoPoint]) -> RistrettoPoint {
         util::msm_slices(s, p, util::MSM_CHUNK_VT, true)
     }
+
+    fn msm_index<'a, T>(len: usize, vartime: bool, term: T) -> RistrettoPoint
+    where
+        T: Fn(usize) -> (Scalar, &'a RistrettoPoint) + Sync,
+    {
+        let chunk = if vartime { util::MSM_CHUNK_VT } else { util::MSM_CHUNK_CT };
+        util::msm_index(len, chunk, vartime, term)
+    }
 }
 
 #[cfg(test)]

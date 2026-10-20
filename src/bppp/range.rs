@@ -4,7 +4,6 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use curve25519_dalek::ristretto::CompressedRistretto;
 use curve25519_dalek::scalar::Scalar;
 use rand_core::{CryptoRng, RngCore};
 use subtle::ConstantTimeEq;
@@ -14,6 +13,7 @@ use super::gens::BpppGens;
 use super::reciprocal::{self, Pole, ReciprocalCircuit, ReciprocalRow, ReciprocalWitness};
 use super::sparse::SparseMatrix;
 use super::transcript::BpppTranscript;
+use crate::curve::{Curve, Field, Ristretto};
 use crate::errors::ProofError;
 use crate::{BulletproofGens, PedersenGens};
 
@@ -111,19 +111,19 @@ pub(crate) struct RangeLayout {
 
 impl RangeLayout {
     /// The reciprocal witness for `values` with the given digits (one vector per value).
-    pub fn witness(&self, values: &[u64], blindings: &[Scalar], digits: &[Vec<u64>]) -> ReciprocalWitness {
+    pub fn witness<F: Field>(&self, values: &[u64], blindings: &[F], digits: &[Vec<u64>]) -> ReciprocalWitness<F> {
         let tagged: Vec<(u64, u64)> = digits
             .iter()
             .zip(&self.layouts)
             .flat_map(|(d, l)| d.iter().zip(l).map(|(d, (_, r))| (*d, *r)))
             .collect();
-        let w_o = self.tables.iter().flat_map(|&r| multiplicities(&tagged, r)).map(Scalar::from).collect();
+        let w_o = self.tables.iter().flat_map(|&r| multiplicities(&tagged, r)).map(F::from).collect();
         ReciprocalWitness {
-            w_d: tagged.iter().map(|(d, _)| Scalar::from(*d)).collect(),
+            w_d: tagged.iter().map(|(d, _)| F::from(*d)).collect(),
             w_l: vec![],
             w_r: vec![],
             w_o,
-            v: values.iter().map(|v| vec![Scalar::from(*v)]).collect(),
+            v: values.iter().map(|v| vec![F::from(*v)]).collect(),
             s: blindings.to_vec(),
         }
     }
@@ -131,26 +131,26 @@ impl RangeLayout {
 
 /// The tables and reciprocal rows of spec §5.2 for poles with the given radices; `pole_offset`
 /// is the index of the first digit pole, `mult_col` the column of the first multiplicity.
-pub(crate) fn table_rows(radices: &[u64], pole_offset: usize, n_mm: usize, mult_col: usize) -> (Vec<u64>, Vec<ReciprocalRow>) {
+pub(crate) fn table_rows<F: Field>(radices: &[u64], pole_offset: usize, n_mm: usize, mult_col: usize) -> (Vec<u64>, Vec<ReciprocalRow<F>>) {
     let mut tables: Vec<u64> = radices.to_vec();
     tables.sort_unstable();
     tables.dedup();
     let mut rows = Vec::new();
     let mut col = mult_col;
     for &r in &tables {
-        let mut terms: Vec<(usize, Scalar, Option<Pole>)> = radices
+        let mut terms: Vec<(usize, F, Option<Pole<F>>)> = radices
             .iter()
             .enumerate()
             .filter(|(_, &x)| x == r)
-            .map(|(p, _)| (n_mm + pole_offset + p, Scalar::ONE, None))
+            .map(|(p, _)| (n_mm + pole_offset + p, F::ONE, None))
             .collect();
         for s in 1..r {
-            terms.push((col, Scalar::ONE, Some(Scalar::ZERO.into())));
-            terms.push((col, -Scalar::ONE, Some(Scalar::from(s).into())));
+            terms.push((col, F::ONE, Some(F::ZERO.into())));
+            terms.push((col, -F::ONE, Some(F::from(s).into())));
             col += 1;
         }
         let count = radices.iter().filter(|&&x| x == r).count() as u64;
-        rows.push(ReciprocalRow { terms, consts: vec![(-Scalar::from(count), Some(Scalar::ZERO.into()))] });
+        rows.push(ReciprocalRow { terms, consts: vec![(-F::from(count), Some(F::ZERO.into()))] });
     }
     (tables, rows)
 }
@@ -180,7 +180,7 @@ impl RangeStatement {
     }
 
     /// The circuit of spec §5.2.
-    pub(crate) fn circuit(&self) -> (ReciprocalCircuit, RangeLayout) {
+    pub(crate) fn circuit<F: Field>(&self) -> (ReciprocalCircuit<F>, RangeLayout) {
         let layouts: Vec<Vec<(u128, u64)>> =
             self.ranges.iter().map(|&(a, b)| layout(b - a as u128, self.base)).collect();
         let radices: Vec<u64> = layouts.iter().flatten().map(|(_, r)| *r).collect();
@@ -196,7 +196,7 @@ impl RangeStatement {
         let mut w_l = SparseMatrix::new(n_w);
         let mut pole = 0;
         for l in &layouts {
-            let row: Vec<(usize, Scalar)> = l.iter().enumerate().map(|(j, (g, _))| (pole + j, -Scalar::from(*g))).collect();
+            let row: Vec<(usize, F)> = l.iter().enumerate().map(|(j, (g, _))| (pole + j, -crate::util::from_u128::<F>(*g))).collect();
             pole += l.len();
             w_l.push_row(row);
         }
@@ -214,11 +214,11 @@ impl RangeStatement {
             n_lin,
             k: self.ranges.len(),
             w_n,
-            a_n: vec![Scalar::ONE; n_p],
+            a_n: vec![F::ONE; n_p],
             w_m: SparseMatrix::new(n_w),
             a_m: vec![],
             w_l,
-            a_l: self.ranges.iter().map(|&(a, _)| -Scalar::from(a)).collect(),
+            a_l: self.ranges.iter().map(|&(a, _)| -F::from(a)).collect(),
             recip,
             tuples: vec![],
             f_l: true,
@@ -230,17 +230,17 @@ impl RangeStatement {
 
     /// The `BulletproofGens` capacity the proof needs.
     pub fn generators_capacity(&self) -> usize {
-        let (c, _) = self.circuit();
+        let (c, _) = self.circuit::<Scalar>();
         c.gens_capacity()
     }
 
     #[cfg(test)]
-    pub(crate) fn gens<'a>(&self, pc: &PedersenGens, bp: &'a BulletproofGens) -> Result<BpppGens<'a>, ProofError> {
-        self.circuit().0.gens(pc, bp)
+    pub(crate) fn gens<'a, C: Curve>(&self, pc: &PedersenGens<C>, bp: &'a BulletproofGens<C>) -> Result<BpppGens<'a, C>, ProofError> {
+        self.circuit::<C::Scalar>().0.gens(pc, bp)
     }
 
     /// The circuit and generators for verification, with the domain separator absorbed.
-    fn setup<'a, T: BpppTranscript>(&self, pc: &PedersenGens, bp: &'a BulletproofGens, t: &mut T) -> Result<(ReciprocalCircuit, BpppGens<'a>), ProofError> {
+    fn setup<'a, C: Curve, T: BpppTranscript>(&self, pc: &PedersenGens<C>, bp: &'a BulletproofGens<C>, t: &mut T) -> Result<(ReciprocalCircuit<C::Scalar>, BpppGens<'a, C>), ProofError> {
         let (c, _) = self.circuit();
         let g = c.gens(pc, bp)?;
         t.domain_sep(b"bppp-range v1");
@@ -250,20 +250,20 @@ impl RangeStatement {
 
 /// A BP++ range proof for several values (spec §5.2).
 #[derive(Clone, Debug, PartialEq)]
-pub struct RangeProof(pub(crate) CircuitProof);
+pub struct RangeProof<C: Curve = Ristretto>(pub(crate) CircuitProof<C>);
 
-impl RangeProof {
+impl<C: Curve> RangeProof<C> {
     /// Prove `values[i] in [A_i, B_i)` for commitments `values[i] B + blindings[i] B_blinding`;
     /// returns the proof and the commitments. `FormatError` if a value is out of its range.
     pub fn prove<T: BpppTranscript, R: RngCore + CryptoRng>(
         st: &RangeStatement,
-        pc: &PedersenGens,
-        bp: &BulletproofGens,
+        pc: &PedersenGens<C>,
+        bp: &BulletproofGens<C>,
         values: &[u64],
-        blindings: &[Scalar],
+        blindings: &[C::Scalar],
         transcript: &mut T,
         rng: &mut R,
-    ) -> Result<(RangeProof, Vec<CompressedRistretto>), ProofError> {
+    ) -> Result<(RangeProof<C>, Vec<C::Compressed>), ProofError> {
         if values.len() != st.ranges.len() || blindings.len() != st.ranges.len() {
             return Err(ProofError::FormatError);
         }
@@ -275,7 +275,7 @@ impl RangeProof {
         let digits: Vec<Vec<u64>> =
             values.iter().zip(&st.ranges).zip(&info.layouts).map(|((&v, &(a, _)), l)| decompose((v - a) as u128, l)).collect();
         let w = info.witness(values, blindings, &digits);
-        let V: Vec<CompressedRistretto> = values.iter().zip(blindings).map(|(v, s)| pc.commit(Scalar::from(*v), *s).compress()).collect();
+        let V: Vec<C::Compressed> = values.iter().zip(blindings).map(|(v, s)| C::compress(&pc.commit(C::Scalar::from(*v), *s))).collect();
         transcript.domain_sep(b"bppp-range v1");
         let proof = reciprocal::prove(&c, &g, &V, &w, transcript, rng)?;
         Ok((RangeProof(proof), V))
@@ -285,9 +285,9 @@ impl RangeProof {
     pub fn verify<T: BpppTranscript>(
         &self,
         st: &RangeStatement,
-        pc: &PedersenGens,
-        bp: &BulletproofGens,
-        V: &[CompressedRistretto],
+        pc: &PedersenGens<C>,
+        bp: &BulletproofGens<C>,
+        V: &[C::Compressed],
         transcript: &mut T,
     ) -> Result<(), ProofError> {
         let (c, g) = st.setup(pc, bp, transcript)?;
@@ -298,11 +298,11 @@ impl RangeProof {
     pub(crate) fn terms<T: BpppTranscript>(
         &self,
         st: &RangeStatement,
-        pc: &PedersenGens,
-        bp: &BulletproofGens,
-        V: &[CompressedRistretto],
+        pc: &PedersenGens<C>,
+        bp: &BulletproofGens<C>,
+        V: &[C::Compressed],
         transcript: &mut T,
-    ) -> Result<super::circuit::Terms, ProofError> {
+    ) -> Result<super::circuit::Terms<C>, ProofError> {
         let (c, g) = st.setup(pc, bp, transcript)?;
         reciprocal::terms(&self.0, &c, &g, V, transcript)
     }
@@ -314,13 +314,17 @@ impl RangeProof {
 
     /// Parse a proof for the statement `st`.
     pub fn from_bytes(bytes: &[u8], st: &RangeStatement) -> Result<Self, ProofError> {
-        Ok(RangeProof(reciprocal::proof_from_bytes(bytes, &st.circuit().0)?))
+        Ok(RangeProof(reciprocal::proof_from_bytes(bytes, &st.circuit::<C::Scalar>().0)?))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
+    use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
+    #[allow(unused_imports)]
+    use curve25519_dalek::scalar::Scalar;
     use merlin::Transcript;
     use rand_chacha::rand_core::{RngCore, SeedableRng};
     use rand_chacha::ChaCha20Rng;

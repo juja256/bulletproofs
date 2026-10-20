@@ -54,7 +54,7 @@ fn create_linear_proof_helper(c: &mut Criterion) {
 
             // Make linear proof
             bench.iter(|| {
-                LinearProof::create(
+                LinearProof::<bulletproofs::curve::Ristretto>::create(
                     &mut transcript,
                     &mut rng,
                     &C,
@@ -132,7 +132,7 @@ fn linear_verify(c: &mut Criterion) {
                 )
                 .compress();
 
-                let proof = LinearProof::create(
+                let proof = LinearProof::<bulletproofs::curve::Ristretto>::create(
                     &mut transcript,
                     &mut rng,
                     &C,

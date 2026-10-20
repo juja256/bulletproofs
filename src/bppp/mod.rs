@@ -22,6 +22,7 @@ pub(crate) mod wnla;
 pub use self::batch::BatchVerifier;
 pub use self::circuit::{ArithmeticCircuit, CircuitProof, CircuitWitness, Slot};
 pub use self::gens::BpppGens;
+pub(crate) use self::gens::capacity as gens_capacity;
 pub use self::mact::{MactEntry, MactProof, MactStatement};
 pub use self::range::{RangeProof, RangeStatement};
 pub use self::reciprocal::{Component, LateWitness, Pole, ReciprocalCircuit, ReciprocalProof, ReciprocalRow, ReciprocalWitness, TuplePole};

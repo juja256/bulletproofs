@@ -4,41 +4,41 @@
 use alloc::vec::Vec;
 use core::iter::once;
 
-use curve25519_dalek::ristretto::RistrettoPoint;
-use curve25519_dalek::scalar::Scalar;
-use curve25519_dalek::traits::{IsIdentity, VartimeMultiscalarMul};
+use ff::Field as _;
+use group::Group;
 
 use super::gens::BpppGens;
+use crate::curve::{Curve, Ristretto};
 use crate::errors::ProofError;
-use crate::util;
 
 /// `g G + <h, H> + <n, N> + sum k P = 0` over the generators `G`, `H`, `N` and the proof's own
 /// points `P` (shorter `h`, `n` are zero-padded).
-#[derive(Default)]
-pub(crate) struct Terms {
-    pub(crate) g: Scalar,
-    pub(crate) h: Vec<Scalar>,
-    pub(crate) n: Vec<Scalar>,
-    pub(crate) points: Vec<(Scalar, RistrettoPoint)>,
+pub(crate) struct Terms<C: Curve = Ristretto> {
+    pub(crate) g: C::Scalar,
+    pub(crate) h: Vec<C::Scalar>,
+    pub(crate) n: Vec<C::Scalar>,
+    pub(crate) points: Vec<(C::Scalar, C::Point)>,
 }
 
-impl Terms {
+impl<C: Curve> Default for Terms<C> {
+    fn default() -> Self {
+        Terms { g: C::Scalar::ZERO, h: Vec::new(), n: Vec::new(), points: Vec::new() }
+    }
+}
+
+impl<C: Curve> Terms<C> {
     /// Over the generators of [`BpppGens`].
-    pub(crate) fn check(&self, gens: &BpppGens) -> Result<(), ProofError> {
+    pub(crate) fn check(&self, gens: &BpppGens<C>) -> Result<(), ProofError> {
         self.check_with(&gens.g, &gens.h, gens.n)
     }
 
     /// Over the generators `g`, `h`, `n` (at least as long as the coefficients); public
     /// scalars, variable time.
-    pub(crate) fn check_with(&self, g: &RistrettoPoint, h: &[RistrettoPoint], n: &[RistrettoPoint]) -> Result<(), ProofError> {
-        let small = RistrettoPoint::vartime_multiscalar_mul(
-            once(self.g).chain(self.points.iter().map(|(k, _)| *k)),
-            once(g).chain(self.points.iter().map(|(_, p)| p)),
-        );
-        let check = small
-            + util::vartime_msm_slices(&self.h, &h[..self.h.len()], util::MSM_CHUNK_VT)
-            + util::vartime_msm_slices(&self.n, &n[..self.n.len()], util::MSM_CHUNK_VT);
-        if check.is_identity() {
+    pub(crate) fn check_with(&self, g: &C::Point, h: &[C::Point], n: &[C::Point]) -> Result<(), ProofError> {
+        let ks: Vec<C::Scalar> = once(self.g).chain(self.points.iter().map(|(k, _)| *k)).collect();
+        let ps: Vec<C::Point> = once(*g).chain(self.points.iter().map(|(_, p)| *p)).collect();
+        let check = C::msm_vt(&ks, &ps) + C::msm_vt(&self.h, &h[..self.h.len()]) + C::msm_vt(&self.n, &n[..self.n.len()]);
+        if bool::from(check.is_identity()) {
             Ok(())
         } else {
             Err(ProofError::VerificationError)
@@ -46,11 +46,11 @@ impl Terms {
     }
 
     /// `self += w t` (batch verification).
-    pub(crate) fn add_scaled(&mut self, w: Scalar, t: Terms) {
+    pub(crate) fn add_scaled(&mut self, w: C::Scalar, t: Terms<C>) {
         self.g += w * t.g;
         for (v, x) in [(&mut self.h, &t.h), (&mut self.n, &t.n)] {
             if v.len() < x.len() {
-                v.resize(x.len(), Scalar::ZERO);
+                v.resize(x.len(), C::Scalar::ZERO);
             }
             for (a, b) in v.iter_mut().zip(x) {
                 *a += w * b;

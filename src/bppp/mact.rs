@@ -10,7 +10,6 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use curve25519_dalek::ristretto::CompressedRistretto;
 use curve25519_dalek::scalar::Scalar;
 use rand_core::{CryptoRng, RngCore};
 
@@ -20,22 +19,23 @@ use super::range::{decompose, layout, multiplicities, table_rows};
 use super::reciprocal::{self, ReciprocalCircuit, ReciprocalRow, ReciprocalWitness};
 use super::sparse::SparseMatrix;
 use super::transcript::BpppTranscript;
+use crate::curve::{Curve, Field, Ristretto};
 use crate::errors::ProofError;
 use crate::{BulletproofGens, PedersenGens};
 
 /// An input or output: amount, asset type (a scalar, e.g. a hash of the asset id) and blinding.
 /// Committed as `amount B + blinding B_blinding + asset H_7` (spec §5.3). `Debug` hides it.
 #[derive(Clone, Copy)]
-pub struct MactEntry {
+pub struct MactEntry<F: Field = Scalar> {
     /// The amount.
     pub amount: u64,
     /// The asset type.
-    pub asset: Scalar,
+    pub asset: F,
     /// The blinding.
-    pub blinding: Scalar,
+    pub blinding: F,
 }
 
-impl core::fmt::Debug for MactEntry {
+impl<F: Field> core::fmt::Debug for MactEntry<F> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("MactEntry { .. }")
     }
@@ -85,7 +85,7 @@ impl MactStatement {
     }
 
     /// The circuit of spec §5.3.
-    pub(crate) fn circuit(&self) -> (ReciprocalCircuit, MactLayout) {
+    pub(crate) fn circuit<F: Field>(&self) -> (ReciprocalCircuit<F>, MactLayout) {
         let k = self.k();
         let layout = layout(1u128 << 64, self.base);
         let digit_radices: Vec<u64> = (0..self.n_out).flat_map(|_| layout.iter().map(|(_, r)| *r)).collect();
@@ -102,7 +102,7 @@ impl MactStatement {
         let copy = |i: usize| 2 * n_mm + i;
         let mut w_n = SparseMatrix::new(n_w);
         for i in 0..k {
-            let sign = if i < self.n_in { Scalar::ONE } else { -Scalar::ONE };
+            let sign = if i < self.n_in { F::ONE } else { -F::ONE };
             w_n.push_row(vec![(copy(i), sign)]);
         }
         for _ in k..n_p {
@@ -110,17 +110,17 @@ impl MactStatement {
         }
         let mut w_l = SparseMatrix::new(n_w);
         for i in 0..k {
-            w_l.push_row(vec![(copy(i), -Scalar::ONE)]);
-            w_l.push_row(vec![(i, -Scalar::ONE)]);
+            w_l.push_row(vec![(copy(i), -F::ONE)]);
+            w_l.push_row(vec![(i, -F::ONE)]);
         }
         for j in 0..self.n_out {
             let first = k + j * layout.len();
-            let mut row: Vec<(usize, Scalar)> =
-                layout.iter().enumerate().map(|(d, (g, _))| (first + d, -Scalar::from(*g))).collect();
-            row.push((copy(self.n_in + j), Scalar::ONE));
+            let mut row: Vec<(usize, F)> =
+                layout.iter().enumerate().map(|(d, (g, _))| (first + d, -crate::util::from_u128::<F>(*g))).collect();
+            row.push((copy(self.n_in + j), F::ONE));
             w_l.push_row(row);
         }
-        let balance = ReciprocalRow { terms: (0..k).map(|i| (n_mm + i, Scalar::ONE, None)).collect(), consts: vec![] };
+        let balance = ReciprocalRow { terms: (0..k).map(|i| (n_mm + i, F::ONE, None)).collect(), consts: vec![] };
         let (tables, table_recip) = table_rows(&digit_radices, k, n_mm, 2 * n_mm + k);
         let mut recip = vec![balance];
         recip.extend(table_recip);
@@ -134,11 +134,11 @@ impl MactStatement {
             n_lin,
             k,
             w_n,
-            a_n: (0..n_p).map(|p| if p < k { Scalar::ZERO } else { Scalar::ONE }).collect(),
+            a_n: (0..n_p).map(|p| if p < k { F::ZERO } else { F::ONE }).collect(),
             w_m: SparseMatrix::new(n_w),
             a_m: vec![],
             w_l,
-            a_l: vec![Scalar::ZERO; 2 * k + self.n_out],
+            a_l: vec![F::ZERO; 2 * k + self.n_out],
             recip,
             tuples: vec![],
             f_l: true,
@@ -150,17 +150,17 @@ impl MactStatement {
 
     /// The `BulletproofGens` capacity the proof needs.
     pub fn generators_capacity(&self) -> usize {
-        let (c, _) = self.circuit();
+        let (c, _) = self.circuit::<Scalar>();
         c.gens_capacity()
     }
 
     #[cfg(test)]
-    pub(crate) fn gens<'a>(&self, pc: &PedersenGens, bp: &'a BulletproofGens) -> Result<BpppGens<'a>, ProofError> {
-        self.circuit().0.gens(pc, bp)
+    pub(crate) fn gens<'a, C: Curve>(&self, pc: &PedersenGens<C>, bp: &'a BulletproofGens<C>) -> Result<BpppGens<'a, C>, ProofError> {
+        self.circuit::<C::Scalar>().0.gens(pc, bp)
     }
 
     /// The circuit and generators for verification, with the domain separator absorbed.
-    fn setup<'a, T: BpppTranscript>(&self, pc: &PedersenGens, bp: &'a BulletproofGens, t: &mut T) -> Result<(ReciprocalCircuit, BpppGens<'a>), ProofError> {
+    fn setup<'a, C: Curve, T: BpppTranscript>(&self, pc: &PedersenGens<C>, bp: &'a BulletproofGens<C>, t: &mut T) -> Result<(ReciprocalCircuit<C::Scalar>, BpppGens<'a, C>), ProofError> {
         let (c, _) = self.circuit();
         let g = c.gens(pc, bp)?;
         t.domain_sep(b"bppp-mact v1");
@@ -170,19 +170,19 @@ impl MactStatement {
 
 impl MactLayout {
     /// The reciprocal witness for the entries (inputs first) with the given output digits.
-    pub(crate) fn witness(&self, entries: &[MactEntry], out_digits: &[Vec<u64>]) -> ReciprocalWitness {
+    pub(crate) fn witness<F: Field>(&self, entries: &[MactEntry<F>], out_digits: &[Vec<u64>]) -> ReciprocalWitness<F> {
         let tagged: Vec<(u64, u64)> =
             out_digits.iter().flat_map(|d| d.iter().zip(&self.layout).map(|(d, (_, r))| (*d, *r))).collect();
         ReciprocalWitness {
-            w_d: entries.iter().map(|e| e.asset).chain(tagged.iter().map(|(d, _)| Scalar::from(*d))).collect(),
+            w_d: entries.iter().map(|e| e.asset).chain(tagged.iter().map(|(d, _)| F::from(*d))).collect(),
             w_l: vec![],
             w_r: vec![],
             w_o: entries
                 .iter()
-                .map(|e| Scalar::from(e.amount))
-                .chain(self.tables.iter().flat_map(|&r| multiplicities(&tagged, r)).map(Scalar::from))
+                .map(|e| F::from(e.amount))
+                .chain(self.tables.iter().flat_map(|&r| multiplicities(&tagged, r)).map(F::from))
                 .collect(),
-            v: entries.iter().map(|e| vec![Scalar::from(e.amount), e.asset]).collect(),
+            v: entries.iter().map(|e| vec![F::from(e.amount), e.asset]).collect(),
             s: entries.iter().map(|e| e.blinding).collect(),
         }
     }
@@ -190,31 +190,31 @@ impl MactLayout {
 
 /// A BP++ multi-asset transaction proof (spec §5.3).
 #[derive(Clone, Debug, PartialEq)]
-pub struct MactProof(pub(crate) CircuitProof);
+pub struct MactProof<C: Curve = Ristretto>(pub(crate) CircuitProof<C>);
 
-impl MactProof {
+impl<C: Curve> MactProof<C> {
     /// Prove that `inputs` and `outputs` balance per asset type and that the outputs are in
     /// range; returns the proof and the commitments (inputs, then outputs). Fails if they do
     /// not balance. Input amounts are not range-checked (see the module documentation).
     pub fn prove<T: BpppTranscript, R: RngCore + CryptoRng>(
         st: &MactStatement,
-        pc: &PedersenGens,
-        bp: &BulletproofGens,
-        inputs: &[MactEntry],
-        outputs: &[MactEntry],
+        pc: &PedersenGens<C>,
+        bp: &BulletproofGens<C>,
+        inputs: &[MactEntry<C::Scalar>],
+        outputs: &[MactEntry<C::Scalar>],
         transcript: &mut T,
         rng: &mut R,
-    ) -> Result<(MactProof, Vec<CompressedRistretto>), ProofError> {
+    ) -> Result<(MactProof<C>, Vec<C::Compressed>), ProofError> {
         if inputs.len() != st.n_in || outputs.len() != st.n_out {
             return Err(ProofError::FormatError);
         }
         let (c, info) = st.circuit();
         let g = c.gens(pc, bp)?;
-        let entries: Vec<MactEntry> = inputs.iter().chain(outputs).copied().collect();
+        let entries: Vec<MactEntry<C::Scalar>> = inputs.iter().chain(outputs).copied().collect();
         let out_digits: Vec<Vec<u64>> = outputs.iter().map(|e| decompose(e.amount as u128, &info.layout)).collect();
         let w = info.witness(&entries, &out_digits);
-        let V: Vec<CompressedRistretto> =
-            entries.iter().map(|e| g.commit_input(&[Scalar::from(e.amount), e.asset], e.blinding).compress()).collect();
+        let V: Vec<C::Compressed> =
+            entries.iter().map(|e| C::compress(&g.commit_input(&[C::Scalar::from(e.amount), e.asset], e.blinding))).collect();
         transcript.domain_sep(b"bppp-mact v1");
         let proof = reciprocal::prove(&c, &g, &V, &w, transcript, rng)?;
         Ok((MactProof(proof), V))
@@ -225,9 +225,9 @@ impl MactProof {
     pub fn verify<T: BpppTranscript>(
         &self,
         st: &MactStatement,
-        pc: &PedersenGens,
-        bp: &BulletproofGens,
-        V: &[CompressedRistretto],
+        pc: &PedersenGens<C>,
+        bp: &BulletproofGens<C>,
+        V: &[C::Compressed],
         transcript: &mut T,
     ) -> Result<(), ProofError> {
         let (c, g) = st.setup(pc, bp, transcript)?;
@@ -238,11 +238,11 @@ impl MactProof {
     pub(crate) fn terms<T: BpppTranscript>(
         &self,
         st: &MactStatement,
-        pc: &PedersenGens,
-        bp: &BulletproofGens,
-        V: &[CompressedRistretto],
+        pc: &PedersenGens<C>,
+        bp: &BulletproofGens<C>,
+        V: &[C::Compressed],
         transcript: &mut T,
-    ) -> Result<super::circuit::Terms, ProofError> {
+    ) -> Result<super::circuit::Terms<C>, ProofError> {
         let (c, g) = st.setup(pc, bp, transcript)?;
         reciprocal::terms(&self.0, &c, &g, V, transcript)
     }
@@ -254,13 +254,17 @@ impl MactProof {
 
     /// Parse a proof for the statement `st`.
     pub fn from_bytes(bytes: &[u8], st: &MactStatement) -> Result<Self, ProofError> {
-        Ok(MactProof(reciprocal::proof_from_bytes(bytes, &st.circuit().0)?))
+        Ok(MactProof(reciprocal::proof_from_bytes(bytes, &st.circuit::<C::Scalar>().0)?))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
+    use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
+    #[allow(unused_imports)]
+    use curve25519_dalek::scalar::Scalar;
     use merlin::Transcript;
     use rand_chacha::rand_core::SeedableRng;
     use rand_chacha::ChaCha20Rng;

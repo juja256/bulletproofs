@@ -130,7 +130,7 @@ fn main() {
             let gens = BpppGens::new(&pc, &bp, 0, n).unwrap();
             let (h_vec, n_vec, g) = (gens.h.clone(), gens.n.to_vec(), gens.g);
             let c: Vec<Scalar> = (0..7).map(|_| Scalar::random(&mut rng)).collect();
-            let st = WnlaStatement { g: &g, h: &h_vec, n: &n_vec, c: &c, rho: Scalar::from(3u64) };
+            let st = WnlaStatement::<bulletproofs::curve::Ristretto> { g: &g, h: &h_vec, n: &n_vec, c: &c, rho: Scalar::from(3u64) };
             let l: Vec<Scalar> = (0..7).map(|_| Scalar::random(&mut rng)).collect();
             let nv: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
             let C: RistrettoPoint = st.commit(&l, &nv);

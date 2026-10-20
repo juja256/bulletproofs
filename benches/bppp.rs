@@ -23,7 +23,7 @@ fn wnla_bench(c: &mut Criterion) {
         let (a, b) = (16, 1usize << k);
         let (G, H, N) = (points("G", 1)[0], points("H", a), points("N", b));
         let cvec: Vec<Scalar> = (0..a).map(|_| Scalar::random(&mut rng)).collect();
-        let st = WnlaStatement { g: &G, h: &H, n: &N, c: &cvec, rho: Scalar::random(&mut rng) };
+        let st = WnlaStatement::<bulletproofs::curve::Ristretto> { g: &G, h: &H, n: &N, c: &cvec, rho: Scalar::random(&mut rng) };
         let l: Vec<Scalar> = (0..a).map(|_| Scalar::random(&mut rng)).collect();
         let n: Vec<Scalar> = (0..b).map(|_| Scalar::random(&mut rng)).collect();
         let C = st.commit(&l, &n);

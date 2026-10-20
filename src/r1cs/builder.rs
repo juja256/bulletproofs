@@ -60,7 +60,7 @@ impl Cost {
         match backend {
             super::Backend::Bp => (self.bp_phase1 + self.bp_phase2).next_power_of_two(),
             #[cfg(feature = "bppp")]
-            super::Backend::Bppp => crate::bppp::BpppGens::capacity(self.bppp_linear, self.bppp_gates),
+            super::Backend::Bppp => crate::bppp::gens_capacity(self.bppp_linear, self.bppp_gates),
         }
     }
 }

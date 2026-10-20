@@ -81,3 +81,38 @@ mod bp {
         linear_roundtrip::<Ristretto>();
     }
 }
+
+#[cfg(feature = "bppp")]
+mod bppp {
+    use bulletproofs::bppp::{BatchVerifier, RangeProof, RangeStatement};
+    use bulletproofs::curve::ff::Field as _;
+    use bulletproofs::curve::{Curve, Ristretto};
+    use bulletproofs::{BulletproofGens, PedersenGens};
+    use merlin::Transcript;
+    use rand_chacha::rand_core::SeedableRng;
+    use rand_chacha::ChaCha20Rng;
+
+    /// A BP++ range proof for two values: prove, encoding round trip, verify, batch verify,
+    /// a wrong transcript and an out-of-range value.
+    pub fn bppp_range_roundtrip<C: Curve>() {
+        let mut rng = ChaCha20Rng::seed_from_u64(7);
+        let st = RangeStatement::new(16, vec![(0, 1 << 32), (10, 1000)]).unwrap();
+        let pc = PedersenGens::<C>::for_curve();
+        let bp = BulletproofGens::<C>::for_curve(st.generators_capacity(), 1);
+        let blinds: Vec<C::Scalar> = (0..2).map(|_| C::Scalar::random(&mut rng)).collect();
+        let (proof, V) = RangeProof::<C>::prove(&st, &pc, &bp, &[123_456, 999], &blinds, &mut Transcript::new(b"r"), &mut rng).unwrap();
+        let parsed = RangeProof::<C>::from_bytes(&proof.to_bytes(), &st).unwrap();
+        assert_eq!(parsed, proof);
+        parsed.verify(&st, &pc, &bp, &V, &mut Transcript::new(b"r")).unwrap();
+        assert!(parsed.verify(&st, &pc, &bp, &V, &mut Transcript::new(b"x")).is_err());
+        let mut batch = BatchVerifier::new(&pc, &bp, ChaCha20Rng::seed_from_u64(8));
+        batch.add_range(&parsed, &st, &V, &mut Transcript::new(b"r")).unwrap();
+        batch.verify().unwrap();
+        assert!(RangeProof::<C>::prove(&st, &pc, &bp, &[123_456, 1000], &blinds, &mut Transcript::new(b"r"), &mut rng).is_err());
+    }
+
+    #[test]
+    fn bppp_range_proofs_ristretto() {
+        bppp_range_roundtrip::<Ristretto>();
+    }
+}

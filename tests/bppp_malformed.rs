@@ -120,7 +120,7 @@ fn r1cs_proofs_of_every_kind() {
             if !x.is_empty() {
                 x[0] = tag;
             }
-            let _ = R1CSProof::from_bytes(&x);
+            let _ = R1CSProof::<bulletproofs::curve::Ristretto>::from_bytes(&x);
         }
     }
     // huge dimensions in the BP++ headers
@@ -130,7 +130,7 @@ fn r1cs_proofs_of_every_kind() {
             x.extend(a.to_le_bytes());
             x.extend(b.to_le_bytes());
             x.extend([0u8; 300]);
-            assert!(R1CSProof::from_bytes(&x).is_err());
+            assert!(R1CSProof::<bulletproofs::curve::Ristretto>::from_bytes(&x).is_err());
         }
     }
 }

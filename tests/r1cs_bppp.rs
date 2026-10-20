@@ -227,8 +227,8 @@ fn malformed_bppp_proofs_are_rejected() {
     let (proof, V) = prove(Backend::Bppp, [6, 7, 42, 200], 8, &pc, &bp).unwrap();
     let bytes = proof.to_bytes();
     assert_eq!(bytes[0], 4, "BP++ tag");
-    assert!(R1CSProof::from_bytes(&bytes[..bytes.len() - 1]).is_err());
-    assert!(R1CSProof::from_bytes(&bytes[..10]).is_err());
+    assert!(R1CSProof::<bulletproofs::curve::Ristretto>::from_bytes(&bytes[..bytes.len() - 1]).is_err());
+    assert!(R1CSProof::<bulletproofs::curve::Ristretto>::from_bytes(&bytes[..10]).is_err());
     // wrong dimensions in the header: parses (or not) but never verifies
     let mut wrong = bytes.clone();
     wrong[1] ^= 1;
@@ -277,7 +277,7 @@ fn one_encoding_for_every_constraint_system() {
     for old in [2u8, 3] {
         let mut x = bytes.clone();
         x[0] = old;
-        assert!(matches!(R1CSProof::from_bytes(&x), Err(R1CSError::FormatError)), "tag {}", old);
+        assert!(matches!(R1CSProof::<bulletproofs::curve::Ristretto>::from_bytes(&x), Err(R1CSError::FormatError)), "tag {}", old);
     }
     // the same statement written with a builder operation (a witness tied to x) is the same
     // kind of proof

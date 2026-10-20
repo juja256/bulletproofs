@@ -81,7 +81,7 @@ mod bppp_backend {
     use alloc::vec;
     use alloc::vec::Vec;
 
-    use curve25519_dalek::scalar::Scalar;
+    use crate::curve::{Curve, Field};
 
     use super::super::builder::{gadget_error, needs_early_copy, Argument};
     use super::super::compact::ConstraintStore;
@@ -93,7 +93,7 @@ mod bppp_backend {
     use crate::errors::R1CSError;
 
     /// Parse a proof for `|n| = n_m` (`N'_m`), `|l| = 7 + n_lin` (spec §6.2).
-    pub(crate) fn proof_from_bytes_shape(bytes: &[u8], n_m: usize, n_lin: usize) -> Result<CircuitProof, R1CSError> {
+    pub(crate) fn proof_from_bytes_shape<C: Curve>(bytes: &[u8], n_m: usize, n_lin: usize) -> Result<CircuitProof<C>, R1CSError> {
         if n_m == 0 {
             return Err(R1CSError::FormatError);
         }
@@ -101,55 +101,55 @@ mod bppp_backend {
     }
 
     /// The prover's values of the variables (spec §7.6).
-    pub(crate) struct Values<'a> {
-        pub(crate) a_l: &'a [Scalar],
-        pub(crate) a_r: &'a [Scalar],
-        pub(crate) a_o: &'a [Scalar],
-        pub(crate) v: &'a [Scalar],
-        pub(crate) s: &'a [Scalar],
-        pub(crate) w: &'a [Scalar],
+    pub(crate) struct Values<'a, F: Field> {
+        pub(crate) a_l: &'a [F],
+        pub(crate) a_r: &'a [F],
+        pub(crate) a_o: &'a [F],
+        pub(crate) v: &'a [F],
+        pub(crate) s: &'a [F],
+        pub(crate) w: &'a [F],
     }
 
-    impl<'a> Values<'a> {
-        fn var(&self, x: Variable) -> Scalar {
+    impl<'a, F: Field> Values<'a, F> {
+        fn var(&self, x: Variable) -> F {
             match x {
                 Variable::MultiplierLeft(i) => self.a_l[i],
                 Variable::MultiplierRight(i) => self.a_r[i],
                 Variable::MultiplierOutput(i) => self.a_o[i],
                 Variable::Committed(j) => self.v[j],
                 Variable::Witness(i) => self.w[i],
-                Variable::One() => Scalar::ONE,
+                Variable::One() => F::ONE,
             }
         }
 
-        fn lc(&self, lc: &LinearCombination) -> Scalar {
-            lc.terms.iter().map(|(x, c)| c * self.var(*x)).sum()
+        fn lc(&self, lc: &LinearCombination<F>) -> F {
+            lc.terms.iter().map(|(x, c)| *c * self.var(*x)).sum()
         }
     }
 
     /// The builder's record after finalization (spec §7.4).
-    pub(crate) struct Record<'a> {
+    pub(crate) struct Record<'a, F: Field> {
         /// R1CS multipliers and committed inputs.
         pub(crate) n: usize,
         pub(crate) k: usize,
         /// Witnesses, multiplicities included.
         pub(crate) n_w: usize,
-        pub(crate) products: &'a [(LinearCombination, LinearCombination, LinearCombination)],
-        pub(crate) args: &'a [Argument],
+        pub(crate) products: &'a [(LinearCombination<F>, LinearCombination<F>, LinearCombination<F>)],
+        pub(crate) args: &'a [Argument<F>],
     }
 
-    fn has_right(lc: &LinearCombination) -> bool {
+    fn has_right<F: Field>(lc: &LinearCombination<F>) -> bool {
         lc.terms.iter().any(|(x, _)| matches!(x, Variable::MultiplierRight(_)))
     }
 
     /// The reciprocal form circuit of the builder's record (spec §7.6) and, with `values`
     /// (the prover), its witness. The prover's R1CS constraints have no constants: they are
     /// recomputed from the witness, as in §6.
-    pub(crate) fn builder_circuit(
-        store: &ConstraintStore,
-        rec: &Record,
-        values: Option<&Values>,
-    ) -> Result<(ReciprocalCircuit, Option<ReciprocalWitness>), R1CSError> {
+    pub(crate) fn builder_circuit<F: Field>(
+        store: &ConstraintStore<F>,
+        rec: &Record<F>,
+        values: Option<&Values<F>>,
+    ) -> Result<(ReciprocalCircuit<F>, Option<ReciprocalWitness<F>>), R1CSError> {
         let (n, k, n_w) = (rec.n, rec.k, rec.n_w);
         let n_p: usize = rec.args.iter().map(|a| a.private.len()).sum();
         let n_prod = rec.products.len();
@@ -160,7 +160,7 @@ mod bppp_backend {
         // Copies of numerators and public coefficients that read w_R, and of tuple components
         // (m >= 2) that read w_L or w_R (spec §7.6): per argument, per private term the
         // numerator then the components, then the public terms.
-        let mut copies: Vec<&LinearCombination> = Vec::new();
+        let mut copies: Vec<&LinearCombination<F>> = Vec::new();
         let mut num_copy = Vec::with_capacity(n_p);
         let mut comp_copy: Vec<Vec<Option<usize>>> = Vec::with_capacity(n_p);
         let mut pub_copy = Vec::with_capacity(rec.args.len());
@@ -215,13 +215,13 @@ mod bppp_backend {
             }
         };
         // An LC as (column, scaled coefficient) terms in order and its scaled constant.
-        let lower = |lc: &LinearCombination, scale: Scalar| -> Result<(Vec<(usize, Scalar)>, Scalar), R1CSError> {
+        let lower = |lc: &LinearCombination<F>, scale: F| -> Result<(Vec<(usize, F)>, F), R1CSError> {
             let mut terms = Vec::with_capacity(lc.terms.len());
-            let mut constant = Scalar::ZERO;
+            let mut constant = F::ZERO;
             for (x, c) in &lc.terms {
                 match x {
-                    Variable::One() => constant += c * scale,
-                    _ => terms.push((col(*x)?, c * scale)),
+                    Variable::One() => constant += *c * scale,
+                    _ => terms.push((col(*x)?, *c * scale)),
                 }
             }
             Ok((terms, constant))
@@ -235,11 +235,11 @@ mod bppp_backend {
             for (num, _) in &a.private {
                 match num_copy[pole] {
                     Some(q) => {
-                        w_n.push_row(vec![(col_copy(q), Scalar::ONE)]);
-                        a_n.push(Scalar::ZERO);
+                        w_n.push_row(vec![(col_copy(q), F::ONE)]);
+                        a_n.push(F::ZERO);
                     }
                     None => {
-                        let (t, c) = lower(num, Scalar::ONE)?;
+                        let (t, c) = lower(num, F::ONE)?;
                         w_n.push_row(t);
                         a_n.push(c);
                     }
@@ -252,11 +252,11 @@ mod bppp_backend {
         let mut w_m = SparseMatrix::new(n_cols);
         let mut a_m = Vec::with_capacity(n_m);
         for i in 0..n_r {
-            w_m.push_row(vec![(col_o(i), Scalar::ONE)]);
-            a_m.push(Scalar::ZERO);
+            w_m.push_row(vec![(col_o(i), F::ONE)]);
+            a_m.push(F::ZERO);
         }
         for (_, _, out) in rec.products {
-            let (t, c) = lower(out, Scalar::ONE)?;
+            let (t, c) = lower(out, F::ONE)?;
             w_m.push_row(t);
             a_m.push(c);
         }
@@ -265,19 +265,19 @@ mod bppp_backend {
         let mut w_l = SparseMatrix::new(n_cols);
         let mut a_l = Vec::new();
         for j in 0..k {
-            w_l.push_row(vec![(col_o(n_r + j), -Scalar::ONE)]);
-            a_l.push(Scalar::ZERO);
+            w_l.push_row(vec![(col_o(n_r + j), -F::ONE)]);
+            a_l.push(F::ZERO);
         }
         // the R1CS constraints, lowered in parallel chunks (the same rows, in order)
         const CHUNK: usize = 1 << 12;
         let n_q = store.len();
-        let build = |chunk: usize| -> Result<(SparseMatrix, Vec<Scalar>), R1CSError> {
+        let build = |chunk: usize| -> Result<(SparseMatrix<F>, Vec<F>), R1CSError> {
             let mut m = SparseMatrix::new(n_cols);
             let mut constants = Vec::with_capacity(CHUNK);
             let mut terms = Vec::new();
             for q in chunk * CHUNK..((chunk + 1) * CHUNK).min(n_q) {
                 terms.clear();
-                let mut constant = Scalar::ZERO;
+                let mut constant = F::ZERO;
                 for (x, c) in store.row(q) {
                     match (x, values) {
                         (Variable::One(), _) => constant += c,
@@ -308,10 +308,10 @@ mod bppp_backend {
         if let Some(e) = first_error {
             return Err(e);
         }
-        let neg = -Scalar::ONE;
-        let push_eq = |w_l: &mut SparseMatrix, a_l: &mut Vec<Scalar>, first: usize, lc: &LinearCombination| -> Result<(), R1CSError> {
+        let neg = -F::ONE;
+        let push_eq = |w_l: &mut SparseMatrix<F>, a_l: &mut Vec<F>, first: usize, lc: &LinearCombination<F>| -> Result<(), R1CSError> {
             let (t, c) = lower(lc, neg)?;
-            w_l.push_row(core::iter::once((first, Scalar::ONE)).chain(t));
+            w_l.push_row(core::iter::once((first, F::ONE)).chain(t));
             a_l.push(c);
             Ok(())
         };
@@ -331,9 +331,9 @@ mod bppp_backend {
                     let mut components = Vec::with_capacity(a.m);
                     for (x, copy) in tuple.iter().zip(&comp_copy[pole]) {
                         components.push(match copy {
-                            Some(q) => Component { terms: vec![(col_copy(*q), Scalar::ONE)], constant: Scalar::ZERO },
+                            Some(q) => Component { terms: vec![(col_copy(*q), F::ONE)], constant: F::ZERO },
                             None => {
-                                let (terms, constant) = lower(x, Scalar::ONE)?;
+                                let (terms, constant) = lower(x, F::ONE)?;
                                 Component { terms, constant }
                             }
                         });
@@ -354,15 +354,15 @@ mod bppp_backend {
             let mut terms = Vec::new();
             let mut consts = Vec::new();
             for _ in &a.private {
-                terms.push((col_p(pole), Scalar::ONE, None));
+                terms.push((col_p(pole), F::ONE, None));
                 pole += 1;
             }
             for ((coeff, row), copy) in a.public.iter().zip(pc) {
-                let t = Some(Pole(row.iter().map(|e| Scalar::from(*e)).collect()));
+                let t = Some(Pole(row.iter().map(|e| F::from(*e)).collect()));
                 match copy {
-                    Some(q) => terms.push((col_copy(*q), Scalar::ONE, t)),
+                    Some(q) => terms.push((col_copy(*q), F::ONE, t)),
                     None => {
-                        let (lt, c) = lower(coeff, Scalar::ONE)?;
+                        let (lt, c) = lower(coeff, F::ONE)?;
                         terms.extend(lt.into_iter().map(|(col, v)| (col, v, t.clone())));
                         if coeff.terms.iter().any(|(x, _)| *x == Variable::One()) {
                             consts.push((c, t));
@@ -399,12 +399,12 @@ mod bppp_backend {
             for a in rec.args {
                 for (_, tuple) in &a.private {
                     // a tuple pole is set by the prover after eta (spec §4.3)
-                    w_d.push(if a.m == 1 { v.lc(&tuple[0]) } else { Scalar::ZERO });
+                    w_d.push(if a.m == 1 { v.lc(&tuple[0]) } else { F::ZERO });
                 }
             }
-            let pad = |x: &[Scalar]| -> Vec<Scalar> {
+            let pad = |x: &[F]| -> Vec<F> {
                 let mut out = x.to_vec();
-                out.resize(n_r, Scalar::ZERO);
+                out.resize(n_r, F::ZERO);
                 out
             };
             let mut w_l = pad(v.a_l);
@@ -413,7 +413,7 @@ mod bppp_backend {
                 w_l.push(v.lc(l));
                 w_r.push(v.lc(r));
             }
-            let w_o: Vec<Scalar> =
+            let w_o: Vec<F> =
                 pad(v.a_o).into_iter().chain(v.v.iter().copied()).chain(v.w.iter().copied()).chain(copies.iter().map(|u| v.lc(u))).collect();
             ReciprocalWitness { w_d, w_l, w_r, w_o, v: v.v.iter().map(|x| vec![*x]).collect(), s: v.s.to_vec() }
         });

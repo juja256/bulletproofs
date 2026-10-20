@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 
-use curve25519_dalek::scalar::Scalar;
+use crate::curve::Field;
 
 use super::{LinearCombination, Variable};
 
@@ -28,22 +28,22 @@ const COEFF_ONE: u32 = 0;
 const COEFF_MINUS_ONE: u32 = 1;
 
 /// The flattened constraint weights `(wL, wR, wO, wV, wc)`.
-pub(super) type Flattened = (Vec<Scalar>, Vec<Scalar>, Vec<Scalar>, Vec<Scalar>, Scalar);
+pub(super) type Flattened<F> = (Vec<F>, Vec<F>, Vec<F>, Vec<F>, F);
 
-pub(super) struct ConstraintStore {
+pub(super) struct ConstraintStore<F: Field> {
     keep_constants: bool,
     /// `(packed variable, coefficient index)` for all terms of all constraints.
     terms: Vec<(u32, u32)>,
     /// End offset (exclusive) into `terms` of each constraint.
     ends: Vec<usize>,
-    coeffs: Vec<Scalar>,
+    coeffs: Vec<F>,
     index: HashMap<[u8; 32], u32>,
 }
 
-impl ConstraintStore {
+impl<F: Field> ConstraintStore<F> {
     pub(super) fn new(keep_constants: bool) -> Self {
-        let coeffs = vec![Scalar::ONE, -Scalar::ONE];
-        let index = coeffs.iter().enumerate().map(|(i, c)| (c.to_bytes(), i as u32)).collect();
+        let coeffs = vec![F::ONE, -F::ONE];
+        let index = coeffs.iter().enumerate().map(|(i, c)| (c.to_bytes32(), i as u32)).collect();
         ConstraintStore { keep_constants, terms: Vec::new(), ends: Vec::new(), coeffs, index }
     }
 
@@ -51,7 +51,7 @@ impl ConstraintStore {
         self.ends.len()
     }
 
-    pub(super) fn push(&mut self, lc: &LinearCombination) {
+    pub(super) fn push(&mut self, lc: &LinearCombination<F>) {
         for (var, coeff) in &lc.terms {
             let packed = match *var {
                 Variable::MultiplierLeft(i) => pack(TAG_LEFT, i),
@@ -63,14 +63,14 @@ impl ConstraintStore {
                 Variable::One() => continue,
             };
             // ±1 (most terms) without hashing; plain byte comparison of public values.
-            let bytes = coeff.as_bytes();
-            let c = if bytes == self.coeffs[COEFF_ONE as usize].as_bytes() {
+            let bytes = coeff.to_bytes32();
+            let c = if bytes == self.coeffs[COEFF_ONE as usize].to_bytes32() {
                 COEFF_ONE
-            } else if bytes == self.coeffs[COEFF_MINUS_ONE as usize].as_bytes() {
+            } else if bytes == self.coeffs[COEFF_MINUS_ONE as usize].to_bytes32() {
                 COEFF_MINUS_ONE
             } else {
                 let next = self.coeffs.len() as u32;
-                let c = *self.index.entry(coeff.to_bytes()).or_insert(next);
+                let c = *self.index.entry(bytes).or_insert(next);
                 if c == next {
                     self.coeffs.push(*coeff);
                 }
@@ -89,15 +89,15 @@ impl ConstraintStore {
     /// With `parallel`, every thread owns a range of variable indices and scans all terms,
     /// recomputing the powers of `z` itself: no extra memory, and each sum is accumulated in
     /// the same order as in the serial code.
-    pub(super) fn flatten(&mut self, z: &Scalar, n: usize, m: usize, witness_base: usize) -> Flattened {
-        let mut wL = vec![Scalar::ZERO; n];
-        let mut wR = vec![Scalar::ZERO; n];
-        let mut wO = vec![Scalar::ZERO; n];
-        let mut wV = vec![Scalar::ZERO; m];
-        let mut wc = Scalar::ZERO;
+    pub(super) fn flatten(&mut self, z: &F, n: usize, m: usize, witness_base: usize) -> Flattened<F> {
+        let mut wL = vec![F::ZERO; n];
+        let mut wR = vec![F::ZERO; n];
+        let mut wO = vec![F::ZERO; n];
+        let mut wV = vec![F::ZERO; m];
+        let mut wc = F::ZERO;
 
         // Scan all terms; `apply(tag, i, t)` gets every term with t = z^{q+1} * coeff.
-        let scan = |apply: &mut dyn FnMut(u32, usize, Scalar), wanted: &dyn Fn(u32, usize) -> bool| {
+        let scan = |apply: &mut dyn FnMut(u32, usize, F), wanted: &dyn Fn(u32, usize) -> bool| {
             let mut exp_z = *z;
             let mut start = 0;
             for &end in &self.ends {
@@ -121,7 +121,7 @@ impl ConstraintStore {
                 exp_z *= z;
             }
         };
-        let multiplier_part = |lo: usize, wl: &mut [Scalar], wr: &mut [Scalar], wo: &mut [Scalar]| {
+        let multiplier_part = |lo: usize, wl: &mut [F], wr: &mut [F], wo: &mut [F]| {
             let hi = lo + wl.len();
             scan(
                 &mut |tag, i, t| match tag {
@@ -132,7 +132,7 @@ impl ConstraintStore {
                 &|tag, i| tag <= TAG_OUTPUT && lo <= i && i < hi,
             );
         };
-        let other_part = |wv: &mut [Scalar], wc: &mut Scalar| {
+        let other_part = |wv: &mut [F], wc: &mut F| {
             scan(
                 &mut |tag, i, t| match tag {
                     TAG_COMMITTED => wv[i] -= t,
@@ -178,7 +178,7 @@ impl ConstraintStore {
     }
 }
 
-impl ConstraintStore {
+impl<F: Field> ConstraintStore<F> {
     /// Whether every variable exists: multipliers `< n`, committed inputs `< m`, witnesses
     /// `< n_w`.
     pub(super) fn vars_exist(&self, n: usize, m: usize, n_w: usize) -> bool {
@@ -195,7 +195,7 @@ impl ConstraintStore {
 
     /// The terms of constraint `q`, decoded (constants appear only if they are kept).
     #[cfg(feature = "bppp")]
-    pub(super) fn row(&self, q: usize) -> impl Iterator<Item = (Variable, Scalar)> + '_ {
+    pub(super) fn row(&self, q: usize) -> impl Iterator<Item = (Variable, F)> + '_ {
         let start = if q == 0 { 0 } else { self.ends[q - 1] };
         self.terms[start..self.ends[q]].iter().map(move |&(packed, c)| {
             let i = (packed & INDEX_MASK) as usize;

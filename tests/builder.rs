@@ -356,8 +356,8 @@ fn bppp_builder_rules() {
     // malformed encodings
     let bytes = proof.to_bytes();
     assert_eq!(bytes[0], 4, "one BP++ encoding (spec §6.2)");
-    assert!(R1CSProof::from_bytes(&bytes[..bytes.len() - 1]).is_err());
-    assert!(R1CSProof::from_bytes(&bytes[..10]).is_err());
+    assert!(R1CSProof::<bulletproofs::curve::Ristretto>::from_bytes(&bytes[..bytes.len() - 1]).is_err());
+    assert!(R1CSProof::<bulletproofs::curve::Ristretto>::from_bytes(&bytes[..10]).is_err());
     for (at, delta) in [(1usize, 1u8), (9, 1)] {
         let mut x = bytes.clone();
         x[at] = x[at].wrapping_add(delta);

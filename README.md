@@ -350,6 +350,20 @@ proof with `set_backend`. The complete example below is `tests/guide.rs`.
 one gadget mixes plain R1CS and builder operations on the same variables, and existing
 gadgets keep working unchanged. `CircuitBuilder` is object safe (`&mut dyn CircuitBuilder`).
 
+All three traits take the scalar field as a parameter that defaults to ristretto255's:
+`ConstraintSystem<F = Scalar>`, `CircuitBuilder<F = Scalar>`. A gadget written as
+`fn g<CS: CircuitBuilder>(..)` is a ristretto255 gadget, as before; one written as
+`fn g<F: Field, CS: CircuitBuilder<F>>(..)` (with `bulletproofs::curve::Field`) runs on every
+curve. In generic code:
+
+- values are `F::from(u64)`, linear combinations `LinearCombination<F>`;
+- `lc - var`, `lc + F`, `var * F`, `var + lc` and `var - F` are generic;
+- `var + var`, `var - var`, `-var` and `var * u64` produce ristretto255 linear combinations
+  (two variables do not name a field): write `lc(a) + b` with `bulletproofs::r1cs::lc`;
+- `Prover::new(&pc, ..)` takes its curve from the Pedersen generators;
+  `Verifier::new(..)` is the ristretto255 verifier, `Verifier::<_, C>::for_curve(..)` the one
+  over `C`.
+
 ### One gadget, two roles
 
 The prover passes the values (`Some(v)`), the verifier `None`; both must issue the same
@@ -358,23 +372,23 @@ operations in the same order. Committed values come from `Prover::commit(v, blin
 
 ```rust,ignore
 /// `x < 2^16`: two byte lookups. `v` is the prover's value (`None` for the verifier).
-fn range16<CS: CircuitBuilder>(cs: &mut CS, t: &Tables, x: LinearCombination, v: Option<u64>) -> Result<(), R1CSError> {
+fn range16<F: Field, CS: CircuitBuilder<F>>(cs: &mut CS, t: &Tables, x: LinearCombination<F>, v: Option<u64>) -> Result<(), R1CSError> {
     let lo = cs.lookup_value(t.byte, v.map(|v| v & 0xff))?;
     let hi = cs.lookup_value(t.byte, v.map(|v| v >> 8))?;
-    cs.constrain(x - lo - hi * Scalar::from(256u64));
+    cs.constrain(x - lo - hi * F::from(256u64));
     Ok(())
 }
 
 /// `z = x ^ y` for nibbles: one lookup of the tuple `(x, y, z)`; no range checks of the
 /// components are needed (the lookup proves the tuple is a row, component by component).
-fn xor4<CS: CircuitBuilder>(cs: &mut CS, t: &Tables, x: Variable, y: Variable, v: Option<(u64, u64)>) -> Result<Variable, R1CSError> {
-    let z = cs.witness(v.map(|(a, b)| Scalar::from(a ^ b)))?;
+fn xor4<F: Field, CS: CircuitBuilder<F>>(cs: &mut CS, t: &Tables, x: Variable, y: Variable, v: Option<(u64, u64)>) -> Result<Variable, R1CSError> {
+    let z = cs.witness(v.map(|(a, b)| F::from(a ^ b)))?;
     cs.lookup(t.xor, &[x.into(), y.into(), z.into()])?;
     Ok(z)
 }
 
 /// `output` is a permutation of `input`: sum 1/(X + x) - sum 1/(X + y) = 0.
-fn shuffle<CS: CircuitBuilder>(cs: &mut CS, input: &[Variable], output: &[Variable]) -> Result<(), R1CSError> {
+fn shuffle<F: Field, CS: CircuitBuilder<F>>(cs: &mut CS, input: &[Variable], output: &[Variable]) -> Result<(), R1CSError> {
     let arg = cs.reciprocal(1)?;
     for x in input {
         arg.add(cs, &[(*x).into()])?;

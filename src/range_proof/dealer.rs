@@ -10,9 +10,10 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use curve25519_dalek::ristretto::RistrettoPoint;
-use curve25519_dalek::scalar::Scalar;
+use ff::Field as _;
 use merlin::Transcript;
+
+use crate::curve::{Curve, Ristretto};
 
 use crate::errors::MPCError;
 use crate::generators::{BulletproofGens, PedersenGens};
@@ -34,13 +35,13 @@ pub struct Dealer {}
 
 impl Dealer {
     /// Creates a new dealer coordinating `m` parties proving `n`-bit ranges.
-    pub fn new<'a, 'b>(
-        bp_gens: &'b BulletproofGens,
-        pc_gens: &'b PedersenGens,
+    pub fn new<'a, 'b, C: Curve>(
+        bp_gens: &'b BulletproofGens<C>,
+        pc_gens: &'b PedersenGens<C>,
         transcript: &'a mut Transcript,
         n: usize,
         m: usize,
-    ) -> Result<DealerAwaitingBitCommitments<'a, 'b>, MPCError> {
+    ) -> Result<DealerAwaitingBitCommitments<'a, 'b, C>, MPCError> {
         if !(n == 8 || n == 16 || n == 32 || n == 64) {
             return Err(MPCError::InvalidBitsize);
         }
@@ -69,6 +70,7 @@ impl Dealer {
         let initial_transcript = transcript.clone();
 
         transcript.rangeproof_domain_sep(n as u64, m as u64);
+        transcript.curve_domain_sep::<C>();
 
         Ok(DealerAwaitingBitCommitments {
             bp_gens,
@@ -82,9 +84,9 @@ impl Dealer {
 }
 
 /// A dealer waiting for the parties to send their [`BitCommitment`]s.
-pub struct DealerAwaitingBitCommitments<'a, 'b> {
-    bp_gens: &'b BulletproofGens,
-    pc_gens: &'b PedersenGens,
+pub struct DealerAwaitingBitCommitments<'a, 'b, C: Curve = Ristretto> {
+    bp_gens: &'b BulletproofGens<C>,
+    pc_gens: &'b PedersenGens<C>,
     transcript: &'a mut Transcript,
     /// The dealer keeps a copy of the initial transcript state, so
     /// that it can attempt to verify the aggregated proof at the end.
@@ -93,12 +95,12 @@ pub struct DealerAwaitingBitCommitments<'a, 'b> {
     m: usize,
 }
 
-impl<'a, 'b> DealerAwaitingBitCommitments<'a, 'b> {
+impl<'a, 'b, C: Curve> DealerAwaitingBitCommitments<'a, 'b, C> {
     /// Receive each party's [`BitCommitment`]s and compute the [`BitChallenge`].
     pub fn receive_bit_commitments(
         self,
-        bit_commitments: Vec<BitCommitment>,
-    ) -> Result<(DealerAwaitingPolyCommitments<'a, 'b>, BitChallenge), MPCError> {
+        bit_commitments: Vec<BitCommitment<C>>,
+    ) -> Result<(DealerAwaitingPolyCommitments<'a, 'b, C>, BitChallenge<C>), MPCError> {
         if self.m != bit_commitments.len() {
             return Err(MPCError::WrongNumBitCommitments);
         }
@@ -108,15 +110,15 @@ impl<'a, 'b> DealerAwaitingBitCommitments<'a, 'b> {
             self.transcript.append_point(b"V", &vc.V_j);
         }
 
-        // Commit aggregated A_j, S_j
-        let A: RistrettoPoint = bit_commitments.iter().map(|vc| vc.A_j).sum();
-        self.transcript.append_point(b"A", &A.compress());
+        // Commit aggregated A_j, S_j (a party whose points do not decode is malformed)
+        let A = sum_points::<C>(bit_commitments.iter().map(|vc| vc.A_j))?;
+        self.transcript.append_point(b"A", &C::compress(&A));
 
-        let S: RistrettoPoint = bit_commitments.iter().map(|vc| vc.S_j).sum();
-        self.transcript.append_point(b"S", &S.compress());
+        let S = sum_points::<C>(bit_commitments.iter().map(|vc| vc.S_j))?;
+        self.transcript.append_point(b"S", &C::compress(&S));
 
-        let y: Scalar = self.transcript.challenge_scalar(b"y");
-        let z: Scalar = self.transcript.challenge_scalar(b"z");
+        let y: C::Scalar = self.transcript.challenge_scalar(b"y");
+        let z: C::Scalar = self.transcript.challenge_scalar(b"z");
         let bit_challenge = BitChallenge { y, z };
 
         Ok((
@@ -139,40 +141,40 @@ impl<'a, 'b> DealerAwaitingBitCommitments<'a, 'b> {
 
 /// A dealer which has sent the [`BitChallenge`] to the parties and
 /// is waiting for their [`PolyCommitment`]s.
-pub struct DealerAwaitingPolyCommitments<'a, 'b> {
+pub struct DealerAwaitingPolyCommitments<'a, 'b, C: Curve = Ristretto> {
     n: usize,
     m: usize,
     transcript: &'a mut Transcript,
     initial_transcript: Transcript,
-    bp_gens: &'b BulletproofGens,
-    pc_gens: &'b PedersenGens,
-    bit_challenge: BitChallenge,
-    bit_commitments: Vec<BitCommitment>,
+    bp_gens: &'b BulletproofGens<C>,
+    pc_gens: &'b PedersenGens<C>,
+    bit_challenge: BitChallenge<C>,
+    bit_commitments: Vec<BitCommitment<C>>,
     /// Aggregated commitment to the parties' bits
-    A: RistrettoPoint,
+    A: C::Point,
     /// Aggregated commitment to the parties' bit blindings
-    S: RistrettoPoint,
+    S: C::Point,
 }
 
-impl<'a, 'b> DealerAwaitingPolyCommitments<'a, 'b> {
+impl<'a, 'b, C: Curve> DealerAwaitingPolyCommitments<'a, 'b, C> {
     /// Receive [`PolyCommitment`]s from the parties and compute the
     /// [`PolyChallenge`].
     pub fn receive_poly_commitments(
         self,
-        poly_commitments: Vec<PolyCommitment>,
-    ) -> Result<(DealerAwaitingProofShares<'a, 'b>, PolyChallenge), MPCError> {
+        poly_commitments: Vec<PolyCommitment<C>>,
+    ) -> Result<(DealerAwaitingProofShares<'a, 'b, C>, PolyChallenge<C>), MPCError> {
         if self.m != poly_commitments.len() {
             return Err(MPCError::WrongNumPolyCommitments);
         }
 
         // Commit sums of T_1_j's and T_2_j's
-        let T_1: RistrettoPoint = poly_commitments.iter().map(|pc| pc.T_1_j).sum();
-        let T_2: RistrettoPoint = poly_commitments.iter().map(|pc| pc.T_2_j).sum();
+        let T_1 = sum_points::<C>(poly_commitments.iter().map(|pc| pc.T_1_j))?;
+        let T_2 = sum_points::<C>(poly_commitments.iter().map(|pc| pc.T_2_j))?;
 
-        self.transcript.append_point(b"T_1", &T_1.compress());
-        self.transcript.append_point(b"T_2", &T_2.compress());
+        self.transcript.append_point(b"T_1", &C::compress(&T_1));
+        self.transcript.append_point(b"T_2", &C::compress(&T_2));
 
-        let x: Scalar = self.transcript.challenge_scalar(b"x");
+        let x: C::Scalar = self.transcript.challenge_scalar(b"x");
         let poly_challenge = PolyChallenge { x };
 
         Ok((
@@ -200,30 +202,30 @@ impl<'a, 'b> DealerAwaitingPolyCommitments<'a, 'b> {
 /// A dealer which has sent the [`PolyChallenge`] to the parties and
 /// is waiting to aggregate their [`ProofShare`]s into a
 /// [`RangeProof`].
-pub struct DealerAwaitingProofShares<'a, 'b> {
+pub struct DealerAwaitingProofShares<'a, 'b, C: Curve = Ristretto> {
     n: usize,
     m: usize,
     transcript: &'a mut Transcript,
     initial_transcript: Transcript,
-    bp_gens: &'b BulletproofGens,
-    pc_gens: &'b PedersenGens,
-    bit_challenge: BitChallenge,
-    bit_commitments: Vec<BitCommitment>,
-    poly_challenge: PolyChallenge,
-    poly_commitments: Vec<PolyCommitment>,
-    A: RistrettoPoint,
-    S: RistrettoPoint,
-    T_1: RistrettoPoint,
-    T_2: RistrettoPoint,
+    bp_gens: &'b BulletproofGens<C>,
+    pc_gens: &'b PedersenGens<C>,
+    bit_challenge: BitChallenge<C>,
+    bit_commitments: Vec<BitCommitment<C>>,
+    poly_challenge: PolyChallenge<C>,
+    poly_commitments: Vec<PolyCommitment<C>>,
+    A: C::Point,
+    S: C::Point,
+    T_1: C::Point,
+    T_2: C::Point,
 }
 
-impl<'a, 'b> DealerAwaitingProofShares<'a, 'b> {
+impl<'a, 'b, C: Curve> DealerAwaitingProofShares<'a, 'b, C> {
     /// Assembles proof shares into an `RangeProof`.
     ///
     /// Used as a helper function by `receive_trusted_shares` (which
     /// just hands back the result) and `receive_shares` (which
     /// validates the proof shares.
-    fn assemble_shares(&mut self, proof_shares: &[ProofShare]) -> Result<RangeProof, MPCError> {
+    fn assemble_shares(&mut self, proof_shares: &[ProofShare<C>]) -> Result<RangeProof<C>, MPCError> {
         if self.m != proof_shares.len() {
             return Err(MPCError::WrongNumProofShares);
         }
@@ -242,9 +244,9 @@ impl<'a, 'b> DealerAwaitingProofShares<'a, 'b> {
             return Err(MPCError::MalformedProofShares { bad_shares });
         }
 
-        let t_x: Scalar = proof_shares.iter().map(|ps| ps.t_x).sum();
-        let t_x_blinding: Scalar = proof_shares.iter().map(|ps| ps.t_x_blinding).sum();
-        let e_blinding: Scalar = proof_shares.iter().map(|ps| ps.e_blinding).sum();
+        let t_x: C::Scalar = proof_shares.iter().map(|ps| ps.t_x).sum();
+        let t_x_blinding: C::Scalar = proof_shares.iter().map(|ps| ps.t_x_blinding).sum();
+        let e_blinding: C::Scalar = proof_shares.iter().map(|ps| ps.e_blinding).sum();
 
         self.transcript.append_scalar(b"t_x", &t_x);
         self.transcript
@@ -252,24 +254,23 @@ impl<'a, 'b> DealerAwaitingProofShares<'a, 'b> {
         self.transcript.append_scalar(b"e_blinding", &e_blinding);
 
         // Get a challenge value to combine statements for the IPP
-        let w: Scalar = self.transcript.challenge_scalar(b"w");
-        let Q = w * self.pc_gens.B;
+        let w: C::Scalar = self.transcript.challenge_scalar(b"w");
+        let Q = self.pc_gens.B * w;
 
-        let G_factors: Vec<Scalar> = iter::repeat(Scalar::ONE).take(self.n * self.m).collect();
-        let H_factors: Vec<Scalar> = util::exp_iter(self.bit_challenge.y.invert())
-            .take(self.n * self.m)
-            .collect();
+        let G_factors: Vec<C::Scalar> = iter::repeat(C::Scalar::ONE).take(self.n * self.m).collect();
+        let y_inv = Option::<C::Scalar>::from(self.bit_challenge.y.invert()).ok_or(MPCError::MaliciousDealer)?;
+        let H_factors: Vec<C::Scalar> = util::exp_iter(y_inv).take(self.n * self.m).collect();
 
-        let l_vec: Vec<Scalar> = proof_shares
+        let l_vec: Vec<C::Scalar> = proof_shares
             .iter()
             .flat_map(|ps| ps.l_vec.clone().into_iter())
             .collect();
-        let r_vec: Vec<Scalar> = proof_shares
+        let r_vec: Vec<C::Scalar> = proof_shares
             .iter()
             .flat_map(|ps| ps.r_vec.clone().into_iter())
             .collect();
 
-        let ipp_proof = inner_product_proof::InnerProductProof::create(
+        let ipp_proof = inner_product_proof::InnerProductProof::<C>::create(
             self.transcript,
             &Q,
             &G_factors,
@@ -281,10 +282,10 @@ impl<'a, 'b> DealerAwaitingProofShares<'a, 'b> {
         );
 
         Ok(RangeProof {
-            A: self.A.compress(),
-            S: self.S.compress(),
-            T_1: self.T_1.compress(),
-            T_2: self.T_2.compress(),
+            A: C::compress(&self.A),
+            S: C::compress(&self.S),
+            T_1: C::compress(&self.T_1),
+            T_2: C::compress(&self.T_2),
             t_x,
             t_x_blinding,
             e_blinding,
@@ -299,7 +300,7 @@ impl<'a, 'b> DealerAwaitingProofShares<'a, 'b> {
     /// This is a convenience wrapper around receive_shares_with_rng
     ///
     #[cfg(feature = "std")]
-    pub fn receive_shares(self, proof_shares: &[ProofShare]) -> Result<RangeProof, MPCError> {
+    pub fn receive_shares(self, proof_shares: &[ProofShare<C>]) -> Result<RangeProof<C>, MPCError> {
         self.receive_shares_with_rng(proof_shares, &mut thread_rng())
     }
 
@@ -318,9 +319,9 @@ impl<'a, 'b> DealerAwaitingProofShares<'a, 'b> {
     /// saves time by skipping verification of the aggregated proof.
     pub fn receive_shares_with_rng<T: RngCore + CryptoRng>(
         mut self,
-        proof_shares: &[ProofShare],
+        proof_shares: &[ProofShare<C>],
         rng: &mut T,
-    ) -> Result<RangeProof, MPCError> {
+    ) -> Result<RangeProof<C>, MPCError> {
         let proof = self.assemble_shares(proof_shares)?;
 
         let Vs: Vec<_> = self.bit_commitments.iter().map(|vc| vc.V_j).collect();
@@ -369,8 +370,27 @@ impl<'a, 'b> DealerAwaitingProofShares<'a, 'b> {
     /// detects which party(ies) submitted malformed shares.
     pub fn receive_trusted_shares(
         mut self,
-        proof_shares: &[ProofShare],
-    ) -> Result<RangeProof, MPCError> {
+        proof_shares: &[ProofShare<C>],
+    ) -> Result<RangeProof<C>, MPCError> {
         self.assemble_shares(proof_shares)
+    }
+}
+
+/// The sum of the parties' encoded points; a party whose point does not decode sent a
+/// malformed message.
+fn sum_points<C: Curve>(points: impl Iterator<Item = C::Compressed>) -> Result<C::Point, MPCError> {
+    use group::Group;
+    let mut sum = C::Point::identity();
+    let mut bad_shares = Vec::new();
+    for (j, p) in points.enumerate() {
+        match C::decompress(&p) {
+            Some(p) => sum += p,
+            None => bad_shares.push(j),
+        }
+    }
+    if bad_shares.is_empty() {
+        Ok(sum)
+    } else {
+        Err(MPCError::MalformedProofShares { bad_shares })
     }
 }

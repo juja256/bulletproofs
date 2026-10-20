@@ -4,34 +4,33 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use core::iter;
-use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
-use curve25519_dalek::scalar::Scalar;
-use curve25519_dalek::traits::VartimeMultiscalarMul;
+use ff::Field as _;
 use merlin::Transcript;
 use rand_core::{CryptoRng, RngCore};
 
+use crate::curve::{Curve, Field, PointEncoding, Ristretto};
 use crate::errors::ProofError;
 use crate::inner_product_proof::inner_product;
 use crate::transcript::TranscriptProtocol;
+use crate::util;
 
 /// A linear proof, which is an "lightweight" version of a Bulletproofs inner-product proof
 /// Protocol: Section E.3 of [GHL'21](https://eprint.iacr.org/2021/1397.pdf)
 ///
 /// Prove that <a, b> = c where a is secret and b is public.
 #[derive(Clone, Debug)]
-pub struct LinearProof {
-    pub(crate) L_vec: Vec<CompressedRistretto>,
-    pub(crate) R_vec: Vec<CompressedRistretto>,
+pub struct LinearProof<C: Curve = Ristretto> {
+    pub(crate) L_vec: Vec<C::Compressed>,
+    pub(crate) R_vec: Vec<C::Compressed>,
     /// A commitment to the base case elements
-    pub(crate) S: CompressedRistretto,
+    pub(crate) S: C::Compressed,
     /// a_star, corresponding to the base case `a`
-    pub(crate) a: Scalar,
+    pub(crate) a: C::Scalar,
     /// r_star, corresponding to the base case `r`
-    pub(crate) r: Scalar,
+    pub(crate) r: C::Scalar,
 }
 
-impl LinearProof {
+impl<C: Curve> LinearProof<C> {
     /// Create a linear proof, a lightweight variant of a Bulletproofs inner-product proof.
     /// This proves that <a, b> = c where a is secret and b is public.
     ///
@@ -41,20 +40,20 @@ impl LinearProof {
         transcript: &mut Transcript,
         rng: &mut T,
         // Commitment to witness
-        C: &CompressedRistretto,
-        // Blinding factor for C
-        mut r: Scalar,
+        commitment: &C::Compressed,
+        // Blinding factor for the commitment
+        mut r: C::Scalar,
         // Secret scalar vector a
-        mut a_vec: Vec<Scalar>,
+        mut a_vec: Vec<C::Scalar>,
         // Public scalar vector b
-        mut b_vec: Vec<Scalar>,
+        mut b_vec: Vec<C::Scalar>,
         // Generator vector
-        mut G_vec: Vec<RistrettoPoint>,
+        mut G_vec: Vec<C::Point>,
         // Pedersen generator F, for committing to the secret value
-        F: &RistrettoPoint,
+        F: &C::Point,
         // Pedersen generator B, for committing to the blinding value
-        B: &RistrettoPoint,
-    ) -> Result<LinearProof, ProofError> {
+        B: &C::Point,
+    ) -> Result<LinearProof<C>, ProofError> {
         let mut n = b_vec.len();
         // All of the input vectors must have the same length.
         if G_vec.len() != n {
@@ -68,17 +67,7 @@ impl LinearProof {
             return Err(ProofError::InvalidInputLength);
         }
 
-        // Append all public data to the transcript
-        transcript.innerproduct_domain_sep(n as u64);
-        transcript.append_point(b"C", C);
-        for b_i in &b_vec {
-            transcript.append_scalar(b"b_i", b_i);
-        }
-        for G_i in &G_vec {
-            transcript.append_point(b"G_i", &G_i.compress());
-        }
-        transcript.append_point(b"F", &F.compress());
-        transcript.append_point(b"B", &B.compress());
+        Self::append_statement(transcript, commitment, &b_vec, &G_vec, F, B);
 
         // Create slices G, H, a, b backed by their respective
         // vectors. This lets us reslice as we compress the lengths
@@ -100,22 +89,14 @@ impl LinearProof {
             let c_L = inner_product(&a_L, &b_R);
             let c_R = inner_product(&a_R, &b_L);
 
-            let s_j = Scalar::random(rng);
-            let t_j = Scalar::random(rng);
+            let s_j = C::Scalar::random(&mut *rng);
+            let t_j = C::Scalar::random(&mut *rng);
 
-            // L = a_L * G_R + s_j * B + c_L * F
-            let L = RistrettoPoint::vartime_multiscalar_mul(
-                a_L.iter().chain(iter::once(&s_j)).chain(iter::once(&c_L)),
-                G_R.iter().chain(iter::once(B)).chain(iter::once(F)),
-            )
-            .compress();
+            // L = a_L * G_R + s_j * B + c_L * F (secret scalars: constant time)
+            let L = C::compress(&(C::msm_ct(a_L, G_R) + C::msm_ct(&[s_j, c_L], &[*B, *F])));
 
             // R = a_R * G_L + t_j * B + c_R * F
-            let R = RistrettoPoint::vartime_multiscalar_mul(
-                a_R.iter().chain(iter::once(&t_j)).chain(iter::once(&c_R)),
-                G_L.iter().chain(iter::once(B)).chain(iter::once(F)),
-            )
-            .compress();
+            let R = C::compress(&(C::msm_ct(a_R, G_L) + C::msm_ct(&[t_j, c_R], &[*B, *F])));
 
             L_vec.push(L);
             R_vec.push(R);
@@ -123,8 +104,8 @@ impl LinearProof {
             transcript.append_point(b"L", &L);
             transcript.append_point(b"R", &R);
 
-            let x_j: Scalar = transcript.challenge_scalar(b"x_j");
-            let x_j_inv = x_j.invert();
+            let x_j: C::Scalar = transcript.challenge_scalar(b"x_j");
+            let x_j_inv = util::invert(x_j);
 
             for i in 0..n {
                 // a_L = a_L + x_j^{-1} * a_R
@@ -132,8 +113,7 @@ impl LinearProof {
                 // b_L = b_L + x_j * b_R
                 b_L[i] = b_L[i] + x_j * b_R[i];
                 // G_L = G_L + x_j * G_R
-                G_L[i] =
-                    RistrettoPoint::vartime_multiscalar_mul(&[Scalar::ONE, x_j], &[G_L[i], G_R[i]]);
+                G_L[i] = C::msm_vt(&[C::Scalar::ONE, x_j], &[G_L[i], G_R[i]]);
             }
             a = a_L;
             b = b_L;
@@ -141,12 +121,12 @@ impl LinearProof {
             r = r + x_j * s_j + x_j_inv * t_j;
         }
 
-        let s_star = Scalar::random(rng);
-        let t_star = Scalar::random(rng);
-        let S = (t_star * B + s_star * b[0] * F + s_star * G[0]).compress();
+        let s_star = C::Scalar::random(&mut *rng);
+        let t_star = C::Scalar::random(&mut *rng);
+        let S = C::compress(&(*B * t_star + *F * (s_star * b[0]) + G[0] * s_star));
         transcript.append_point(b"S", &S);
 
-        let x_star: Scalar = transcript.challenge_scalar(b"x_star");
+        let x_star: C::Scalar = transcript.challenge_scalar(b"x_star");
         let a_star = s_star + x_star * a[0];
         let r_star = t_star + x_star * r;
 
@@ -163,67 +143,54 @@ impl LinearProof {
         &self,
         transcript: &mut Transcript,
         // Commitment to witness
-        C: &CompressedRistretto,
+        commitment: &C::Compressed,
         // Generator vector
-        G: &[RistrettoPoint],
+        G: &[C::Point],
         // Pedersen generator F, for committing to the secret value
-        F: &RistrettoPoint,
+        F: &C::Point,
         // Pedersen generator B, for committing to the blinding value
-        B: &RistrettoPoint,
+        B: &C::Point,
         // Public scalar vector b
-        b_vec: Vec<Scalar>,
+        b_vec: Vec<C::Scalar>,
     ) -> Result<(), ProofError> {
         let n = b_vec.len();
         if G.len() != n {
             return Err(ProofError::InvalidGeneratorsLength);
         }
 
-        // Append all public data to the transcript
-        transcript.innerproduct_domain_sep(n as u64);
-        transcript.append_point(b"C", C);
-        for b_i in &b_vec {
-            transcript.append_scalar(b"b_i", b_i);
-        }
-        for G_i in G {
-            transcript.append_point(b"G_i", &G_i.compress());
-        }
-        transcript.append_point(b"F", &F.compress());
-        transcript.append_point(b"B", &B.compress());
+        Self::append_statement(transcript, commitment, &b_vec, G, F, B);
 
         let (x_vec, x_inv_vec, b_0) = self.verification_scalars(n, transcript, b_vec)?;
         transcript.append_point(b"S", &self.S);
-        let x_star: Scalar = transcript.challenge_scalar(b"x_star");
+        let x_star: C::Scalar = transcript.challenge_scalar(b"x_star");
 
         // Decompress the compressed L values
         let Ls = self
             .L_vec
             .iter()
-            .map(|p| p.decompress().ok_or(ProofError::VerificationError))
+            .map(|p| C::decompress(p).ok_or(ProofError::VerificationError))
             .collect::<Result<Vec<_>, _>>()?;
 
         // Decompress the compressed R values
         let Rs = self
             .R_vec
             .iter()
-            .map(|p| p.decompress().ok_or(ProofError::VerificationError))
+            .map(|p| C::decompress(p).ok_or(ProofError::VerificationError))
             .collect::<Result<Vec<_>, _>>()?;
 
         // L_R_factors = sum_{j=0}^{l-1} (x_j * L_j + x_j^{-1} * R_j)
         //
         // Note: in GHL'21 the verification equation is incorrect (as of 05/03/22), with x_j and x_j^{-1} reversed.
         // (Incorrect paper equation: sum_{j=0}^{l-1} (x_j^{-1} * L_j + x_j * R_j) )
-        let L_R_factors: RistrettoPoint = RistrettoPoint::vartime_multiscalar_mul(
-            x_vec.iter().chain(x_inv_vec.iter()),
-            Ls.iter().chain(Rs.iter()),
-        );
+        let L_R_factors = C::msm_vt(&[&x_vec[..], &x_inv_vec[..]].concat(), &[&Ls[..], &Rs[..]].concat());
 
         // This is an optimized way to compute the base case G (G_0 in the paper):
         // G_0 = sum_{i=0}^{2^{l-1}} (x<i> * G_i)
         let s = self.subset_product(n, x_vec);
-        let G_0: RistrettoPoint = RistrettoPoint::vartime_multiscalar_mul(s.iter(), G.iter());
+        let G_0 = C::msm_vt(&s, G);
 
-        let S = self.S.decompress().ok_or(ProofError::VerificationError)?;
-        let C = C.decompress().ok_or(ProofError::VerificationError)?;
+        let S = C::decompress(&self.S).ok_or(ProofError::VerificationError)?;
+        let commitment = C::decompress(commitment).ok_or(ProofError::VerificationError)?;
 
         // This matches the verification equation:
         // S == r_star * B + a_star * b_0 * F
@@ -232,13 +199,35 @@ impl LinearProof {
         //
         // Where L_R_factors = sum_{j=0}^{l-1} (x_j * L_j + x_j^{-1} * R_j)
         // and G_0 = sum_{i=0}^{2^{l-1}} (x<i> * G_i)
-        let expect_S = self.r * B + self.a * b_0 * F - x_star * (C + L_R_factors) + self.a * G_0;
+        let expect_S = *B * self.r + *F * (self.a * b_0) - (commitment + L_R_factors) * x_star + G_0 * self.a;
 
         if expect_S == S {
             Ok(())
         } else {
             Err(ProofError::VerificationError)
         }
+    }
+
+    /// Appends the public data to the transcript.
+    fn append_statement(
+        transcript: &mut Transcript,
+        commitment: &C::Compressed,
+        b_vec: &[C::Scalar],
+        G: &[C::Point],
+        F: &C::Point,
+        B: &C::Point,
+    ) {
+        transcript.innerproduct_domain_sep(b_vec.len() as u64);
+        transcript.curve_domain_sep::<C>();
+        transcript.append_point(b"C", commitment);
+        for b_i in b_vec {
+            transcript.append_scalar(b"b_i", b_i);
+        }
+        for G_i in G {
+            transcript.append_point(b"G_i", &C::compress(G_i));
+        }
+        transcript.append_point(b"F", &C::compress(F));
+        transcript.append_point(b"B", &C::compress(B));
     }
 
     /// Computes the vector of challenge scalars \\([x\_{i}]\\), and its inverse \\([x\_{i}^{-1}]\\)
@@ -250,8 +239,8 @@ impl LinearProof {
         &self,
         n: usize,
         transcript: &mut Transcript,
-        mut b_vec: Vec<Scalar>,
-    ) -> Result<(Vec<Scalar>, Vec<Scalar>, Scalar), ProofError> {
+        mut b_vec: Vec<C::Scalar>,
+    ) -> Result<(Vec<C::Scalar>, Vec<C::Scalar>, C::Scalar), ProofError> {
         let lg_n = self.L_vec.len();
         if lg_n >= 32 {
             // 4 billion multiplications should be enough for anyone
@@ -270,7 +259,7 @@ impl LinearProof {
         for (L, R) in self.L_vec.iter().zip(self.R_vec.iter()) {
             transcript.validate_and_append_point(b"L", L)?;
             transcript.validate_and_append_point(b"R", R)?;
-            let x_j: Scalar = transcript.challenge_scalar(b"x_j");
+            let x_j: C::Scalar = transcript.challenge_scalar(b"x_j");
             challenges.push(x_j);
             n_mut = n_mut / 2;
             let (b_L, b_R) = b.split_at_mut(n_mut);
@@ -282,7 +271,7 @@ impl LinearProof {
 
         // 3. Compute the challenge inverses: 1/x_k, ..., 1/x_1
         let mut challenges_inv = challenges.clone();
-        Scalar::batch_invert(&mut challenges_inv);
+        C::Scalar::batch_invert(&mut challenges_inv);
 
         Ok((challenges, challenges_inv, b[0]))
     }
@@ -294,11 +283,11 @@ impl LinearProof {
     ///
     /// Note that this is different from the Bulletproofs \\(s_i\\) generation,
     /// where \\(b(i, j)\\) = 1 if the jth bit of (i-1) is 1, and -1 otherwise.
-    fn subset_product(&self, n: usize, challenges: Vec<Scalar>) -> Vec<Scalar> {
+    fn subset_product(&self, n: usize, challenges: Vec<C::Scalar>) -> Vec<C::Scalar> {
         let lg_n = self.L_vec.len();
 
         let mut s = Vec::with_capacity(n);
-        s.push(Scalar::ONE);
+        s.push(C::Scalar::ONE);
         for i in 1..n {
             let lg_i = (32 - 1 - (i as u32).leading_zeros()) as usize;
             let k = 1 << lg_i;
@@ -313,16 +302,16 @@ impl LinearProof {
 
     /// Returns the size in bytes required to serialize the linear proof.
     ///
-    /// For vectors of length `n` the proof size is
-    /// \\(32 \cdot (2\lg n+3)\\) bytes.
+    /// For vectors of length `n` the proof size is \\(2\lg n+1\\) points and two 32-byte
+    /// scalars (\\(32 \cdot (2\lg n+3)\\) bytes on ristretto255).
     pub fn serialized_size(&self) -> usize {
-        (self.L_vec.len() * 2 + 3) * 32
+        (self.L_vec.len() * 2 + 1) * C::POINT_BYTES + 64
     }
 
-    /// Serializes the proof into a byte array of \\(2n+3\\) 32-byte elements.
+    /// Serializes the proof into a byte array of \\(2n+1\\) points and two 32-byte scalars.
     /// The layout of the linear proof is:
-    /// * \\(n\\) pairs of compressed Ristretto points \\(L_0, R_0 \dots, L_{n-1}, R_{n-1}\\),
-    /// * one compressed Ristretto point \\(S\\),
+    /// * \\(n\\) pairs of points \\(L_0, R_0 \dots, L_{n-1}, R_{n-1}\\),
+    /// * one point \\(S\\),
     /// * two scalars \\(a, r\\).
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(self.serialized_size());
@@ -331,15 +320,15 @@ impl LinearProof {
             buf.extend_from_slice(r.as_bytes());
         }
         buf.extend_from_slice(self.S.as_bytes());
-        buf.extend_from_slice(self.a.as_bytes());
-        buf.extend_from_slice(self.r.as_bytes());
+        buf.extend_from_slice(&self.a.to_bytes32());
+        buf.extend_from_slice(&self.r.to_bytes32());
         buf
     }
 
     /// Converts the proof into a byte iterator over serialized view of the proof.
     /// The layout of the inner product proof is:
-    /// * \\(n\\) pairs of compressed Ristretto points \\(L_0, R_0 \dots, L_{n-1}, R_{n-1}\\),
-    /// * one compressed Ristretto point \\(S\\),
+    /// * \\(n\\) pairs of points \\(L_0, R_0 \dots, L_{n-1}, R_{n-1}\\),
+    /// * one point \\(S\\),
     /// * two scalars \\(a, r\\).
     #[inline]
     #[allow(dead_code)]
@@ -349,50 +338,42 @@ impl LinearProof {
             .zip(self.R_vec.iter())
             .flat_map(|(l, r)| l.as_bytes().iter().chain(r.as_bytes()))
             .chain(self.S.as_bytes())
-            .chain(self.a.as_bytes())
-            .chain(self.r.as_bytes())
             .copied()
+            .chain(IntoIterator::into_iter(self.a.to_bytes32()))
+            .chain(IntoIterator::into_iter(self.r.to_bytes32()))
     }
 
     /// Deserializes the proof from a byte slice.
     /// Returns an error in the following cases:
-    /// * the slice does not have \\(2n+3\\) 32-byte elements,
+    /// * the slice is not \\(2n+1\\) points and two 32-byte scalars,
     /// * \\(n\\) is larger or equal to 32 (proof is too big),
-    /// * any of \\(2n + 1\\) points are not valid compressed Ristretto points,
-    /// * any of 2 scalars are not canonical scalars modulo Ristretto group order.
-    pub fn from_bytes(slice: &[u8]) -> Result<LinearProof, ProofError> {
-        let b = slice.len();
-        if b % 32 != 0 {
+    /// * any of \\(2n + 1\\) points is not a well-formed encoding,
+    /// * any of 2 scalars is not canonical.
+    pub fn from_bytes(slice: &[u8]) -> Result<LinearProof<C>, ProofError> {
+        let pb = C::POINT_BYTES;
+        if slice.len() < pb + 64 || (slice.len() - pb - 64) % (2 * pb) != 0 {
             return Err(ProofError::FormatError);
         }
-        let num_elements = b / 32;
-        if num_elements < 3 {
-            return Err(ProofError::FormatError);
-        }
-        if (num_elements - 3) % 2 != 0 {
-            return Err(ProofError::FormatError);
-        }
-        let lg_n = (num_elements - 3) / 2;
+        let lg_n = (slice.len() - pb - 64) / (2 * pb);
         if lg_n >= 32 {
             return Err(ProofError::FormatError);
         }
 
         use crate::util::read32;
 
-        let mut L_vec: Vec<CompressedRistretto> = Vec::with_capacity(lg_n);
-        let mut R_vec: Vec<CompressedRistretto> = Vec::with_capacity(lg_n);
+        let point = |pos: usize| C::Compressed::from_slice(&slice[pos..pos + pb]).ok_or(ProofError::FormatError);
+        let mut L_vec: Vec<C::Compressed> = Vec::with_capacity(lg_n);
+        let mut R_vec: Vec<C::Compressed> = Vec::with_capacity(lg_n);
         for i in 0..lg_n {
-            let pos = 2 * i * 32;
-            L_vec.push(CompressedRistretto(read32(&slice[pos..])));
-            R_vec.push(CompressedRistretto(read32(&slice[pos + 32..])));
+            let pos = 2 * i * pb;
+            L_vec.push(point(pos)?);
+            R_vec.push(point(pos + pb)?);
         }
 
-        let pos = 2 * lg_n * 32;
-        let S = CompressedRistretto(read32(&slice[pos..]));
-        let a = Option::from(Scalar::from_canonical_bytes(read32(&slice[pos + 32..])))
-            .ok_or(ProofError::FormatError)?;
-        let r = Option::from(Scalar::from_canonical_bytes(read32(&slice[pos + 64..])))
-            .ok_or(ProofError::FormatError)?;
+        let pos = 2 * lg_n * pb;
+        let S = point(pos)?;
+        let a = C::Scalar::from_bytes32(&read32(&slice[pos + pb..])).ok_or(ProofError::FormatError)?;
+        let r = C::Scalar::from_bytes32(&read32(&slice[pos + pb + 32..])).ok_or(ProofError::FormatError)?;
 
         Ok(LinearProof {
             L_vec,
@@ -407,6 +388,10 @@ impl LinearProof {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::iter;
+    use curve25519_dalek::ristretto::RistrettoPoint;
+    use curve25519_dalek::scalar::Scalar;
+    use curve25519_dalek::traits::VartimeMultiscalarMul;
 
     fn test_helper(n: usize) {
         let mut rng = rand::thread_rng();
@@ -435,7 +420,7 @@ mod tests {
         )
         .compress();
 
-        let proof = LinearProof::create(
+        let proof = LinearProof::<Ristretto>::create(
             &mut prover_transcript,
             &mut rng,
             &C,
@@ -457,7 +442,7 @@ mod tests {
         let serialized_proof = proof.to_bytes();
         assert_eq!(proof.serialized_size(), serialized_proof.len());
 
-        let deserialized_proof = LinearProof::from_bytes(&serialized_proof).unwrap();
+        let deserialized_proof = LinearProof::<Ristretto>::from_bytes(&serialized_proof).unwrap();
         let mut serde_verifier_transcript = Transcript::new(b"linearprooftest");
         assert!(deserialized_proof
             .verify(&mut serde_verifier_transcript, &C, &G, &F, &B, b)

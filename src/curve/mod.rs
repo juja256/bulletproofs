@@ -3,11 +3,16 @@
 
 use core::fmt::Debug;
 
+pub use ff;
+pub use group;
+
 mod ristretto;
 pub use self::ristretto::Ristretto;
 
 /// The scalar field of a curve, as gadgets, linear combinations and transcripts see it.
-pub trait Field: ff::PrimeField + Copy + Debug + Default + Send + Sync + zeroize::Zeroize + 'static {
+pub trait Field:
+    ff::PrimeField + Copy + Debug + Default + Send + Sync + zeroize::Zeroize + serde::Serialize + serde::de::DeserializeOwned + 'static
+{
     /// A uniformly random scalar from 64 uniformly random bytes (transcript challenges).
     fn from_wide(bytes: &[u8; 64]) -> Self;
     /// The canonical 32-byte encoding used in proofs and transcripts.
@@ -35,7 +40,9 @@ pub trait Field: ff::PrimeField + Copy + Debug + Default + Send + Sync + zeroize
 }
 
 /// An encoded group element as it appears in proofs and transcripts.
-pub trait PointEncoding: Copy + Clone + Debug + PartialEq + Eq + Default + Send + Sync {
+pub trait PointEncoding:
+    Copy + Clone + Debug + PartialEq + Eq + Default + Send + Sync + serde::Serialize + serde::de::DeserializeOwned
+{
     /// The bytes of the encoding.
     fn as_bytes(&self) -> &[u8];
     /// `bytes` as an encoding (`None` for the wrong length); no curve check.
@@ -49,7 +56,7 @@ pub trait Curve: Copy + Clone + Debug + Default + PartialEq + Eq + Send + Sync +
     /// The scalar field (the group order).
     type Scalar: Field;
     /// A group element.
-    type Point: group::Group<Scalar = Self::Scalar> + Copy + Debug + Send + Sync + zeroize::Zeroize;
+    type Point: group::Group<Scalar = Self::Scalar> + subtle::ConditionallySelectable + Copy + Debug + Send + Sync + zeroize::Zeroize;
     /// An encoded group element of `POINT_BYTES` bytes.
     type Compressed: PointEncoding;
     /// The name used in transcripts: `"ristretto255"`, `"secp256k1"`.
@@ -69,4 +76,21 @@ pub trait Curve: Copy + Clone + Debug + Default + PartialEq + Eq + Send + Sync +
     fn msm_ct(s: &[Self::Scalar], p: &[Self::Point]) -> Self::Point;
     /// `sum s_i P_i` in variable time: for public scalars only.
     fn msm_vt(s: &[Self::Scalar], p: &[Self::Point]) -> Self::Point;
+
+    /// `sum_{v < len} s_v P_v` with the terms `term(v)`, by chunks (in parallel with
+    /// `parallel`); constant time unless `vartime` (public scalars only).
+    fn msm_index<'a, T>(len: usize, vartime: bool, term: T) -> Self::Point
+    where
+        T: Fn(usize) -> (Self::Scalar, &'a Self::Point) + Sync,
+        Self::Point: 'a,
+    {
+        const CHUNK: usize = 1 << 12;
+        crate::util::map_index((len + CHUNK - 1) / CHUNK, |c| {
+            let (s, p): (alloc::vec::Vec<Self::Scalar>, alloc::vec::Vec<Self::Point>) =
+                (c * CHUNK..((c + 1) * CHUNK).min(len)).map(|v| { let (s, p) = term(v); (s, *p) }).unzip();
+            if vartime { Self::msm_vt(&s, &p) } else { Self::msm_ct(&s, &p) }
+        })
+        .into_iter()
+        .fold(<Self::Point as group::Group>::identity(), |a, b| a + b)
+    }
 }

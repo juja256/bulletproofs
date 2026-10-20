@@ -132,7 +132,7 @@ impl<C: Curve> RangeProof<C> {
     /// );
     /// # }
     /// ```
-    pub fn prove_single_with_rng<T: RngCore + CryptoRng, X: TranscriptBackend>(
+    pub fn prove_single_with_rng<T: RngCore + CryptoRng, X: TranscriptBackend + Clone>(
         bp_gens: &BulletproofGens<C>,
         pc_gens: &PedersenGens<C>,
         transcript: &mut X,
@@ -158,7 +158,7 @@ impl<C: Curve> RangeProof<C> {
     /// This is a convenience wrapper around [`RangeProof::prove_single_with_rng`],
     /// passing in a threadsafe RNG.
     #[cfg(feature = "std")]
-    pub fn prove_single<X: TranscriptBackend>(
+    pub fn prove_single<X: TranscriptBackend + Clone>(
         bp_gens: &BulletproofGens<C>,
         pc_gens: &PedersenGens<C>,
         transcript: &mut X,
@@ -231,7 +231,7 @@ impl<C: Curve> RangeProof<C> {
     /// );
     /// # }
     /// ```
-    pub fn prove_multiple_with_rng<T: RngCore + CryptoRng, X: TranscriptBackend>(
+    pub fn prove_multiple_with_rng<T: RngCore + CryptoRng, X: TranscriptBackend + Clone>(
         bp_gens: &BulletproofGens<C>,
         pc_gens: &PedersenGens<C>,
         transcript: &mut X,
@@ -291,7 +291,7 @@ impl<C: Curve> RangeProof<C> {
     /// This is a convenience wrapper around [`RangeProof::prove_multiple_with_rng`],
     /// passing in a threadsafe RNG.
     #[cfg(feature = "std")]
-    pub fn prove_multiple<X: TranscriptBackend>(
+    pub fn prove_multiple<X: TranscriptBackend + Clone>(
         bp_gens: &BulletproofGens<C>,
         pc_gens: &PedersenGens<C>,
         transcript: &mut X,

@@ -35,7 +35,7 @@ pub struct Dealer {}
 
 impl Dealer {
     /// Creates a new dealer coordinating `m` parties proving `n`-bit ranges.
-    pub fn new<'a, 'b, C: Curve, X: TranscriptBackend>(
+    pub fn new<'a, 'b, C: Curve, X: TranscriptBackend + Clone>(
         bp_gens: &'b BulletproofGens<C>,
         pc_gens: &'b PedersenGens<C>,
         transcript: &'a mut X,
@@ -84,7 +84,7 @@ impl Dealer {
 }
 
 /// A dealer waiting for the parties to send their [`BitCommitment`]s.
-pub struct DealerAwaitingBitCommitments<'a, 'b, C: Curve = Ristretto, X: TranscriptBackend = Transcript> {
+pub struct DealerAwaitingBitCommitments<'a, 'b, C: Curve = Ristretto, X: TranscriptBackend + Clone = Transcript> {
     bp_gens: &'b BulletproofGens<C>,
     pc_gens: &'b PedersenGens<C>,
     transcript: &'a mut X,
@@ -95,7 +95,7 @@ pub struct DealerAwaitingBitCommitments<'a, 'b, C: Curve = Ristretto, X: Transcr
     m: usize,
 }
 
-impl<'a, 'b, C: Curve, X: TranscriptBackend> DealerAwaitingBitCommitments<'a, 'b, C, X> {
+impl<'a, 'b, C: Curve, X: TranscriptBackend + Clone> DealerAwaitingBitCommitments<'a, 'b, C, X> {
     /// Receive each party's [`BitCommitment`]s and compute the [`BitChallenge`].
     pub fn receive_bit_commitments(
         self,
@@ -141,7 +141,7 @@ impl<'a, 'b, C: Curve, X: TranscriptBackend> DealerAwaitingBitCommitments<'a, 'b
 
 /// A dealer which has sent the [`BitChallenge`] to the parties and
 /// is waiting for their [`PolyCommitment`]s.
-pub struct DealerAwaitingPolyCommitments<'a, 'b, C: Curve = Ristretto, X: TranscriptBackend = Transcript> {
+pub struct DealerAwaitingPolyCommitments<'a, 'b, C: Curve = Ristretto, X: TranscriptBackend + Clone = Transcript> {
     n: usize,
     m: usize,
     transcript: &'a mut X,
@@ -156,7 +156,7 @@ pub struct DealerAwaitingPolyCommitments<'a, 'b, C: Curve = Ristretto, X: Transc
     S: C::Point,
 }
 
-impl<'a, 'b, C: Curve, X: TranscriptBackend> DealerAwaitingPolyCommitments<'a, 'b, C, X> {
+impl<'a, 'b, C: Curve, X: TranscriptBackend + Clone> DealerAwaitingPolyCommitments<'a, 'b, C, X> {
     /// Receive [`PolyCommitment`]s from the parties and compute the
     /// [`PolyChallenge`].
     pub fn receive_poly_commitments(
@@ -202,7 +202,7 @@ impl<'a, 'b, C: Curve, X: TranscriptBackend> DealerAwaitingPolyCommitments<'a, '
 /// A dealer which has sent the [`PolyChallenge`] to the parties and
 /// is waiting to aggregate their [`ProofShare`]s into a
 /// [`RangeProof`].
-pub struct DealerAwaitingProofShares<'a, 'b, C: Curve = Ristretto, X: TranscriptBackend = Transcript> {
+pub struct DealerAwaitingProofShares<'a, 'b, C: Curve = Ristretto, X: TranscriptBackend + Clone = Transcript> {
     n: usize,
     m: usize,
     transcript: &'a mut X,
@@ -219,7 +219,7 @@ pub struct DealerAwaitingProofShares<'a, 'b, C: Curve = Ristretto, X: Transcript
     T_2: C::Point,
 }
 
-impl<'a, 'b, C: Curve, X: TranscriptBackend> DealerAwaitingProofShares<'a, 'b, C, X> {
+impl<'a, 'b, C: Curve, X: TranscriptBackend + Clone> DealerAwaitingProofShares<'a, 'b, C, X> {
     /// Assembles proof shares into an `RangeProof`.
     ///
     /// Used as a helper function by `receive_trusted_shares` (which

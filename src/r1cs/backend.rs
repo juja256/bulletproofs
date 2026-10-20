@@ -271,11 +271,11 @@ mod bppp_backend {
         // the R1CS constraints, lowered in parallel chunks (the same rows, in order)
         const CHUNK: usize = 1 << 12;
         let n_q = store.len();
-        let build = |k: usize| -> Result<(SparseMatrix, Vec<Scalar>), R1CSError> {
+        let build = |chunk: usize| -> Result<(SparseMatrix, Vec<Scalar>), R1CSError> {
             let mut m = SparseMatrix::new(n_cols);
             let mut constants = Vec::with_capacity(CHUNK);
             let mut terms = Vec::new();
-            for q in k * CHUNK..((k + 1) * CHUNK).min(n_q) {
+            for q in chunk * CHUNK..((chunk + 1) * CHUNK).min(n_q) {
                 terms.clear();
                 let mut constant = Scalar::ZERO;
                 for (x, c) in store.row(q) {

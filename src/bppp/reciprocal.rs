@@ -250,7 +250,9 @@ impl ReciprocalCircuit {
     pub fn check(&self) -> Result<(), ProofError> {
         self.check_rules()?;
         // the compiled circuit (spec §4.2) has n_p + n_m multiplications, the rows of W_l, one
-        // row per tuple pole and one per reciprocal row, and the matrices checked above
+        // row per tuple pole and one per reciprocal row, and the matrices checked above (its
+        // n_l >= rows of W_l, so the f_l bound on n_l is implied by check_rules; kept for
+        // agreement with ArithmeticCircuit::check)
         let n_l = self.w_l.n_rows().checked_add(self.tuples.len()).and_then(|x| x.checked_add(self.recip.len()));
         let shape = circuit::Shape {
             n_m: self.n_mm(),
@@ -390,7 +392,10 @@ impl ReciprocalCircuit {
         // the factors of all terms with a pole, in row order (terms, then constants), at once
         let poles = || self.recip.iter().flat_map(|row| row.terms.iter().map(|(_, _, p)| p).chain(row.consts.iter().map(|(_, p)| p)));
         let values: Vec<Scalar> = poles().flatten().map(|t| t.eval(eta)).collect();
-        let mut factors = coef(&values).ok_or(ProofError::VerificationError)?.into_iter();
+        let factors = coef(&values).ok_or(ProofError::VerificationError)?;
+        debug_assert_eq!(factors.len(), values.len());
+        drop(values);
+        let mut factors = factors.into_iter();
         let mut factor = |pole: &Option<Pole>| pole.as_ref().map_or(Scalar::ONE, |_| factors.next().expect("one factor per pole"));
         for row in &self.recip {
             let terms: Vec<(usize, Scalar)> = row.terms.iter().map(|(c, v, pole)| (*c, v * factor(pole))).collect();

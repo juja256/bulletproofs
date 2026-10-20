@@ -20,8 +20,10 @@ edition = "2018"
 curve25519-dalek = { version = "4.1.3", features = ["digest", "group", "rand_core", "serde"] }
 group = { version = "0.13", default-features = false }
 subtle = { version = "2.5", default-features = false }
-# asm: Keccak with the ARMv8 SHA3 instructions when the CPU has them (runtime detection, same output)
-sha3 = { version = "0.10", default-features = false, features = ["asm"] }
+# asm: Keccak with the ARMv8 SHA3 instructions when the CPU has them (runtime detection, same
+# output); sha3 has the feature from 0.10.7, keccak's ARMv8 code is sound from 0.1.6
+sha3 = { version = "0.10.7", default-features = false, features = ["asm"] }
+keccak = "0.1.6"
 digest = { version = "0.10", default-features = false }
 rand_core = { version = "0.6", default-features = false, features = ["alloc"] }
 rand = { version = "0.8", default-features = false, optional = true }

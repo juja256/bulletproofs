@@ -22,7 +22,9 @@ group = { version = "0.13", default-features = false }
 ff = { version = "0.13", default-features = false }
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
 k256 = { version = "0.13.4", default-features = false, features = ["arithmetic", "hash2curve", "expose-field", "alloc", "precomputed-tables", "serde", "std"], optional = true }
-sha2 = { version = "0.10", default-features = false, optional = true }
+sha2 = { version = "0.10", default-features = false, optional = true, features = ["compress"] }
+# The Simplicity verifier generator (feature `simplicity`): parse, run and measure programs.
+simplicity-lang = { version = "0.9.0", optional = true, features = ["elements", "human_encoding"] }
 subtle = { version = "2.5", default-features = false }
 # asm: Keccak with the ARMv8 SHA3 instructions when the CPU has them (runtime detection, same
 # output); sha3 has the feature from 0.10.7, keccak's ARMv8 code is sound from 0.1.6
@@ -70,6 +72,9 @@ secp256k1 = ["std", "dep:k256", "sha256-transcript"]
 # `Sha256Transcript`: a Fiat–Shamir transcript on SHA-256 alone (docs/sha256-transcript.md), for
 # verifiers without Keccak, such as Simplicity.
 sha256-transcript = ["dep:sha2"]
+# Experimental: compile R1CS circuits (BP++ backend, secp256k1, SHA-256 transcript) into Simplicity
+# programs that verify their proofs (`bulletproofs::simplicity`, docs/simplicity-verifier.md).
+simplicity = ["secp256k1", "bppp", "yoloproofs", "dep:simplicity-lang"]
 nightly = ["subtle/nightly", "clear_on_drop/nightly"]
 docs = ["nightly"]
 

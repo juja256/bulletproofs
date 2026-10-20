@@ -59,6 +59,9 @@ pub mod bppp;
 #[cfg(feature = "secp256k1")]
 pub mod elements;
 
+#[cfg(feature = "simplicity")]
+pub mod simplicity;
+
 /// The proofs over secp256k1: the crate's types with the curve parameter set to
 /// [`curve::Secp256k1`]. Generators come from `for_curve` (`new` and `default` are the
 /// ristretto255 ones); `PedersenGens` has `B` = H of secp256k1-zkp and `B_blinding` = G.

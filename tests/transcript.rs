@@ -553,3 +553,138 @@ mod all_protocols {
         assert!(p.verify(&st, &pc, &bp2, &V, &mut mer(b"rt")).is_err());
     }
 }
+
+/// Full secp256k1 proofs under the SHA-256 transcript with the trace of every message and
+/// challenge (`tests/vectors/transcript/secp256k1-*.json`): test vectors for a Simplicity
+/// verifier. `ref/sha256_transcript.py --check-trace` recomputes the challenges independently.
+#[cfg(all(feature = "secp256k1", feature = "bppp", feature = "yoloproofs"))]
+mod full_proofs {
+    use bulletproofs::curve::{Curve, PointEncoding, Secp256k1};
+    use bulletproofs::r1cs::{lc, Backend, ConstraintSystem, Prover, R1CSProof, Variable, Verifier};
+    use bulletproofs::{BulletproofGens, PedersenGens, Sha256Transcript, TranscriptBackend};
+    use rand_chacha::rand_core::SeedableRng;
+    use rand_chacha::ChaCha20Rng;
+    use serde_json::{json, Value};
+
+    const LABEL: &[u8] = b"bulletproofs-vectors";
+
+    fn hex(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{:02x}", x)).collect()
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+
+    /// Records every operation of the backend it wraps.
+    #[derive(Clone)]
+    struct Recording<T: TranscriptBackend> {
+        inner: T,
+        trace: Vec<Value>,
+    }
+
+    impl Recording<Sha256Transcript> {
+        fn new() -> Self {
+            Recording { inner: Sha256Transcript::new(LABEL), trace: Vec::new() }
+        }
+    }
+
+    impl<T: TranscriptBackend> TranscriptBackend for Recording<T> {
+        fn append_message(&mut self, label: &'static [u8], m: &[u8]) {
+            self.trace.push(json!(["append", hex(label), hex(m)]));
+            self.inner.append_message(label, m)
+        }
+        // recorded as the append of le64(x) it is
+        fn append_u64(&mut self, label: &'static [u8], x: u64) {
+            self.trace.push(json!(["append", hex(label), hex(&x.to_le_bytes())]));
+            self.inner.append_u64(label, x)
+        }
+        fn challenge_bytes(&mut self, label: &'static [u8], d: &mut [u8]) {
+            self.inner.challenge_bytes(label, d);
+            self.trace.push(json!(["challenge", hex(label), d.len(), hex(d)]));
+        }
+        fn build_rng(&self) -> merlin::TranscriptRngBuilder {
+            self.inner.build_rng()
+        }
+    }
+
+    type S = <Secp256k1 as Curve>::Scalar;
+
+    fn path(name: &str) -> String {
+        format!("{}/tests/vectors/transcript/secp256k1-{}.json", env!("CARGO_MANIFEST_DIR"), name)
+    }
+
+    fn vector(name: &str, protocol: &str, statement: Value, proof: &[u8], trace: Vec<Value>) -> Value {
+        json!({"protocol": protocol, "curve": "secp256k1", "label": hex(LABEL), "seed": 1,
+               "statement": statement, "proof": hex(proof), "trace": trace, "name": name})
+    }
+
+    /// A 64-bit BP++ range proof of `0x0123456789abcdef`.
+    fn bppp_range() -> Value {
+        use bulletproofs::bppp::{RangeProof, RangeStatement};
+        let mut rng = ChaCha20Rng::seed_from_u64(1);
+        let st = RangeStatement::new(16, vec![(0, 1 << 64)]).unwrap();
+        let pc = PedersenGens::<Secp256k1>::for_curve();
+        let bp = BulletproofGens::<Secp256k1>::for_curve(st.generators_capacity(), 1);
+        let blinding = <S as bulletproofs::curve::ff::Field>::random(&mut rng);
+        let mut t = Recording::new();
+        let (proof, V) = RangeProof::<Secp256k1>::prove(&st, &pc, &bp, &[0x0123_4567_89ab_cdef], &[blinding], &mut t, &mut rng).unwrap();
+        let bytes = proof.to_bytes();
+        // the verifier absorbs and squeezes exactly what the prover did
+        let mut v = Recording::new();
+        RangeProof::<Secp256k1>::from_bytes(&bytes, &st).unwrap().verify(&st, &pc, &bp, &V, &mut v).unwrap();
+        assert_eq!(v.trace, t.trace);
+        let statement = json!({"base": 16, "ranges": [["0", "18446744073709551616"]], "commitments": V.iter().map(|c| hex(c.as_bytes())).collect::<Vec<_>>()});
+        vector("bppp-range", "bppp range proof", statement, &bytes, t.trace)
+    }
+
+    /// `x · y = 15` with committed `x = 3`, `y = 5`.
+    fn product<CS: ConstraintSystem<S>>(cs: &mut CS, x: Variable, y: Variable) {
+        let (_, _, o) = cs.multiply(lc(x), lc(y));
+        cs.constrain(lc(o) - S::from(15u64));
+    }
+
+    fn r1cs(backend: Backend, name: &str) -> Value {
+        let mut rng = ChaCha20Rng::seed_from_u64(1);
+        let pc = PedersenGens::<Secp256k1>::for_curve();
+        let bp = BulletproofGens::<Secp256k1>::for_curve(16, 1);
+        let random = |rng: &mut ChaCha20Rng| <S as bulletproofs::curve::ff::Field>::random(rng);
+        let mut t = Recording::new();
+        let mut p = Prover::new(&pc, &mut t);
+        p.set_backend(backend);
+        let (cx, x) = p.commit(S::from(3u64), random(&mut rng));
+        let (cy, y) = p.commit(S::from(5u64), random(&mut rng));
+        product(&mut p, x, y);
+        let bytes = p.prove_with_rng(&bp, &mut rng).unwrap().to_bytes();
+        let mut vt = Recording::new();
+        let mut v = Verifier::<_, Secp256k1>::for_curve(&mut vt);
+        v.set_backend(backend);
+        let (x, y) = (v.commit(cx), v.commit(cy));
+        product(&mut v, x, y);
+        v.verify(&R1CSProof::<Secp256k1>::from_bytes(&bytes).unwrap(), &pc, &bp).unwrap();
+        assert_eq!(vt.trace, t.trace);
+        let statement = json!({"circuit": "x * y = 15", "commitments": [hex(cx.as_bytes()), hex(cy.as_bytes())]});
+        vector(name, &format!("r1cs ({:?} backend)", backend), statement, &bytes, t.trace)
+    }
+
+    fn all() -> Vec<(&'static str, Value)> {
+        vec![("bppp-range", bppp_range()), ("r1cs-bppp", r1cs(Backend::Bppp, "r1cs-bppp")), ("r1cs-bp", r1cs(Backend::Bp, "r1cs-bp"))]
+    }
+
+    #[test]
+    fn sha256_full_proof_vectors_are_stable() {
+        for (name, got) in all() {
+            let file: Value = serde_json::from_str(&std::fs::read_to_string(path(name)).expect("vector file")).unwrap();
+            assert_eq!(got, file, "vector {} changed", name);
+            assert!(!unhex(file["proof"].as_str().unwrap()).is_empty());
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_sha256_full_proof_vectors() {
+        for (name, v) in all() {
+            std::fs::write(path(name), serde_json::to_string_pretty(&v).unwrap() + "\n").unwrap();
+        }
+    }
+}

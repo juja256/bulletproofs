@@ -7,13 +7,11 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use curve25519_dalek::constants::RISTRETTO_BASEPOINT_COMPRESSED;
-use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
-use curve25519_dalek::ristretto::RistrettoPoint;
-use curve25519_dalek::scalar::Scalar;
-use curve25519_dalek::traits::MultiscalarMul;
+use core::marker::PhantomData;
 use digest::{ExtendableOutput, Update, XofReader};
-use sha3::{Sha3_512, Shake256, Shake256Reader};
+use sha3::{Shake256, Shake256Reader};
+
+use crate::curve::{Curve, Ristretto};
 
 /// Represents a pair of base points for Pedersen commitments.
 ///
@@ -21,45 +19,51 @@ use sha3::{Sha3_512, Shake256, Shake256Reader};
 /// pluggable bases for Pedersen commitments, so that the choice of
 /// bases is not hard-coded.
 ///
-/// The default generators are:
+/// The default generators are those of the curve (`Curve::default_pedersen`); for
+/// ristretto255:
 ///
 /// * `B`: the `ristretto255` basepoint;
 /// * `B_blinding`: the result of `ristretto255` SHA3-512
 /// hash-to-group on input `B_bytes`.
 #[derive(Copy, Clone)]
-pub struct PedersenGens {
+pub struct PedersenGens<C: Curve = Ristretto> {
     /// Base for the committed value
-    pub B: RistrettoPoint,
+    pub B: C::Point,
     /// Base for the blinding factor
-    pub B_blinding: RistrettoPoint,
+    pub B_blinding: C::Point,
 }
 
-impl PedersenGens {
+impl<C: Curve> PedersenGens<C> {
+    /// The standard generators of the curve `C` (`Curve::default_pedersen`).
+    pub fn for_curve() -> Self {
+        let (B, B_blinding) = C::default_pedersen();
+        PedersenGens { B, B_blinding }
+    }
+
     /// Creates a Pedersen commitment using the value scalar and a blinding factor.
-    pub fn commit(&self, value: Scalar, blinding: Scalar) -> RistrettoPoint {
-        RistrettoPoint::multiscalar_mul(&[value, blinding], &[self.B, self.B_blinding])
+    pub fn commit(&self, value: C::Scalar, blinding: C::Scalar) -> C::Point {
+        C::msm_ct(&[value, blinding], &[self.B, self.B_blinding])
     }
 }
 
-impl Default for PedersenGens {
+/// The ristretto255 generators. `Default` is implemented for the default curve only, so that
+/// `PedersenGens::default()` keeps inferring ristretto255 (default type parameters do not take
+/// part in inference); other curves use [`PedersenGens::for_curve`].
+impl Default for PedersenGens<Ristretto> {
     fn default() -> Self {
-        PedersenGens {
-            B: RISTRETTO_BASEPOINT_POINT,
-            B_blinding: RistrettoPoint::hash_from_bytes::<Sha3_512>(
-                RISTRETTO_BASEPOINT_COMPRESSED.as_bytes(),
-            ),
-        }
+        Self::for_curve()
     }
 }
 
 /// The `GeneratorsChain` creates an arbitrary-long sequence of
 /// orthogonal generators.  The sequence can be deterministically
 /// produced starting with an arbitrary point.
-struct GeneratorsChain {
+struct GeneratorsChain<C: Curve> {
     reader: Shake256Reader,
+    _curve: PhantomData<C>,
 }
 
-impl GeneratorsChain {
+impl<C: Curve> GeneratorsChain<C> {
     /// Creates a chain of generators, determined by the hash of `label`.
     fn new(label: &[u8]) -> Self {
         let mut shake = Shake256::default();
@@ -68,6 +72,7 @@ impl GeneratorsChain {
 
         GeneratorsChain {
             reader: shake.finalize_xof(),
+            _curve: PhantomData,
         }
     }
 
@@ -82,10 +87,10 @@ impl GeneratorsChain {
     }
 }
 
-impl GeneratorsChain {
+impl<C: Curve> GeneratorsChain<C> {
     /// Append the next `n` generators to `v`. The XOF is read sequentially; with the
     /// `parallel` feature the hash-to-group maps run on all threads.
-    fn extend_vec(self, v: &mut Vec<RistrettoPoint>, n: usize) {
+    fn extend_vec(self, v: &mut Vec<C::Point>, n: usize) {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -102,7 +107,7 @@ impl GeneratorsChain {
                     })
                     .collect();
                 let mut points = Vec::with_capacity(k);
-                bytes.par_iter().map(RistrettoPoint::from_uniform_bytes).collect_into_vec(&mut points);
+                bytes.par_iter().map(|b| C::point_from_uniform(b)).collect_into_vec(&mut points);
                 v.extend(points);
                 left -= k;
             }
@@ -112,20 +117,20 @@ impl GeneratorsChain {
     }
 }
 
-impl Default for GeneratorsChain {
+impl<C: Curve> Default for GeneratorsChain<C> {
     fn default() -> Self {
         Self::new(&[])
     }
 }
 
-impl Iterator for GeneratorsChain {
-    type Item = RistrettoPoint;
+impl<C: Curve> Iterator for GeneratorsChain<C> {
+    type Item = C::Point;
 
     fn next(&mut self) -> Option<Self::Item> {
         let mut uniform_bytes = [0u8; 64];
         self.reader.read(&mut uniform_bytes);
 
-        Some(RistrettoPoint::from_uniform_bytes(&uniform_bytes))
+        Some(C::point_from_uniform(&uniform_bytes))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -160,19 +165,28 @@ impl Iterator for GeneratorsChain {
 /// constraint system proofs, since the generators are namespaced by
 /// their party index.
 #[derive(Clone)]
-pub struct BulletproofGens {
+pub struct BulletproofGens<C: Curve = Ristretto> {
     /// The maximum number of usable generators for each party.
     pub gens_capacity: usize,
     /// Number of values or parties
     pub party_capacity: usize,
     /// Precomputed \\(\mathbf G\\) generators for each party.
-    G_vec: Vec<Vec<RistrettoPoint>>,
+    G_vec: Vec<Vec<C::Point>>,
     /// Precomputed \\(\mathbf H\\) generators for each party.
-    H_vec: Vec<Vec<RistrettoPoint>>,
+    H_vec: Vec<Vec<C::Point>>,
 }
 
-impl BulletproofGens {
-    /// Create a new `BulletproofGens` object.
+impl BulletproofGens<Ristretto> {
+    /// Create a new `BulletproofGens` object over ristretto255 (other curves:
+    /// [`BulletproofGens::for_curve`]; `new` is defined for the default curve only so that
+    /// `BulletproofGens::new(..)` keeps inferring it).
+    pub fn new(gens_capacity: usize, party_capacity: usize) -> Self {
+        Self::for_curve(gens_capacity, party_capacity)
+    }
+}
+
+impl<C: Curve> BulletproofGens<C> {
+    /// Create a new `BulletproofGens` object over the curve `C`.
     ///
     /// # Inputs
     ///
@@ -184,7 +198,7 @@ impl BulletproofGens {
     ///
     /// * `party_capacity` is the maximum number of parties that can
     ///    produce an aggregated proof.
-    pub fn new(gens_capacity: usize, party_capacity: usize) -> Self {
+    pub fn for_curve(gens_capacity: usize, party_capacity: usize) -> Self {
         let mut gens = BulletproofGens {
             gens_capacity: 0,
             party_capacity,
@@ -197,7 +211,7 @@ impl BulletproofGens {
 
     /// Returns j-th share of generators, with an appropriate
     /// slice of vectors G and H for the j-th range proof.
-    pub fn share(&self, j: usize) -> BulletproofGensShare<'_> {
+    pub fn share(&self, j: usize) -> BulletproofGensShare<'_, C> {
         BulletproofGensShare {
             gens: &self,
             share: j,
@@ -218,18 +232,18 @@ impl BulletproofGens {
             let party_index = i as u32;
             let mut label = [b'G', 0, 0, 0, 0];
             LittleEndian::write_u32(&mut label[1..5], party_index);
-            let chain = GeneratorsChain::new(&label).fast_forward(self.gens_capacity);
+            let chain = GeneratorsChain::<C>::new(&label).fast_forward(self.gens_capacity);
             chain.extend_vec(&mut self.G_vec[i], extra);
 
             label[0] = b'H';
-            let chain = GeneratorsChain::new(&label).fast_forward(self.gens_capacity);
+            let chain = GeneratorsChain::<C>::new(&label).fast_forward(self.gens_capacity);
             chain.extend_vec(&mut self.H_vec[i], extra);
         }
         self.gens_capacity = new_capacity;
     }
 
     /// Return an iterator over the aggregation of the parties' G generators with given size `n`.
-    pub(crate) fn G(&self, n: usize, m: usize) -> impl Iterator<Item = &RistrettoPoint> {
+    pub(crate) fn G(&self, n: usize, m: usize) -> impl Iterator<Item = &C::Point> {
         AggregatedGensIter {
             n,
             m,
@@ -240,7 +254,7 @@ impl BulletproofGens {
     }
 
     /// Return an iterator over the aggregation of the parties' H generators with given size `n`.
-    pub(crate) fn H(&self, n: usize, m: usize) -> impl Iterator<Item = &RistrettoPoint> {
+    pub(crate) fn H(&self, n: usize, m: usize) -> impl Iterator<Item = &C::Point> {
         AggregatedGensIter {
             n,
             m,
@@ -251,16 +265,16 @@ impl BulletproofGens {
     }
 }
 
-struct AggregatedGensIter<'a> {
-    array: &'a Vec<Vec<RistrettoPoint>>,
+struct AggregatedGensIter<'a, P> {
+    array: &'a Vec<Vec<P>>,
     n: usize,
     m: usize,
     party_idx: usize,
     gen_idx: usize,
 }
 
-impl<'a> Iterator for AggregatedGensIter<'a> {
-    type Item = &'a RistrettoPoint;
+impl<'a, P> Iterator for AggregatedGensIter<'a, P> {
+    type Item = &'a P;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.gen_idx >= self.n {
@@ -291,27 +305,34 @@ impl<'a> Iterator for AggregatedGensIter<'a> {
 /// provides a view of the generators for one of the `m` parties' shares.
 ///
 /// The `BulletproofGensShare` is produced by [`BulletproofGens::share()`].
-#[derive(Copy, Clone)]
-pub struct BulletproofGensShare<'a> {
+pub struct BulletproofGensShare<'a, C: Curve = Ristretto> {
     /// The parent object that this is a view into
-    gens: &'a BulletproofGens,
+    gens: &'a BulletproofGens<C>,
     /// Which share we are
     share: usize,
 }
 
-impl<'a> BulletproofGensShare<'a> {
+// derived Copy/Clone would require C: Copy on the share's fields only through references
+impl<'a, C: Curve> Clone for BulletproofGensShare<'a, C> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<'a, C: Curve> Copy for BulletproofGensShare<'a, C> {}
+
+impl<'a, C: Curve> BulletproofGensShare<'a, C> {
     /// Return an iterator over this party's G generators with given size `n`.
-    pub fn G(&self, n: usize) -> impl Iterator<Item = &'a RistrettoPoint> {
+    pub fn G(&self, n: usize) -> impl Iterator<Item = &'a C::Point> {
         self.gens.G_vec[self.share].iter().take(n)
     }
 
     /// Return an iterator over this party's H generators with given size `n`.
-    pub(crate) fn H(&self, n: usize) -> impl Iterator<Item = &'a RistrettoPoint> {
+    pub(crate) fn H(&self, n: usize) -> impl Iterator<Item = &'a C::Point> {
         self.gens.H_vec[self.share].iter().take(n)
     }
 
     /// The first `n` G and H generators of this party as slices.
-    pub(crate) fn G_H_slices(&self, n: usize) -> (&'a [RistrettoPoint], &'a [RistrettoPoint]) {
+    pub(crate) fn G_H_slices(&self, n: usize) -> (&'a [C::Point], &'a [C::Point]) {
         (&self.gens.G_vec[self.share][..n], &self.gens.H_vec[self.share][..n])
     }
 }
@@ -319,6 +340,7 @@ impl<'a> BulletproofGensShare<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use curve25519_dalek::ristretto::RistrettoPoint;
 
     #[test]
     fn aggregated_gens_iter_matches_flat_map() {

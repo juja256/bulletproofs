@@ -5,12 +5,44 @@ use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
 use curve25519_dalek::scalar::Scalar;
 use sha3::Sha3_512;
 
-use super::Curve;
+use super::{Curve, Field, PointEncoding};
 use crate::util;
 
 /// ristretto255 (curve25519-dalek).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Ristretto;
+
+impl Field for Scalar {
+    fn from_wide(bytes: &[u8; 64]) -> Scalar {
+        Scalar::from_bytes_mod_order_wide(bytes)
+    }
+
+    fn to_bytes32(&self) -> [u8; 32] {
+        self.to_bytes()
+    }
+
+    fn from_bytes32(bytes: &[u8; 32]) -> Option<Scalar> {
+        Option::from(Scalar::from_canonical_bytes(*bytes))
+    }
+
+    fn batch_invert(s: &mut [Scalar]) -> Scalar {
+        Scalar::batch_invert(s)
+    }
+}
+
+impl PointEncoding for CompressedRistretto {
+    fn as_bytes(&self) -> &[u8] {
+        CompressedRistretto::as_bytes(self)
+    }
+
+    fn from_slice(bytes: &[u8]) -> Option<CompressedRistretto> {
+        CompressedRistretto::from_slice(bytes).ok()
+    }
+
+    fn is_identity(&self) -> bool {
+        curve25519_dalek::traits::IsIdentity::is_identity(self)
+    }
+}
 
 impl Curve for Ristretto {
     type Scalar = Scalar;
@@ -23,28 +55,8 @@ impl Curve for Ristretto {
         p.compress()
     }
 
-    fn compressed_bytes(c: &CompressedRistretto) -> &[u8] {
-        c.as_bytes()
-    }
-
     fn decompress(c: &CompressedRistretto) -> Option<RistrettoPoint> {
         c.decompress()
-    }
-
-    fn compressed_from_slice(bytes: &[u8]) -> Option<CompressedRistretto> {
-        CompressedRistretto::from_slice(bytes).ok()
-    }
-
-    fn scalar_from_wide(bytes: &[u8; 64]) -> Scalar {
-        Scalar::from_bytes_mod_order_wide(bytes)
-    }
-
-    fn scalar_to_bytes(s: &Scalar) -> [u8; 32] {
-        s.to_bytes()
-    }
-
-    fn scalar_from_canonical(bytes: &[u8; 32]) -> Option<Scalar> {
-        Option::from(Scalar::from_canonical_bytes(*bytes))
     }
 
     fn point_from_uniform(bytes: &[u8; 64]) -> RistrettoPoint {
@@ -62,10 +74,6 @@ impl Curve for Ristretto {
 
     fn msm_vt(s: &[Scalar], p: &[RistrettoPoint]) -> RistrettoPoint {
         util::msm_slices(s, p, util::MSM_CHUNK_VT, true)
-    }
-
-    fn batch_invert(s: &mut [Scalar]) -> Scalar {
-        Scalar::batch_invert(s)
     }
 }
 
@@ -87,20 +95,21 @@ mod tests {
         assert_eq!(Ristretto::msm_ct(&s, &p), direct);
         assert_eq!(Ristretto::msm_vt(&s, &p), direct);
         let c = Ristretto::compress(&p[0]);
-        assert_eq!(Ristretto::compressed_bytes(&c), p[0].compress().as_bytes());
+        assert_eq!(PointEncoding::as_bytes(&c), p[0].compress().as_bytes());
         assert_eq!(Ristretto::decompress(&c), Some(p[0]));
-        assert_eq!(Ristretto::compressed_from_slice(&[0u8; 31]), None);
+        assert_eq!(<CompressedRistretto as PointEncoding>::from_slice(&[0u8; 31]), None);
+        assert!(PointEncoding::is_identity(&CompressedRistretto::default()));
         let wide = [7u8; 64];
-        assert_eq!(Ristretto::scalar_from_wide(&wide), Scalar::from_bytes_mod_order_wide(&wide));
-        assert_eq!(Ristretto::scalar_to_bytes(&s[0]), s[0].to_bytes());
-        assert_eq!(Ristretto::scalar_from_canonical(&s[0].to_bytes()), Some(s[0]));
-        assert_eq!(Ristretto::scalar_from_canonical(&[0xff; 32]), None);
+        assert_eq!(<Scalar as Field>::from_wide(&wide), Scalar::from_bytes_mod_order_wide(&wide));
+        assert_eq!(s[0].to_bytes32(), s[0].to_bytes());
+        assert_eq!(<Scalar as Field>::from_bytes32(&s[0].to_bytes()), Some(s[0]));
+        assert_eq!(<Scalar as Field>::from_bytes32(&[0xff; 32]), None);
         assert_eq!(Ristretto::point_from_uniform(&wide), RistrettoPoint::from_uniform_bytes(&wide));
         let (b, bb) = Ristretto::default_pedersen();
         let pg = crate::PedersenGens::default();
         assert_eq!((b, bb), (pg.B, pg.B_blinding));
         let mut inv = s[..5].to_vec();
-        let all = Ristretto::batch_invert(&mut inv);
+        let all = <Scalar as Field>::batch_invert(&mut inv);
         assert!(inv.iter().zip(&s).all(|(i, x)| i * x == Scalar::ONE));
         assert_eq!(all, s[..5].iter().product::<Scalar>().invert());
         assert_eq!(Ristretto::POINT_BYTES, 32);

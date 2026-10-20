@@ -183,7 +183,7 @@ impl InnerProductProof {
             transcript.append_point(b"L", &L);
             transcript.append_point(b"R", &R);
 
-            let u = transcript.challenge_scalar(b"u");
+            let u: Scalar = transcript.challenge_scalar(b"u");
             let u_inv = u.invert();
 
             fold_scalars(a_L, a_R, u, u_inv);
@@ -245,7 +245,7 @@ impl InnerProductProof {
             transcript.append_point(b"L", &L);
             transcript.append_point(b"R", &R);
 
-            let u = transcript.challenge_scalar(b"u");
+            let u: Scalar = transcript.challenge_scalar(b"u");
             let u_inv = u.invert();
 
             fold_scalars(a_L, a_R, u, u_inv);

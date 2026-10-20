@@ -47,12 +47,8 @@ pub(crate) struct VecPoly(pub Vec<(i32, Vec<Scalar>)>);
 impl VecPoly {
     /// The value at `t`, as a vector of length `len`.
     pub fn eval(&self, t: Scalar, t_inv: Scalar, len: usize) -> Vec<Scalar> {
-        let mut out = alloc::vec![Scalar::ZERO; len];
-        for (d, v) in &self.0 {
-            let x = pow_signed(t, t_inv, *d);
-            out.iter_mut().zip(v).for_each(|(o, a)| *o += x * a);
-        }
-        out
+        let terms: Vec<(Scalar, &Vec<Scalar>)> = self.0.iter().map(|(d, v)| (pow_signed(t, t_inv, *d), v)).collect();
+        crate::util::map_index(len, |i| terms.iter().filter_map(|(x, v)| v.get(i).map(|a| x * a)).sum())
     }
 
     /// `<self(T), other(T)>`, or with weights `w` (`<a, b>_w = sum a_i b_i w_i`). The weights

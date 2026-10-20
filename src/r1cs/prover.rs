@@ -672,8 +672,8 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
 
         // 4. Compute blinded vector polynomials l(x) and r(x)
 
-        let y = transcript.challenge_scalar(b"y");
-        let z = transcript.challenge_scalar(b"z");
+        let y: Scalar = transcript.challenge_scalar(b"y");
+        let z: Scalar = transcript.challenge_scalar(b"z");
         if !self.constraints.vars_exist(self.secrets.a_L.len(), self.secrets.v.len(), self.builder.n_w) {
             return Err(builder::gadget_error("a constraint uses a variable outside the constraint system"));
         }
@@ -748,8 +748,8 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
         transcript.append_point(b"T_5", &T_5);
         transcript.append_point(b"T_6", &T_6);
 
-        let u = transcript.challenge_scalar(b"u");
-        let x = transcript.challenge_scalar(b"x");
+        let u: Scalar = transcript.challenge_scalar(b"u");
+        let x: Scalar = transcript.challenge_scalar(b"x");
 
         // t_2_blinding = <z*z^Q, W_V * v_blinding>
         // in the t_x_blinding calculations, line 76.
@@ -841,7 +841,7 @@ impl<'g, T: BorrowMut<Transcript>> Prover<'g, T> {
         transcript.append_scalar(b"e_blinding", &e_blinding);
 
         // Get a challenge value to combine statements for the IPP
-        let w = transcript.challenge_scalar(b"w");
+        let w: Scalar = transcript.challenge_scalar(b"w");
         let Q = w * self.pc_gens.B;
 
         // Generator factors: 1 for the first-phase multipliers and u for the second phase

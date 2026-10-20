@@ -115,8 +115,8 @@ impl<'a, 'b> DealerAwaitingBitCommitments<'a, 'b> {
         let S: RistrettoPoint = bit_commitments.iter().map(|vc| vc.S_j).sum();
         self.transcript.append_point(b"S", &S.compress());
 
-        let y = self.transcript.challenge_scalar(b"y");
-        let z = self.transcript.challenge_scalar(b"z");
+        let y: Scalar = self.transcript.challenge_scalar(b"y");
+        let z: Scalar = self.transcript.challenge_scalar(b"z");
         let bit_challenge = BitChallenge { y, z };
 
         Ok((
@@ -172,7 +172,7 @@ impl<'a, 'b> DealerAwaitingPolyCommitments<'a, 'b> {
         self.transcript.append_point(b"T_1", &T_1.compress());
         self.transcript.append_point(b"T_2", &T_2.compress());
 
-        let x = self.transcript.challenge_scalar(b"x");
+        let x: Scalar = self.transcript.challenge_scalar(b"x");
         let poly_challenge = PolyChallenge { x };
 
         Ok((
@@ -252,7 +252,7 @@ impl<'a, 'b> DealerAwaitingProofShares<'a, 'b> {
         self.transcript.append_scalar(b"e_blinding", &e_blinding);
 
         // Get a challenge value to combine statements for the IPP
-        let w = self.transcript.challenge_scalar(b"w");
+        let w: Scalar = self.transcript.challenge_scalar(b"w");
         let Q = w * self.pc_gens.B;
 
         let G_factors: Vec<Scalar> = iter::repeat(Scalar::ONE).take(self.n * self.m).collect();

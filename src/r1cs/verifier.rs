@@ -480,8 +480,8 @@ impl<T: BorrowMut<Transcript>> Verifier<T> {
         transcript.append_point(b"A_O2", &proof.A_O2);
         transcript.append_point(b"S2", &proof.S2);
 
-        let y = transcript.challenge_scalar(b"y");
-        let z = transcript.challenge_scalar(b"z");
+        let y: Scalar = transcript.challenge_scalar(b"y");
+        let z: Scalar = transcript.challenge_scalar(b"z");
         if !self.constraints.vars_exist(self.num_vars, self.V.len(), self.builder.n_w) {
             return Err(builder::gadget_error("a constraint uses a variable outside the constraint system"));
         }
@@ -492,14 +492,14 @@ impl<T: BorrowMut<Transcript>> Verifier<T> {
         transcript.validate_and_append_point(b"T_5", &proof.T_5)?;
         transcript.validate_and_append_point(b"T_6", &proof.T_6)?;
 
-        let u = transcript.challenge_scalar(b"u");
-        let x = transcript.challenge_scalar(b"x");
+        let u: Scalar = transcript.challenge_scalar(b"u");
+        let x: Scalar = transcript.challenge_scalar(b"x");
 
         transcript.append_scalar(b"t_x", &proof.t_x);
         transcript.append_scalar(b"t_x_blinding", &proof.t_x_blinding);
         transcript.append_scalar(b"e_blinding", &proof.e_blinding);
 
-        let w = transcript.challenge_scalar(b"w");
+        let w: Scalar = transcript.challenge_scalar(b"w");
 
         let (wL, wR, wO, wV, wc) = self.flattened_constraints(&z);
 

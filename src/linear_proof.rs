@@ -70,7 +70,7 @@ impl LinearProof {
 
         // Append all public data to the transcript
         transcript.innerproduct_domain_sep(n as u64);
-        transcript.append_point(b"C", &C);
+        transcript.append_point(b"C", C);
         for b_i in &b_vec {
             transcript.append_scalar(b"b_i", b_i);
         }
@@ -123,7 +123,7 @@ impl LinearProof {
             transcript.append_point(b"L", &L);
             transcript.append_point(b"R", &R);
 
-            let x_j = transcript.challenge_scalar(b"x_j");
+            let x_j: Scalar = transcript.challenge_scalar(b"x_j");
             let x_j_inv = x_j.invert();
 
             for i in 0..n {
@@ -146,7 +146,7 @@ impl LinearProof {
         let S = (t_star * B + s_star * b[0] * F + s_star * G[0]).compress();
         transcript.append_point(b"S", &S);
 
-        let x_star = transcript.challenge_scalar(b"x_star");
+        let x_star: Scalar = transcript.challenge_scalar(b"x_star");
         let a_star = s_star + x_star * a[0];
         let r_star = t_star + x_star * r;
 
@@ -180,7 +180,7 @@ impl LinearProof {
 
         // Append all public data to the transcript
         transcript.innerproduct_domain_sep(n as u64);
-        transcript.append_point(b"C", &C);
+        transcript.append_point(b"C", C);
         for b_i in &b_vec {
             transcript.append_scalar(b"b_i", b_i);
         }
@@ -192,7 +192,7 @@ impl LinearProof {
 
         let (x_vec, x_inv_vec, b_0) = self.verification_scalars(n, transcript, b_vec)?;
         transcript.append_point(b"S", &self.S);
-        let x_star = transcript.challenge_scalar(b"x_star");
+        let x_star: Scalar = transcript.challenge_scalar(b"x_star");
 
         // Decompress the compressed L values
         let Ls = self
@@ -270,7 +270,7 @@ impl LinearProof {
         for (L, R) in self.L_vec.iter().zip(self.R_vec.iter()) {
             transcript.validate_and_append_point(b"L", L)?;
             transcript.validate_and_append_point(b"R", R)?;
-            let x_j = transcript.challenge_scalar(b"x_j");
+            let x_j: Scalar = transcript.challenge_scalar(b"x_j");
             challenges.push(x_j);
             n_mut = n_mut / 2;
             let (b_L, b_R) = b.split_at_mut(n_mut);

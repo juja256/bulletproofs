@@ -6,10 +6,43 @@ use core::fmt::Debug;
 mod ristretto;
 pub use self::ristretto::Ristretto;
 
-/// The scalar field of a curve, as gadgets and linear combinations see it.
-pub trait Field: ff::PrimeField + Copy + Debug + Default + Send + Sync + zeroize::Zeroize + 'static {}
+/// The scalar field of a curve, as gadgets, linear combinations and transcripts see it.
+pub trait Field: ff::PrimeField + Copy + Debug + Default + Send + Sync + zeroize::Zeroize + 'static {
+    /// A uniformly random scalar from 64 uniformly random bytes (transcript challenges).
+    fn from_wide(bytes: &[u8; 64]) -> Self;
+    /// The canonical 32-byte encoding used in proofs and transcripts.
+    fn to_bytes32(&self) -> [u8; 32];
+    /// The scalar a canonical encoding gives; `None` for a value at least the field order.
+    fn from_bytes32(bytes: &[u8; 32]) -> Option<Self>;
+    /// Invert every entry in place (Montgomery's trick) and return the inverse of their
+    /// product; the entries must be non-zero. Constant time.
+    fn batch_invert(s: &mut [Self]) -> Self {
+        let mut acc = Self::ONE;
+        let mut prefix = alloc::vec::Vec::with_capacity(s.len());
+        for x in s.iter() {
+            prefix.push(acc);
+            acc *= x;
+        }
+        let all = acc.invert().unwrap_or(Self::ZERO);
+        let mut inv = all;
+        for (x, p) in s.iter_mut().zip(prefix).rev() {
+            let next = inv * *x;
+            *x = inv * p;
+            inv = next;
+        }
+        all
+    }
+}
 
-impl<F: ff::PrimeField + Copy + Debug + Default + Send + Sync + zeroize::Zeroize + 'static> Field for F {}
+/// An encoded group element as it appears in proofs and transcripts.
+pub trait PointEncoding: Copy + Clone + Debug + PartialEq + Eq + Default + Send + Sync {
+    /// The bytes of the encoding.
+    fn as_bytes(&self) -> &[u8];
+    /// `bytes` as an encoding (`None` for the wrong length); no curve check.
+    fn from_slice(bytes: &[u8]) -> Option<Self>;
+    /// Whether this is the encoding of the identity (rejected in proofs).
+    fn is_identity(&self) -> bool;
+}
 
 /// A prime-order group for Bulletproofs and Bulletproofs++.
 pub trait Curve: Copy + Clone + Debug + Default + PartialEq + Eq + Send + Sync + 'static {
@@ -18,7 +51,7 @@ pub trait Curve: Copy + Clone + Debug + Default + PartialEq + Eq + Send + Sync +
     /// A group element.
     type Point: group::Group<Scalar = Self::Scalar> + Copy + Debug + Send + Sync + zeroize::Zeroize;
     /// An encoded group element of `POINT_BYTES` bytes.
-    type Compressed: Copy + Clone + Debug + PartialEq + Eq + Default + Send + Sync;
+    type Compressed: PointEncoding;
     /// The name used in transcripts: `"ristretto255"`, `"secp256k1"`.
     const NAME: &'static str;
     /// Length of an encoded point.
@@ -26,18 +59,8 @@ pub trait Curve: Copy + Clone + Debug + Default + PartialEq + Eq + Send + Sync +
 
     /// The encoding of `p`.
     fn compress(p: &Self::Point) -> Self::Compressed;
-    /// The bytes of an encoding (`POINT_BYTES` of them).
-    fn compressed_bytes(c: &Self::Compressed) -> &[u8];
     /// The point `c` encodes; `None` if it encodes no point.
     fn decompress(c: &Self::Compressed) -> Option<Self::Point>;
-    /// `bytes` as an encoding (`None` unless `bytes.len() == POINT_BYTES`); no curve check.
-    fn compressed_from_slice(bytes: &[u8]) -> Option<Self::Compressed>;
-    /// A uniformly random scalar from 64 uniformly random bytes (transcript challenges).
-    fn scalar_from_wide(bytes: &[u8; 64]) -> Self::Scalar;
-    /// The canonical 32-byte encoding used in proofs.
-    fn scalar_to_bytes(s: &Self::Scalar) -> [u8; 32];
-    /// The scalar a canonical encoding gives; `None` for a value at least the group order.
-    fn scalar_from_canonical(bytes: &[u8; 32]) -> Option<Self::Scalar>;
     /// A point from 64 uniformly random bytes (generator derivation).
     fn point_from_uniform(bytes: &[u8; 64]) -> Self::Point;
     /// `(B, B_blinding)` of `PedersenGens::default()`.
@@ -46,7 +69,4 @@ pub trait Curve: Copy + Clone + Debug + Default + PartialEq + Eq + Send + Sync +
     fn msm_ct(s: &[Self::Scalar], p: &[Self::Point]) -> Self::Point;
     /// `sum s_i P_i` in variable time: for public scalars only.
     fn msm_vt(s: &[Self::Scalar], p: &[Self::Point]) -> Self::Point;
-    /// Invert every entry in place (Montgomery's trick) and return the inverse of their
-    /// product; the entries must be non-zero.
-    fn batch_invert(s: &mut [Self::Scalar]) -> Self::Scalar;
 }

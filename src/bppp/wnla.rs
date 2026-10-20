@@ -473,8 +473,8 @@ impl WnlaProof {
 
 #[cfg(test)]
 mod tests {
+    use crate::bppp::testutil::{sc, scs};
     use super::*;
-    use core::convert::TryInto;
     use crate::bppp::transcript::Replay;
     use curve25519_dalek::traits::MultiscalarMul;
     use merlin::Transcript;
@@ -486,15 +486,6 @@ mod tests {
         (0..n)
             .map(|i| RistrettoPoint::hash_from_bytes::<Sha3_512>(format!("{label}{i}").as_bytes()))
             .collect()
-    }
-
-    fn sc(v: &serde_json::Value) -> Scalar {
-        let b: [u8; 32] = hex::decode(v.as_str().unwrap()).unwrap().try_into().unwrap();
-        Scalar::from_canonical_bytes(b).unwrap()
-    }
-
-    fn scs(v: &serde_json::Value) -> Vec<Scalar> {
-        v.as_array().unwrap().iter().map(sc).collect()
     }
 
     /// The stop rule is secp256k1-zkp's size-optimal layout (PR #352): its closed form, ported.

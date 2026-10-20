@@ -8,8 +8,9 @@ use crate::errors::ProofError;
 
 /// The core of a Fiat–Shamir transcript: what every protocol of the crate needs. Implemented
 /// by `merlin::Transcript` (the default, the upstream transcripts); any other implementation
-/// works wherever the crate takes a transcript.
-pub trait TranscriptBackend: Clone {
+/// works wherever the crate takes a transcript. Object safe, so that a constraint system can
+/// lease its transcript as `&mut dyn TranscriptBackend`; the MPC dealer also needs `Clone`.
+pub trait TranscriptBackend {
     /// Absorb a labeled message.
     fn append_message(&mut self, label: &'static [u8], message: &[u8]);
     /// Absorb a labeled integer.
@@ -36,6 +37,39 @@ impl TranscriptBackend for Transcript {
 
     fn build_rng(&self) -> merlin::TranscriptRngBuilder {
         Transcript::build_rng(self)
+    }
+}
+
+/// Something that holds a transcript: the transcript itself or a mutable borrow of it. The
+/// R1CS prover and verifier take either (upstream took `BorrowMut<merlin::Transcript>`).
+/// Every `&mut X` holds its `X`; the crate's transcripts also hold themselves, and so can
+/// any other type with its own impl.
+pub trait TranscriptRef {
+    /// The transcript held.
+    type Backend: TranscriptBackend;
+    /// The transcript, mutably.
+    fn backend(&mut self) -> &mut Self::Backend;
+    /// The transcript.
+    fn backend_ref(&self) -> &Self::Backend;
+}
+
+impl<'a, X: TranscriptBackend> TranscriptRef for &'a mut X {
+    type Backend = X;
+    fn backend(&mut self) -> &mut X {
+        self
+    }
+    fn backend_ref(&self) -> &X {
+        self
+    }
+}
+
+impl TranscriptRef for Transcript {
+    type Backend = Self;
+    fn backend(&mut self) -> &mut Self {
+        self
+    }
+    fn backend_ref(&self) -> &Self {
+        self
     }
 }
 

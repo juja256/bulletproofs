@@ -2,9 +2,9 @@
 
 use super::{LinearCombination, R1CSError, Variable};
 use curve25519_dalek::scalar::Scalar;
-use merlin::Transcript;
 
 use crate::curve::Field;
+use crate::transcript::TranscriptBackend;
 
 /// The interface for a constraint system, abstracting over the prover
 /// and verifier's roles.
@@ -21,8 +21,9 @@ use crate::curve::Field;
 pub trait ConstraintSystem<F: Field = Scalar> {
     /// Leases the proof transcript to the user, so they can
     /// add extra data to which the proof must be bound, but which
-    /// is not available before creation of the constraint system.
-    fn transcript(&mut self) -> &mut Transcript;
+    /// is not available before creation of the constraint system (`merlin::Transcript`,
+    /// `Sha256Transcript` or any other [`TranscriptBackend`], behind its interface).
+    fn transcript(&mut self) -> &mut dyn TranscriptBackend;
 
     /// Allocate and constrain multiplication variables.
     ///

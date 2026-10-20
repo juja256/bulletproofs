@@ -1,10 +1,8 @@
 #![allow(non_snake_case)]
 
-use core::borrow::BorrowMut;
 use core::mem;
 use ff::Field as _;
 use group::Group;
-use merlin::Transcript;
 
 use super::{
     ConstraintSystem, LinearCombination, R1CSProof, RandomizableConstraintSystem,
@@ -15,7 +13,7 @@ use crate::curve::{Curve, Ristretto};
 use crate::errors::R1CSError;
 use crate::generators::{BulletproofGens, PedersenGens};
 use crate::r1cs::Metrics;
-use crate::transcript::TranscriptProtocol;
+use crate::transcript::{TranscriptBackend, TranscriptProtocol, TranscriptRef};
 use super::proof::ProofKind;
 #[cfg(feature = "bppp")]
 use super::proof::BpppProof;
@@ -31,7 +29,7 @@ use super::compact::{ConstraintStore, Flattened};
 /// When all constraints are added, the verifying code calls `verify`
 /// which consumes the `Verifier` instance, samples random challenges
 /// that instantiate the randomized constraints, and verifies the proof.
-pub struct Verifier<T: BorrowMut<Transcript>, C: Curve = Ristretto> {
+pub struct Verifier<T: TranscriptRef, C: Curve = Ristretto> {
     transcript: T,
     constraints: ConstraintStore<C::Scalar>,
 
@@ -72,13 +70,13 @@ pub struct Verifier<T: BorrowMut<Transcript>, C: Curve = Ristretto> {
 /// monomorphize the closures for the proving and verifying code.
 /// However, this type cannot be instantiated by the user and therefore can only be used within
 /// the callback provided to `specify_randomized_constraints`.
-pub struct RandomizingVerifier<T: BorrowMut<Transcript>, C: Curve = Ristretto> {
+pub struct RandomizingVerifier<T: TranscriptRef, C: Curve = Ristretto> {
     verifier: Verifier<T, C>,
 }
 
-impl<T: BorrowMut<Transcript>, C: Curve> ConstraintSystem<C::Scalar> for Verifier<T, C> {
-    fn transcript(&mut self) -> &mut Transcript {
-        self.transcript.borrow_mut()
+impl<T: TranscriptRef, C: Curve> ConstraintSystem<C::Scalar> for Verifier<T, C> {
+    fn transcript(&mut self) -> &mut dyn TranscriptBackend {
+        self.transcript.backend()
     }
 
     fn multiply(
@@ -154,7 +152,7 @@ impl<T: BorrowMut<Transcript>, C: Curve> ConstraintSystem<C::Scalar> for Verifie
     }
 }
 
-impl<T: BorrowMut<Transcript>, C: Curve> CircuitBuilder<C::Scalar> for Verifier<T, C> {
+impl<T: TranscriptRef, C: Curve> CircuitBuilder<C::Scalar> for Verifier<T, C> {
     fn witness(&mut self, _: Option<C::Scalar>) -> Result<Variable, R1CSError> {
         Ok(self.builder.witness())
     }
@@ -199,7 +197,7 @@ impl<T: BorrowMut<Transcript>, C: Curve> CircuitBuilder<C::Scalar> for Verifier<
     }
 }
 
-impl<T: BorrowMut<Transcript>, C: Curve> RandomizableConstraintSystem<C::Scalar> for Verifier<T, C> {
+impl<T: TranscriptRef, C: Curve> RandomizableConstraintSystem<C::Scalar> for Verifier<T, C> {
     type RandomizedCS = RandomizingVerifier<T, C>;
 
     fn specify_randomized_constraints<F>(&mut self, callback: F) -> Result<(), R1CSError>
@@ -211,9 +209,9 @@ impl<T: BorrowMut<Transcript>, C: Curve> RandomizableConstraintSystem<C::Scalar>
     }
 }
 
-impl<T: BorrowMut<Transcript>, C: Curve> ConstraintSystem<C::Scalar> for RandomizingVerifier<T, C> {
-    fn transcript(&mut self) -> &mut Transcript {
-        self.verifier.transcript.borrow_mut()
+impl<T: TranscriptRef, C: Curve> ConstraintSystem<C::Scalar> for RandomizingVerifier<T, C> {
+    fn transcript(&mut self) -> &mut dyn TranscriptBackend {
+        self.verifier.transcript.backend()
     }
 
     fn multiply(
@@ -248,30 +246,31 @@ impl<T: BorrowMut<Transcript>, C: Curve> ConstraintSystem<C::Scalar> for Randomi
     }
 }
 
-impl<T: BorrowMut<Transcript>, C: Curve> RandomizedConstraintSystem<C::Scalar> for RandomizingVerifier<T, C> {
+impl<T: TranscriptRef, C: Curve> RandomizedConstraintSystem<C::Scalar> for RandomizingVerifier<T, C> {
     fn challenge_scalar(&mut self, label: &'static [u8]) -> C::Scalar {
         self.verifier
             .transcript
-            .borrow_mut()
+            .backend()
             .challenge_scalar(label)
     }
 }
 
-impl<T: BorrowMut<Transcript>> Verifier<T, Ristretto> {
+impl<T: TranscriptRef> Verifier<T, Ristretto> {
     /// A verifier over ristretto255: [`Verifier::for_curve`] for the default curve.
     pub fn new(transcript: T) -> Self {
         Self::for_curve(transcript)
     }
 }
 
-impl<T: BorrowMut<Transcript>, C: Curve> Verifier<T, C> {
+impl<T: TranscriptRef, C: Curve> Verifier<T, C> {
     /// Construct an empty constraint system with specified external
     /// input variables.
     ///
     /// # Inputs
     ///
-    /// The `transcript` parameter is a Merlin proof transcript.  The
-    /// `Verifier` holds onto the `&mut Transcript` until it consumes
+    /// The `transcript` parameter is a proof transcript (`merlin::Transcript`, a
+    /// `Sha256Transcript` or any [`TranscriptBackend`]) or a mutable borrow of one.  The
+    /// `Verifier` holds onto the transcript until it consumes
     /// itself during [`Verifier::verify`], releasing its borrow of the
     /// transcript.  This ensures that the transcript cannot be
     /// altered except by the `Verifier` before proving is complete.
@@ -280,8 +279,8 @@ impl<T: BorrowMut<Transcript>, C: Curve> Verifier<T, C> {
     /// drawn (the randomized constraints of the second phase), so that the challenges are
     /// bound to them.
     pub fn for_curve(mut transcript: T) -> Self {
-        transcript.borrow_mut().r1cs_domain_sep();
-        transcript.borrow_mut().curve_domain_sep::<C>();
+        transcript.backend().r1cs_domain_sep();
+        transcript.backend().curve_domain_sep::<C>();
 
         Verifier {
             transcript,
@@ -322,7 +321,7 @@ impl<T: BorrowMut<Transcript>, C: Curve> Verifier<T, C> {
         self.V.push(commitment);
 
         // Add the commitment to the transcript.
-        self.transcript.borrow_mut().append_point(b"V", &commitment);
+        self.transcript.backend().append_point(b"V", &commitment);
 
         Variable::Committed(i)
     }
@@ -374,10 +373,10 @@ impl<T: BorrowMut<Transcript>, C: Curve> Verifier<T, C> {
         self.pending_multiplier = None;
 
         if self.deferred_constraints.len() == 0 {
-            self.transcript.borrow_mut().r1cs_1phase_domain_sep();
+            self.transcript.backend().r1cs_1phase_domain_sep();
             Ok(self)
         } else {
-            self.transcript.borrow_mut().r1cs_2phase_domain_sep();
+            self.transcript.backend().r1cs_2phase_domain_sep();
             // Note: the wrapper could've used &mut instead of ownership,
             // but specifying lifetimes for boxed closures is not going to be nice,
             // so we move the self into wrapper and then move it back out afterwards.
@@ -430,7 +429,7 @@ impl<T: BorrowMut<Transcript>, C: Curve> Verifier<T, C> {
             return Err(R1CSError::VerificationError);
         }
         let gens = BpppGens::new(pc_gens, bp_gens, c.n_lin, p.n_mm).map_err(|_| R1CSError::InvalidGeneratorsLength)?;
-        let transcript = self.transcript.borrow_mut();
+        let transcript = self.transcript.backend();
         BpppTranscript::domain_sep(transcript, super::backend::BPPP_DOMAIN);
         reciprocal::verify(&p.proof, &c, &gens, &self.V, transcript).map_err(|_| R1CSError::VerificationError)?;
         Ok(self.transcript)
@@ -455,11 +454,11 @@ impl<T: BorrowMut<Transcript>, C: Curve> Verifier<T, C> {
         // We cannot do this in advance because user can commit variables one-by-one,
         // but this suffix provides safe disambiguation because each variable
         // is prefixed with a separate label.
-        let transcript = self.transcript.borrow_mut();
+        let transcript = self.transcript.backend();
         transcript.append_u64(b"m", self.V.len() as u64);
 
         self.lower_builder_bp()?;
-        let transcript = self.transcript.borrow_mut();
+        let transcript = self.transcript.backend();
         let n1 = self.num_vars;
         transcript.validate_and_append_point(b"A_I1", &proof.A_I1)?;
         transcript.validate_and_append_point(b"A_O1", &proof.A_O1)?;
@@ -468,7 +467,7 @@ impl<T: BorrowMut<Transcript>, C: Curve> Verifier<T, C> {
         // Process the remaining constraints.
         self = self.create_randomized_constraints()?;
 
-        let transcript = self.transcript.borrow_mut();
+        let transcript = self.transcript.backend();
 
         // If the number of multiplications is not 0 or a power of 2, then pad the circuit.
         let n = self.num_vars;
@@ -514,7 +513,7 @@ impl<T: BorrowMut<Transcript>, C: Curve> Verifier<T, C> {
         // Get IPP variables
         let (u_sq, u_inv_sq, s) = proof
             .ipp_proof
-            .verification_scalars(padded_n, self.transcript.borrow_mut())
+            .verification_scalars(padded_n, self.transcript.backend())
             .map_err(|_| R1CSError::VerificationError)?;
 
         let a = proof.ipp_proof.a;
@@ -539,7 +538,7 @@ impl<T: BorrowMut<Transcript>, C: Curve> Verifier<T, C> {
         use rand::thread_rng;
         let mut rng = self
             .transcript
-            .borrow_mut()
+            .backend()
             .build_rng()
             .finalize(&mut thread_rng());
         let r = C::Scalar::random(&mut rng);

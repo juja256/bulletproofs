@@ -1,10 +1,8 @@
 #![allow(non_snake_case)]
 
-use core::borrow::BorrowMut;
 use core::mem;
 use ff::Field as _;
 use group::Group;
-use merlin::Transcript;
 use rand_core::{CryptoRng, RngCore};
 use zeroize::Zeroize;
 
@@ -18,7 +16,7 @@ use crate::errors::R1CSError;
 use crate::generators::{BulletproofGens, PedersenGens};
 use crate::inner_product_proof::InnerProductProof;
 use crate::r1cs::Metrics;
-use crate::transcript::TranscriptProtocol;
+use crate::transcript::{TranscriptBackend, TranscriptProtocol, TranscriptRef};
 use crate::util;
 use super::builder::{self, Builder, CircuitBuilder, Cost, Counts, Reciprocal, TableId};
 use super::compact::{ConstraintStore, Flattened};
@@ -73,7 +71,7 @@ fn eval_with<F: Field>(secrets: &Secrets<F>, lc: &LinearCombination<F>) -> F {
 /// When all constraints are added, the proving code calls `prove`
 /// which consumes the `Prover` instance, samples random challenges
 /// that instantiate the randomized constraints, and creates a complete proof.
-pub struct Prover<'g, T: BorrowMut<Transcript>, C: Curve = Ristretto> {
+pub struct Prover<'g, T: TranscriptRef, C: Curve = Ristretto> {
     transcript: T,
     pc_gens: &'g PedersenGens<C>,
     /// The constraints accumulated so far.
@@ -123,7 +121,7 @@ struct Secrets<F: Field> {
 /// monomorphize the closures for the proving and verifying code.
 /// However, this type cannot be instantiated by the user and therefore can only be used within
 /// the callback provided to `specify_randomized_constraints`.
-pub struct RandomizingProver<'g, T: BorrowMut<Transcript>, C: Curve = Ristretto> {
+pub struct RandomizingProver<'g, T: TranscriptRef, C: Curve = Ristretto> {
     prover: Prover<'g, T, C>,
 }
 
@@ -136,9 +134,9 @@ impl<F: Field> Drop for Secrets<F> {
     }
 }
 
-impl<'g, T: BorrowMut<Transcript>, C: Curve> ConstraintSystem<C::Scalar> for Prover<'g, T, C> {
-    fn transcript(&mut self) -> &mut Transcript {
-        self.transcript.borrow_mut()
+impl<'g, T: TranscriptRef, C: Curve> ConstraintSystem<C::Scalar> for Prover<'g, T, C> {
+    fn transcript(&mut self) -> &mut dyn TranscriptBackend {
+        self.transcript.backend()
     }
 
     fn multiply(
@@ -229,7 +227,7 @@ impl<'g, T: BorrowMut<Transcript>, C: Curve> ConstraintSystem<C::Scalar> for Pro
     }
 }
 
-impl<'g, T: BorrowMut<Transcript>, C: Curve> CircuitBuilder<C::Scalar> for Prover<'g, T, C> {
+impl<'g, T: TranscriptRef, C: Curve> CircuitBuilder<C::Scalar> for Prover<'g, T, C> {
     fn witness(&mut self, v: Option<C::Scalar>) -> Result<Variable, R1CSError> {
         let v = v.ok_or(R1CSError::MissingAssignment)?;
         self.secrets.w.push(v);
@@ -276,7 +274,7 @@ impl<'g, T: BorrowMut<Transcript>, C: Curve> CircuitBuilder<C::Scalar> for Prove
     }
 }
 
-impl<'g, T: BorrowMut<Transcript>, C: Curve> RandomizableConstraintSystem<C::Scalar> for Prover<'g, T, C> {
+impl<'g, T: TranscriptRef, C: Curve> RandomizableConstraintSystem<C::Scalar> for Prover<'g, T, C> {
     type RandomizedCS = RandomizingProver<'g, T, C>;
 
     fn specify_randomized_constraints<F>(&mut self, callback: F) -> Result<(), R1CSError>
@@ -288,9 +286,9 @@ impl<'g, T: BorrowMut<Transcript>, C: Curve> RandomizableConstraintSystem<C::Sca
     }
 }
 
-impl<'g, T: BorrowMut<Transcript>, C: Curve> ConstraintSystem<C::Scalar> for RandomizingProver<'g, T, C> {
-    fn transcript(&mut self) -> &mut Transcript {
-        self.prover.transcript.borrow_mut()
+impl<'g, T: TranscriptRef, C: Curve> ConstraintSystem<C::Scalar> for RandomizingProver<'g, T, C> {
+    fn transcript(&mut self) -> &mut dyn TranscriptBackend {
+        self.prover.transcript.backend()
     }
 
     fn multiply(
@@ -325,13 +323,13 @@ impl<'g, T: BorrowMut<Transcript>, C: Curve> ConstraintSystem<C::Scalar> for Ran
     }
 }
 
-impl<'g, T: BorrowMut<Transcript>, C: Curve> RandomizedConstraintSystem<C::Scalar> for RandomizingProver<'g, T, C> {
+impl<'g, T: TranscriptRef, C: Curve> RandomizedConstraintSystem<C::Scalar> for RandomizingProver<'g, T, C> {
     fn challenge_scalar(&mut self, label: &'static [u8]) -> C::Scalar {
-        self.prover.transcript.borrow_mut().challenge_scalar(label)
+        self.prover.transcript.backend().challenge_scalar(label)
     }
 }
 
-impl<'g, T: BorrowMut<Transcript>, C: Curve> Prover<'g, T, C> {
+impl<'g, T: TranscriptRef, C: Curve> Prover<'g, T, C> {
     /// Construct an empty constraint system with specified external
     /// input variables.
     ///
@@ -343,8 +341,9 @@ impl<'g, T: BorrowMut<Transcript>, C: Curve> Prover<'g, T, C> {
     /// the number of multiplication constraints that will eventually
     /// be added into the constraint system.
     ///
-    /// The `transcript` parameter is a Merlin proof transcript.  The
-    /// `Prover` holds onto the `&mut Transcript` until it consumes
+    /// The `transcript` parameter is a proof transcript (`merlin::Transcript`, a
+    /// `Sha256Transcript` or any [`TranscriptBackend`]) or a mutable borrow of one.  The
+    /// `Prover` holds onto the transcript until it consumes
     /// itself during [`Prover::prove`], releasing its borrow of the
     /// transcript.  This ensures that the transcript cannot be
     /// altered except by the `Prover` before proving is complete.
@@ -353,8 +352,8 @@ impl<'g, T: BorrowMut<Transcript>, C: Curve> Prover<'g, T, C> {
     ///
     /// Returns a new `Prover` instance.
     pub fn new(pc_gens: &'g PedersenGens<C>, mut transcript: T) -> Self {
-        transcript.borrow_mut().r1cs_domain_sep();
-        transcript.borrow_mut().curve_domain_sep::<C>();
+        transcript.backend().r1cs_domain_sep();
+        transcript.backend().curve_domain_sep::<C>();
 
         Prover {
             pc_gens,
@@ -416,7 +415,7 @@ impl<'g, T: BorrowMut<Transcript>, C: Curve> Prover<'g, T, C> {
 
         // Add the commitment to the transcript.
         let V = C::compress(&self.pc_gens.commit(v, v_blinding));
-        self.transcript.borrow_mut().append_point(b"V", &V);
+        self.transcript.backend().append_point(b"V", &V);
 
         (V, Variable::Committed(i))
     }
@@ -477,10 +476,10 @@ impl<'g, T: BorrowMut<Transcript>, C: Curve> Prover<'g, T, C> {
         self.pending_multiplier = None;
 
         if self.deferred_constraints.len() == 0 {
-            self.transcript.borrow_mut().r1cs_1phase_domain_sep();
+            self.transcript.backend().r1cs_1phase_domain_sep();
             Ok(self)
         } else {
-            self.transcript.borrow_mut().r1cs_2phase_domain_sep();
+            self.transcript.backend().r1cs_2phase_domain_sep();
             // Note: the wrapper could've used &mut instead of ownership,
             // but specifying lifetimes for boxed closures is not going to be nice,
             // so we move the self into wrapper and then move it back out afterwards.
@@ -519,7 +518,8 @@ impl<'g, T: BorrowMut<Transcript>, C: Curve> Prover<'g, T, C> {
             .map(|(proof, _transcript)| proof)
     }
 
-    fn prove_with_rng_and_return_transcript<R: RngCore + CryptoRng>(
+    /// Same as `prove_with_rng`, but also returns the transcript back to the user.
+    pub fn prove_with_rng_and_return_transcript<R: RngCore + CryptoRng>(
         mut self,
         bp_gens: &BulletproofGens<C>,
         external_rng: &mut R,
@@ -536,7 +536,7 @@ impl<'g, T: BorrowMut<Transcript>, C: Curve> Prover<'g, T, C> {
         // but this suffix provides safe disambiguation because each variable
         // is prefixed with a separate label.
         self.transcript
-            .borrow_mut()
+            .backend()
             .append_u64(b"m", self.secrets.v.len() as u64);
 
         // Create a `TranscriptRng` from the high-level witness data
@@ -553,7 +553,7 @@ impl<'g, T: BorrowMut<Transcript>, C: Curve> Prover<'g, T, C> {
         // protect the v's in the commitments), we don't gain much by
         // committing the v's as well as the v_blinding's.
         let mut rng = {
-            let mut builder = self.transcript.borrow_mut().build_rng();
+            let mut builder = self.transcript.backend().build_rng();
 
             // Commit the blinding factors for the input wires
             for v_b in &self.secrets.v_blinding {
@@ -590,7 +590,7 @@ impl<'g, T: BorrowMut<Transcript>, C: Curve> Prover<'g, T, C> {
         let A_O1 = commit(&self.secrets.a_O, None, G1, H1, &o_blinding1, self.pc_gens);
         let S1 = commit(&s_L1, Some(&s_R1), G1, H1, &s_blinding1, self.pc_gens);
 
-        let transcript = self.transcript.borrow_mut();
+        let transcript = self.transcript.backend();
         transcript.append_point(b"A_I1", &A_I1);
         transcript.append_point(b"A_O1", &A_O1);
         transcript.append_point(b"S1", &S1);
@@ -648,7 +648,7 @@ impl<'g, T: BorrowMut<Transcript>, C: Curve> Prover<'g, T, C> {
             )
         };
 
-        let transcript = self.transcript.borrow_mut();
+        let transcript = self.transcript.backend();
         transcript.append_point(b"A_I2", &A_I2);
         transcript.append_point(b"A_O2", &A_O2);
         transcript.append_point(b"S2", &S2);
@@ -724,7 +724,7 @@ impl<'g, T: BorrowMut<Transcript>, C: Curve> Prover<'g, T, C> {
         let T_5 = C::compress(&self.pc_gens.commit(t_poly.t5, t_5_blinding));
         let T_6 = C::compress(&self.pc_gens.commit(t_poly.t6, t_6_blinding));
 
-        let transcript = self.transcript.borrow_mut();
+        let transcript = self.transcript.backend();
         transcript.append_point(b"T_1", &T_1);
         transcript.append_point(b"T_3", &T_3);
         transcript.append_point(b"T_4", &T_4);
@@ -912,13 +912,13 @@ impl<'g, T: BorrowMut<Transcript>, C: Curve> Prover<'g, T, C> {
             a.v.iter().zip(&a.v_blinding).map(|(v, s)| C::compress(&self.pc_gens.commit(*v, *s))).collect();
         // The prover's randomness is bound to the witness as well as to `external_rng`.
         let mut rng = {
-            let mut builder = self.transcript.borrow().build_rng();
+            let mut builder = self.transcript.backend_ref().build_rng();
             for s in &a.v_blinding {
                 builder = builder.rekey_with_witness_bytes(b"v_blinding", &s.to_bytes32());
             }
             builder.finalize(external_rng)
         };
-        let transcript = self.transcript.borrow_mut();
+        let transcript = self.transcript.backend();
         BpppTranscript::domain_sep(transcript, super::backend::BPPP_DOMAIN);
         // the testing feature `cheats` proves unsatisfied circuits (the proof must not verify)
         let require_satisfied = !super::cheats::unchecked();

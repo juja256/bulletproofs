@@ -373,7 +373,7 @@ impl ReciprocalCircuit {
         let pows: Vec<Scalar> = core::iter::successors(Some(Scalar::ONE), |e| Some(e * eta)).take(m_max).collect();
         const CHUNK: usize = 4096;
         let n_t = self.tuples.len();
-        let chunks = crate::util::map_index((n_t + CHUNK - 1) / CHUNK, |k| {
+        let build = |k: usize| {
             let mut m = SparseMatrix::new(n_w);
             let mut a: Vec<Scalar> = Vec::with_capacity(CHUNK);
             for tp in &self.tuples[k * CHUNK..((k + 1) * CHUNK).min(n_t)] {
@@ -382,11 +382,11 @@ impl ReciprocalCircuit {
                 a.push(components().map(|(x, e)| -(e * x.constant)).sum());
             }
             (m, a)
-        });
-        for (m, a) in chunks {
+        };
+        crate::util::map_in_order((n_t + CHUNK - 1) / CHUNK, build, |(m, a)| {
             w_l.extend_rows(&m);
             a_l.extend(a);
-        }
+        });
         // the factors of all terms with a pole, in row order (terms, then constants), at once
         let poles = || self.recip.iter().flat_map(|row| row.terms.iter().map(|(_, _, p)| p).chain(row.consts.iter().map(|(_, p)| p)));
         let values: Vec<Scalar> = poles().flatten().map(|t| t.eval(eta)).collect();

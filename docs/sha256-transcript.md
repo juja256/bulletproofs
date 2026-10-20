@@ -46,7 +46,7 @@ A scalar challenge is `from_wide` of 64 challenge bytes `o_0 ‖ o_1` (two final
 - **secp256k1:** `c = (o_0 ‖ o_1 read as a big-endian 512-bit integer) mod n`. Without a wide
   reduction: `c = normalize(o_0) · R + normalize(o_1) mod n`, with `R = 2^256 mod n`
   (`0x14551231950b75fc4402da1732fc9bebf`) and `normalize` the reduction of a 256-bit integer
-  modulo `n` (Simplicity's `scalar_normalize`). Three scalar jets per challenge.
+  modulo `n` (Simplicity's `scalar_normalize`). Four scalar jets per challenge (two normalizations, a multiplication, an addition).
 - **ristretto255:** `c = (o_0 ‖ o_1 read as a little-endian 512-bit integer) mod ℓ`
   (`Scalar::from_bytes_mod_order_wide`).
 
@@ -69,7 +69,7 @@ extended, since each one finalizes a copy, so length extension does not apply.
 
 Each protocol absorbs records of fixed sizes: constant labels, 33-byte secp256k1 points, 32-byte
 scalars, 8-byte integers. A verifier therefore writes them with `sha_256_ctx_8_add_N` for known
-`N`. Per scalar challenge it pays two finalizations and three scalar jets. Per proof this is a
+`N`. Per scalar challenge it pays two finalizations and four scalar jets. Per proof this is a
 few compressions per round, negligible next to the multi-scalar multiplication (see the
 verifier-cost notes of the owner's research).
 

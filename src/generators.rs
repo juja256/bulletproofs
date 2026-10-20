@@ -59,8 +59,9 @@ impl Default for PedersenGens<Ristretto> {
 #[cfg(feature = "secp256k1")]
 impl PedersenGens<crate::curve::Secp256k1> {
     /// Generators for commitments to a value of the asset with generator `gen` (an
-    /// `elements::generator_generate(_blinded)` output, or `elements::h()` for explicit values,
-    /// which is `for_curve()`): `B = gen`, `B_blinding = G`.
+    /// `elements::generator_generate(_blinded)` output, the asset tag of a Liquid output; or
+    /// `elements::h()`, secp256k1-zkp's default H, which is `for_curve()`): `B = gen`,
+    /// `B_blinding = G`.
     pub fn with_value_generator(gen: k256::ProjectivePoint) -> Self {
         PedersenGens { B: gen, B_blinding: k256::ProjectivePoint::GENERATOR }
     }

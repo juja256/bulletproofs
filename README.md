@@ -242,7 +242,8 @@ for circuits): k256's constant-time multiscalar multiplication costs 12.7 µs pe
 `bulletproofs::elements` (feature `secp256k1`) follows Elements / secp256k1-zkp, so the
 proofs can be about values committed in Liquid confidential transactions:
 `generator_generate(_blinded)` (asset generators, the Shallue–van de Woestijne map),
-`h()` (the value generator H), `commit(value, blinding, gen)` = `value * gen + blinding * G`,
+`h()` (secp256k1-zkp's default value generator H; Liquid commits values with the asset's
+generator instead), `commit(value, blinding, gen)` = `value * gen + blinding * G`,
 and the 33-byte encodings of generators (0x0a/0x0b) and commitments (0x08/0x09, the prefix
 carrying the quadratic residuosity of y). `PedersenGens::with_value_generator(gen)` makes
 the range proofs (BP and BP++) prove the value of such a commitment:
@@ -257,6 +258,10 @@ let committed = elements::commitment_parse(&commitment_33_bytes).unwrap();
 let (proof, v) = RangeProof::prove_single(&bp_gens, &pc_gens, &mut transcript, value, &blinding, 64)?;
 assert_eq!(v, bulletproofs::curve::Secp256k1::compress(&committed));
 ```
+
+The key of `generator_generate` is the asset ID in internal byte order, the reverse of the hex
+Elements displays. The BP range proof does not absorb the value generator into its transcript
+(BP++ does): append the asset generator to the transcript before proving and verifying.
 
 These are compatible commitments, not compatible proofs: the proofs are this crate's (BP or
 BP++ with Merlin transcripts), not Elements' own range proof format.

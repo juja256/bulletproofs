@@ -42,7 +42,7 @@ fn range_proofs_over_elements_commitments() {
     // another asset's generator does not verify the commitment
     let other = PedersenGens::<Secp256k1>::with_value_generator(elements::generator_generate(&[0x43; 32]));
     assert!(parsed.verify(&st, &other, &bp2, &[commitment], &mut Transcript::new(b"e")).is_err());
-    // the default generators are H (the explicit value generator of secp256k1-zkp)
+    // the default generators use H (secp256k1-zkp's default value generator, not Liquid's)
     let h = PedersenGens::<Secp256k1>::with_value_generator(elements::h());
     let d = PedersenGens::<Secp256k1>::for_curve();
     assert_eq!((h.B, h.B_blinding), (d.B, d.B_blinding));

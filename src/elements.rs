@@ -23,9 +23,10 @@ fn fe(bytes: &[u8; 32]) -> FieldElement {
     FieldElement::from_bytes(&FieldBytes::from(*bytes)).unwrap()
 }
 
-/// 32 big-endian bytes modulo p, as `secp256k1_fe_set_b32_limit` leaves them (a value at least
-/// p, probability 2^-128 for a hash, is reduced; secp256k1-zkp then reports failure but still
-/// returns the point).
+/// 32 big-endian bytes modulo p. A hash at least p (probability 2^-128) makes secp256k1-zkp
+/// report failure; the point it still returns then differs from ours (its unreduced field
+/// element has the opposite parity, which flips y in the map), so the generator of such a key
+/// is unspecified.
 fn fe_mod_p(bytes: &[u8; 32]) -> FieldElement {
     // v - p = v + (2^32 + 977) - 2^256 for p <= v < 2^256
     let mut reduced = *bytes;
@@ -83,6 +84,9 @@ fn hash_to_field(prefix: &[u8; 16], key: &[u8; 32]) -> FieldElement {
 
 /// The asset generator of `key` (`secp256k1_generator_generate`): the sum of the map at the
 /// field elements SHA256("1st generation: " || key) and SHA256("2nd generation: " || key).
+///
+/// In Elements the key of an asset is its 32-byte asset ID in internal byte order, the reverse
+/// of the hex Elements displays (as for transaction IDs): reverse the decoded hex first.
 pub fn generator_generate(key: &[u8; 32]) -> ProjectivePoint {
     ProjectivePoint::from(svdw(&hash_to_field(b"1st generation: ", key))) + svdw(&hash_to_field(b"2nd generation: ", key))
 }
@@ -93,8 +97,10 @@ pub fn generator_generate_blinded(key: &[u8; 32], blind: &Scalar) -> ProjectiveP
     ProjectivePoint::GENERATOR * blind + generator_generate(key)
 }
 
-/// The value generator H of secp256k1-zkp (`secp256k1_generator_h`), the `B` of
-/// `PedersenGens::<Secp256k1>::for_curve()`.
+/// secp256k1-zkp's default value generator H (`secp256k1_generator_h`, as in Mimblewimble), the
+/// `B` of `PedersenGens::<Secp256k1>::for_curve()`. Liquid commits a value with its asset's
+/// generator instead (blinded, or `generator_generate(asset_id)` for an explicit asset), never
+/// with H.
 pub fn h() -> ProjectivePoint {
     Secp256k1::default_pedersen().0
 }
@@ -210,8 +216,7 @@ mod tests {
         let key = [7u8; 32];
         let blind = Scalar::from(5u64);
         assert_eq!(generator_generate_blinded(&key, &blind), generator_generate(&key) + ProjectivePoint::GENERATOR * blind);
-        // keys hashing to a field element >= p are not special (secp256k1-zkp also accepts them)
-        let _ = generator_generate(&[0xff; 32]);
+
     }
 
     /// x(2G), the fixed vectors of test_generator_fixed_vector and
@@ -297,6 +302,18 @@ mod tests {
         let r = Scalar::from(11u64);
         assert_eq!(commit(5, &r, &gen), gen * Scalar::from(5u64) + ProjectivePoint::GENERATOR * r);
         assert_eq!(commit(0, &Scalar::ZERO, &gen), ProjectivePoint::IDENTITY);
+    }
+
+    /// Hashes at least p are reduced: p, p + 1 and 2^256 - 1.
+    #[test]
+    fn hashes_reduce_modulo_p() {
+        let p = hex32(&Value::from("fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f"));
+        let mut p1 = p;
+        p1[31] += 1;
+        assert_eq!(fe_mod_p(&p), FieldElement::ZERO);
+        assert_eq!(fe_mod_p(&p1), FieldElement::ONE);
+        assert_eq!(fe_mod_p(&[0xff; 32]), FieldElement::from(0x1000003d0u64));
+        assert_eq!(fe_mod_p(&hex32(&Value::from(format!("{:064x}", 5)))), FieldElement::from(5u64));
     }
 
     /// H is secp256k1-zkp's value generator and the default Pedersen B.

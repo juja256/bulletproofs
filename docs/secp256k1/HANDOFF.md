@@ -19,7 +19,7 @@ encodings, range proofs over Elements commitments. Not in scope: MACT for Elemen
 |---|---|---|---|
 | 1 | generic refactoring: `Curve`, `Field`, `PointEncoding`; every protocol generic, ristretto byte-identical | `src/curve/`, `transcript.rs`, `generators.rs`, `util.rs`, `inner_product_proof.rs`, `linear_proof.rs`, `range_proof/`, `bppp/`, `r1cs/` | branch `secp256k1`, commits `706b84a..` + review fixes; reviewed (fable), done |
 | 2 | `Secp256k1` on k256: encodings, CT MSM (k256 `lincomb_ext`), VT Pippenger, all protocols, vectors, facade, README, benches | `src/curve/secp256k1.rs`, `src/curve/pippenger.rs`, `tests/curves.rs`, `ref/gen_vectors.py --curve secp256k1`, `src/lib.rs` (`secp256k1`), `examples/curves_table.rs` | commits `91887ce..` + review fixes; reviewed (fable), done |
-| 3 | Elements: `generator_generate` (SvdW), encodings 0x08/0x09 and 0x0a/0x0b, BP/BP++ range proofs over Elements commitments | `src/curve/elements.rs` *(planned)* | next |
+| 3 | Elements: `generator_generate` (SvdW), encodings 0x08/0x09 and 0x0a/0x0b, BP/BP++ range proofs over Elements commitments (task 13, BP++ generators à la secp256k1-zkp, skipped by the owner) | `src/elements.rs`, `PedersenGens::with_value_generator`, `tests/elements.rs`, `ref/extract_elements_vectors.py` | commits `e01bff4..` + review fixes; reviewed (fable), done |
 
 The plan (Ukrainian) and the research report live in the owner's knowledge base; the plan's
 tasks are numbered 1.1–3.4 there, Task 1–14 in the ledger.
@@ -89,3 +89,15 @@ tasks are numbered 1.1–3.4 there, Task 1–14 in the ledger.
   runs the curve tests in debug (k256's magnitude assertions). Deferred: per-protocol tests of
   the curve label (lengths already separate the curves), one window too many, the VT chunk
   size of `msm_index`.
+- 2026-10-20 — the owner's goal: a Bulletproofs verifier in Simplicity on Liquid for bpvm proofs
+  and arbitrary statements (phase 3 serves it at the commitment level).
+- 2026-10-20 — phase 3 done (tasks 11, 12, 14): `elements::generator_generate(_blinded)` (SvdW,
+  34 + 32 secp256k1-zkp vectors), generator/commitment encodings (prefix = residuosity of y;
+  0x0b || x(2G) is -2G, the plan was wrong; a k G test kills the parity mutant),
+  `PedersenGens::<Secp256k1>::with_value_generator`, BP and BP++ range proofs over an Elements
+  commitment. Review (fable): 0 Critical, 0 Important; fixed: the docs of `h()` (Liquid commits
+  with the asset's generator, never H), the asset ID byte order (internal = reversed display
+  hex), the BP range proof does not bind the value generator (README tells to append it), the
+  hash >= p edge case is documented as unspecified and `fe_mod_p` tested. Open for the Simplicity
+  design: transcript (SHA-256) and the point encoding it absorbs, binding the value generator in
+  BP, generators the Simplicity jets can derive (SvdW / generator_generate) or constants.

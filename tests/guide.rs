@@ -153,3 +153,10 @@ fn the_guide_example_rejects_false_statements() {
     rejects_false_statements::<Ristretto>();
 }
 
+
+#[cfg(feature = "secp256k1")]
+#[test]
+fn the_guide_example_on_secp256k1() {
+    proves_on_both_backends::<bulletproofs::curve::Secp256k1>();
+    rejects_false_statements::<bulletproofs::curve::Secp256k1>();
+}

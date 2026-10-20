@@ -80,6 +80,18 @@ mod bp {
     fn linear_proofs_ristretto() {
         linear_roundtrip::<Ristretto>();
     }
+
+    #[cfg(feature = "secp256k1")]
+    #[test]
+    fn range_proofs_secp256k1() {
+        range_roundtrip::<bulletproofs::curve::Secp256k1>();
+    }
+
+    #[cfg(feature = "secp256k1")]
+    #[test]
+    fn linear_proofs_secp256k1() {
+        linear_roundtrip::<bulletproofs::curve::Secp256k1>();
+    }
 }
 
 #[cfg(feature = "bppp")]
@@ -111,9 +123,38 @@ mod bppp {
         assert!(RangeProof::<C>::prove(&st, &pc, &bp, &[123_456, 1000], &blinds, &mut Transcript::new(b"r"), &mut rng).is_err());
     }
 
+    /// A multi-asset transaction: two inputs, two outputs of two assets.
+    pub fn mact_roundtrip<C: Curve>() {
+        use bulletproofs::bppp::{MactEntry, MactProof, MactStatement};
+        let mut rng = ChaCha20Rng::seed_from_u64(9);
+        let st = MactStatement::new(16, 2, 2).unwrap();
+        let pc = PedersenGens::<C>::for_curve();
+        let bp = BulletproofGens::<C>::for_curve(st.generators_capacity(), 1);
+        let (a, b) = (C::Scalar::random(&mut rng), C::Scalar::random(&mut rng));
+        let e = |amount: u64, asset: C::Scalar, rng: &mut ChaCha20Rng| MactEntry { amount, asset, blinding: C::Scalar::random(rng) };
+        let inputs = [e(100, a, &mut rng), e(7, b, &mut rng)];
+        let outputs = [e(60, a, &mut rng), e(47, a, &mut rng)];
+        // 100 a + 7 b in, 107 a out: unbalanced, the prover refuses
+        assert!(MactProof::<C>::prove(&st, &pc, &bp, &inputs, &outputs, &mut Transcript::new(b"m"), &mut rng).is_err());
+        let outputs = [e(40, a, &mut rng), e(7, b, &mut rng)];
+        let inputs = [e(40, a, &mut rng), inputs[1]];
+        let (proof, V) = MactProof::<C>::prove(&st, &pc, &bp, &inputs, &outputs, &mut Transcript::new(b"m"), &mut rng).unwrap();
+        let parsed = MactProof::<C>::from_bytes(&proof.to_bytes(), &st).unwrap();
+        parsed.verify(&st, &pc, &bp, &V, &mut Transcript::new(b"m")).unwrap();
+        assert!(parsed.verify(&st, &pc, &bp, &V, &mut Transcript::new(b"x")).is_err());
+    }
+
     #[test]
     fn bppp_range_proofs_ristretto() {
         bppp_range_roundtrip::<Ristretto>();
+        mact_roundtrip::<Ristretto>();
+    }
+
+    #[cfg(feature = "secp256k1")]
+    #[test]
+    fn bppp_range_proofs_secp256k1() {
+        bppp_range_roundtrip::<bulletproofs::curve::Secp256k1>();
+        mact_roundtrip::<bulletproofs::curve::Secp256k1>();
     }
 }
 
@@ -161,6 +202,13 @@ mod identity {
         identity_contract::<Ristretto>();
         one_phase_r1cs::<Ristretto>();
     }
+
+    #[cfg(feature = "secp256k1")]
+    #[test]
+    fn secp256k1_identity_contract() {
+        identity_contract::<bulletproofs::curve::Secp256k1>();
+        one_phase_r1cs::<bulletproofs::curve::Secp256k1>();
+    }
 }
 
 /// Upstream ristretto255 gadgets with integer constants of every width still compile.
@@ -178,4 +226,138 @@ mod upstream_integers {
 
     #[test]
     fn upstream_integer_constants_compile() {}
+}
+
+/// Malformed points and scalars in every kind of proof on secp256k1 are errors (when parsing
+/// or verifying), never panics (Review Focus 1, 3).
+#[cfg(all(feature = "secp256k1", feature = "yoloproofs", feature = "bppp"))]
+mod malformed {
+    use bulletproofs::bppp::{MactEntry, MactProof, MactStatement, RangeProof as BpppRangeProof, RangeStatement};
+    use bulletproofs::curve::ff::Field as _;
+    use bulletproofs::curve::{Curve, Secp256k1};
+    use bulletproofs::r1cs::{Backend, ConstraintSystem, Prover, R1CSProof, Verifier};
+    use bulletproofs::{BulletproofGens, LinearProof, PedersenGens, RangeProof};
+    use k256::Scalar;
+    use merlin::Transcript;
+    use rand_chacha::rand_core::SeedableRng;
+    use rand_chacha::ChaCha20Rng;
+
+    type C = Secp256k1;
+    const GX: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+    const P: &str = "fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f";
+    const N: &str = "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141";
+
+    fn bad_points() -> Vec<Vec<u8>> {
+        let with = |prefix: u8, x: &str| [vec![prefix], hex::decode(x).unwrap()].concat();
+        vec![
+            with(0x04, GX),
+            with(0x05, GX),
+            with(0x00, GX),
+            with(0x02, P),
+            with(0x02, &format!("{:064x}", 5)), // x^3 + 7 is no square
+            vec![0u8; 33],
+        ]
+    }
+
+    /// `accepts(bytes)`: the bytes parse and verify. The original is accepted; every bad point
+    /// at an offset of `points` and the group order at an offset of `scalars` is not.
+    fn check(name: &str, bytes: &[u8], points: &[usize], scalars: &[usize], accepts: impl Fn(&[u8]) -> bool) {
+        assert!(accepts(bytes), "{}: the original", name);
+        for &at in points {
+            for bad in bad_points() {
+                let mut b = bytes.to_vec();
+                b[at..at + 33].copy_from_slice(&bad);
+                assert!(!accepts(&b), "{}: point {:02x?} at {}", name, &bad[..2], at);
+            }
+        }
+        for &at in scalars {
+            let mut b = bytes.to_vec();
+            b[at..at + 32].copy_from_slice(&hex::decode(N).unwrap());
+            assert!(!accepts(&b), "{}: scalar n at {}", name, at);
+        }
+        for cut in [1, 32, 33] {
+            assert!(!accepts(&bytes[..bytes.len() - cut]), "{}: {} bytes short", name, cut);
+        }
+    }
+
+    #[test]
+    fn malformed_secp256k1_proofs_are_errors() {
+        let mut rng = ChaCha20Rng::seed_from_u64(11);
+        let pc = PedersenGens::<C>::for_curve();
+        let bp = BulletproofGens::<C>::for_curve(64, 1);
+
+        // BP range proof: A S T_1 T_2 | t_x t_x_blinding e_blinding | L R ... | a b
+        let blind = Scalar::random(&mut rng);
+        let (proof, v) = RangeProof::<C>::prove_single_with_rng(&bp, &pc, &mut Transcript::new(b"r"), 9, &blind, 32, &mut rng).unwrap();
+        let bytes = proof.to_bytes();
+        check("range", &bytes, &[0, 99, 132 + 96], &[132, bytes.len() - 32], |b| {
+            RangeProof::<C>::from_bytes(b).map_or(false, |p| p.verify_single(&bp, &pc, &mut Transcript::new(b"r"), &v, 32).is_ok())
+        });
+
+        // linear proof: L R ... | S | a r
+        let n = 8;
+        let g: Vec<k256::ProjectivePoint> = bp.share(0).G(n).cloned().collect();
+        let a: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
+        let bv: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
+        let r = Scalar::random(&mut rng);
+        let c: Scalar = a.iter().zip(&bv).map(|(x, y)| *x * y).sum();
+        let mut s = a.clone();
+        s.extend([r, c]);
+        let mut pts = g.clone();
+        pts.extend([pc.B_blinding, pc.B]);
+        let com = C::compress(&C::msm_vt(&s, &pts));
+        let proof = LinearProof::<C>::create(&mut Transcript::new(b"l"), &mut rng, &com, r, a, bv.clone(), g.clone(), &pc.B, &pc.B_blinding).unwrap();
+        let bytes = proof.to_bytes();
+        let s_at = bytes.len() - 64 - 33;
+        check("linear", &bytes, &[0, 33, s_at], &[bytes.len() - 32], |b| {
+            LinearProof::<C>::from_bytes(b)
+                .map_or(false, |p| p.verify(&mut Transcript::new(b"l"), &com, &g, &pc.B, &pc.B_blinding, bv.clone()).is_ok())
+        });
+
+        // R1CS (x * y = 12) on both backends: BP tag | points | scalars | IPP; BP++ tag and
+        // dimensions (17 bytes) | C_L C_R C_O C_S | WNLA
+        for backend in [Backend::Bp, Backend::Bppp] {
+            let mut t = Transcript::new(b"c");
+            let mut prover = Prover::new(&pc, &mut t);
+            prover.set_backend(backend);
+            let (cx, x) = prover.commit(Scalar::from(3u64), Scalar::random(&mut rng));
+            let (cy, y) = prover.commit(Scalar::from(4u64), Scalar::random(&mut rng));
+            let (_, _, o) = prover.multiply(x.into(), y.into());
+            prover.constrain(o - Scalar::from(12u64));
+            let bytes = prover.prove(&bp).unwrap().to_bytes();
+            let first = if backend == Backend::Bp { 1 } else { 17 };
+            check(backend.name(), &bytes, &[first, first + 99], &[bytes.len() - 32], |b| {
+                let proof = match R1CSProof::<C>::from_bytes(b) {
+                    Ok(p) => p,
+                    Err(_) => return false,
+                };
+                let mut t = Transcript::new(b"c");
+                let mut verifier = Verifier::<_, C>::for_curve(&mut t);
+                verifier.set_backend(backend);
+                let (x, y) = (verifier.commit(cx), verifier.commit(cy));
+                let (_, _, o) = verifier.multiply(x.into(), y.into());
+                verifier.constrain(o - Scalar::from(12u64));
+                verifier.verify(&proof, &pc, &bp).is_ok()
+            });
+        }
+
+        // BP++ range proof and MACT: C_L C_R C_O C_S | WNLA (X R ... | scalars)
+        let st = RangeStatement::new(16, vec![(0, 1 << 16)]).unwrap();
+        let bp2 = BulletproofGens::<C>::for_curve(st.generators_capacity().max(64), 1);
+        let (proof, v) = BpppRangeProof::<C>::prove(&st, &pc, &bp2, &[1234], &[Scalar::random(&mut rng)], &mut Transcript::new(b"b"), &mut rng).unwrap();
+        let bytes = proof.to_bytes();
+        check("bppp range", &bytes, &[0, 99, 132], &[bytes.len() - 32], |b| {
+            BpppRangeProof::<C>::from_bytes(b, &st).map_or(false, |p| p.verify(&st, &pc, &bp2, &v, &mut Transcript::new(b"b")).is_ok())
+        });
+        let st = MactStatement::new(16, 1, 1).unwrap();
+        let bp3 = BulletproofGens::<C>::for_curve(st.generators_capacity(), 1);
+        let asset = Scalar::random(&mut rng);
+        let e = |rng: &mut ChaCha20Rng| MactEntry { amount: 5, asset, blinding: Scalar::random(rng) };
+        let (ins, outs) = ([e(&mut rng)], [e(&mut rng)]);
+        let (proof, v) = MactProof::<C>::prove(&st, &pc, &bp3, &ins, &outs, &mut Transcript::new(b"m"), &mut rng).unwrap();
+        let bytes = proof.to_bytes();
+        check("mact", &bytes, &[0, 99, 132], &[bytes.len() - 32], |b| {
+            MactProof::<C>::from_bytes(b, &st).map_or(false, |p| p.verify(&st, &pc, &bp3, &v, &mut Transcript::new(b"m")).is_ok())
+        });
+    }
 }

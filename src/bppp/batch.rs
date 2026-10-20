@@ -11,7 +11,7 @@ use super::circuit::{ArithmeticCircuit, CircuitProof, Terms};
 use super::gens::BpppGens;
 use super::mact::{MactProof, MactStatement};
 use super::range::{RangeProof, RangeStatement};
-use super::reciprocal::{self, ReciprocalCircuit};
+use super::reciprocal::{self, ReciprocalCircuit, ReciprocalProof};
 use super::transcript::BpppTranscript;
 use crate::errors::ProofError;
 use crate::{BulletproofGens, PedersenGens};
@@ -53,16 +53,16 @@ impl<'a, R: RngCore + CryptoRng> BatchVerifier<'a, R> {
         Ok(())
     }
 
-    /// Add a reciprocal form proof ([`reciprocal::verify`]).
+    /// Add a reciprocal form proof ([`ReciprocalProof::verify`]).
     pub fn add_reciprocal<T: BpppTranscript>(
         &mut self,
-        proof: &CircuitProof,
+        proof: &ReciprocalProof,
         c: &ReciprocalCircuit,
         V: &[CompressedRistretto],
         transcript: &mut T,
     ) -> Result<(), ProofError> {
         let gens = c.gens(self.pc, self.bp)?;
-        let t = reciprocal::terms(proof, c, &gens, V, transcript)?;
+        let t = reciprocal::terms(&proof.0, c, &gens, V, transcript)?;
         self.add(t);
         Ok(())
     }
@@ -131,7 +131,7 @@ mod tests {
         let cp = super::super::circuit::prove(&ac, &ag, &V, &aw, &mut Transcript::new(b"c"), &mut rng).unwrap();
         let run = |rp: &CircuitProof, cp: &CircuitProof| {
             let mut b = BatchVerifier::new(&pc, &bp, ChaCha20Rng::seed_from_u64(2));
-            b.add_reciprocal(rp, &rc, &V, &mut Transcript::new(b"r"))?;
+            b.add_reciprocal(&ReciprocalProof(rp.clone()), &rc, &V, &mut Transcript::new(b"r"))?;
             b.add_circuit(cp, &ac, &V, &mut Transcript::new(b"c"))?;
             b.verify()
         };

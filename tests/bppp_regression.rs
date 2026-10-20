@@ -63,7 +63,7 @@ fn circuit_proof(n: usize) -> Vec<u8> {
     let pc = PedersenGens::default();
     let bp = BulletproofGens::new(n.max(6), 1);
     let gens = BpppGens::new(&pc, &bp, 0, n).unwrap();
-    let p = bppp::circuit::prove(&c, &gens, &[], &w, &mut Transcript::new(b"reg"), &mut rng(1)).unwrap();
+    let p = bppp::CircuitProof::prove(&c, &gens, &[], &w, &mut Transcript::new(b"reg"), &mut rng(1)).unwrap();
     p.verify(&c, &gens, &[], &mut Transcript::new(b"reg")).unwrap();
     p.to_bytes()
 }
@@ -177,7 +177,7 @@ fn prover_randomness_depends_on_the_witness() {
     c.w_l = SparseMatrix::new(3 * n);
     c.a_l = vec![];
     let w2 = CircuitWitness { w_l: w1.w_r.clone(), w_r: w1.w_l.clone(), ..w1.clone() };
-    let prove = |w: &CircuitWitness| bppp::circuit::prove(&c, &gens, &[], w, &mut Transcript::new(b"z"), &mut ZeroRng).unwrap();
+    let prove = |w: &CircuitWitness| bppp::CircuitProof::prove(&c, &gens, &[], w, &mut Transcript::new(b"z"), &mut ZeroRng).unwrap();
     let (p1, p2) = (prove(&w1), prove(&w2));
     assert_ne!(p1.C_O, p2.C_O);
     assert_eq!(prove(&w1), p1);
@@ -193,8 +193,8 @@ fn prover_randomness_binds_the_transcript_context() {
     let bp = BulletproofGens::new(16, 1);
     let gens = BpppGens::new(&pc, &bp, 0, 8).unwrap();
     let (c, w) = circuit(8, 4);
-    let p1 = bppp::circuit::prove(&c, &gens, &[], &w, &mut Transcript::new(b"A"), &mut ZeroRng).unwrap();
-    let p2 = bppp::circuit::prove(&c, &gens, &[], &w, &mut Transcript::new(b"B"), &mut ZeroRng).unwrap();
+    let p1 = bppp::CircuitProof::prove(&c, &gens, &[], &w, &mut Transcript::new(b"A"), &mut ZeroRng).unwrap();
+    let p2 = bppp::CircuitProof::prove(&c, &gens, &[], &w, &mut Transcript::new(b"B"), &mut ZeroRng).unwrap();
     assert_ne!(p1.C_L, p2.C_L);
     assert_ne!(p1.C_O, p2.C_O);
     let st = RangeStatement::new(16, vec![(0, 1 << 64)]).unwrap();

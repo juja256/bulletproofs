@@ -4,7 +4,7 @@
 extern crate criterion;
 use criterion::Criterion;
 
-use bulletproofs::bppp::{self, wnla, WnlaStatement};
+use bulletproofs::bppp::{self, WnlaProof, WnlaStatement};
 use curve25519_dalek::ristretto::RistrettoPoint;
 use curve25519_dalek::scalar::Scalar;
 use merlin::Transcript;
@@ -23,14 +23,14 @@ fn wnla_bench(c: &mut Criterion) {
         let (a, b) = (16, 1usize << k);
         let (G, H, N) = (points("G", 1)[0], points("H", a), points("N", b));
         let cvec: Vec<Scalar> = (0..a).map(|_| Scalar::random(&mut rng)).collect();
-        let st = WnlaStatement { g: &G, h_vec: &H, n_vec: &N, c: &cvec, rho: Scalar::random(&mut rng) };
+        let st = WnlaStatement { g: &G, h: &H, n: &N, c: &cvec, rho: Scalar::random(&mut rng) };
         let l: Vec<Scalar> = (0..a).map(|_| Scalar::random(&mut rng)).collect();
         let n: Vec<Scalar> = (0..b).map(|_| Scalar::random(&mut rng)).collect();
         let C = st.commit(&l, &n);
         c.bench_function(&format!("wnla prove n=2^{}", k), |bench| {
-            bench.iter(|| wnla::prove(&st, &C, &mut Transcript::new(b"bench"), l.clone(), n.clone()).unwrap())
+            bench.iter(|| WnlaProof::prove(&st, &C, &mut Transcript::new(b"bench"), l.clone(), n.clone()).unwrap())
         });
-        let proof = wnla::prove(&st, &C, &mut Transcript::new(b"bench"), l.clone(), n.clone()).unwrap();
+        let proof = WnlaProof::prove(&st, &C, &mut Transcript::new(b"bench"), l.clone(), n.clone()).unwrap();
         c.bench_function(&format!("wnla verify n=2^{}", k), |bench| {
             bench.iter(|| proof.verify(&st, &C, &mut Transcript::new(b"bench")).unwrap())
         });
@@ -102,10 +102,10 @@ fn circuit_bench(c: &mut Criterion) {
         let (circ, w) = bppp_circuit(&g);
         let gens = bppp::BpppGens::new(&pc, &bp, 0, g.n).unwrap();
         let mut rng = rand::thread_rng();
-        let proof = bppp::circuit::prove(&circ, &gens, &[], &w, &mut Transcript::new(b"bench"), &mut rng).unwrap();
+        let proof = bppp::CircuitProof::prove(&circ, &gens, &[], &w, &mut Transcript::new(b"bench"), &mut rng).unwrap();
         println!("BP++ circuit, {} multiplications: proof {} bytes", g.n, proof.to_bytes().len());
         c.bench_function(&format!("circuit n=2^{} BP++ prove", k), |b| {
-            b.iter(|| bppp::circuit::prove(&circ, &gens, &[], &w, &mut Transcript::new(b"bench"), &mut rng).unwrap())
+            b.iter(|| bppp::CircuitProof::prove(&circ, &gens, &[], &w, &mut Transcript::new(b"bench"), &mut rng).unwrap())
         });
         c.bench_function(&format!("circuit n=2^{} BP++ verify", k), |b| {
             b.iter(|| proof.verify(&circ, &gens, &[], &mut Transcript::new(b"bench")).unwrap())

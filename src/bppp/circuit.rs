@@ -378,11 +378,8 @@ fn nonzero<T: BpppTranscript>(t: &mut T, label: &'static [u8]) -> Result<Scalar,
     }
 }
 
-/// Prove that `w` satisfies `c` for the input commitments `V` (`V_i` =
-/// [`BpppGens::commit_input`]`(v_i, s_i)`). Absorbs the dimensions, the generators `G` and
-/// `H_0`, the circuit digest and `V` (spec §3.8). Returns `Err(VerificationError)` if the
-/// witness does not satisfy the circuit (the value term of spec §3.5 is non-zero).
-pub fn prove<T: BpppTranscript, R: RngCore + CryptoRng>(
+/// [`CircuitProof::prove`].
+pub(crate) fn prove<T: BpppTranscript, R: RngCore + CryptoRng>(
     c: &ArithmeticCircuit,
     gens: &BpppGens,
     V: &[CompressedRistretto],
@@ -606,14 +603,29 @@ pub(crate) fn prove_inner<T: BpppTranscript, R: RngCore + CryptoRng>(
     let l: Vec<Scalar> = r_tau.skip(1).chain(l_hat.eval(tau, tau_inv, n_lin)).collect();
     let n = n_t.eval(tau, tau_inv, n_m);
     let cvec: Vec<Scalar> = c_r(beta, tau, tau_inv).chain(c_l.eval(tau, tau_inv, n_lin)).collect();
-    let st = WnlaStatement { g: &gens.g, h_vec: &gens.h, n_vec: gens.n, c: &cvec, rho };
+    let st = WnlaStatement { g: &gens.g, h: &gens.h, n: gens.n, c: &cvec, rho };
     let wnla = wnla::prove_unbound(&st, transcript, l, n, cfg!(feature = "bppp-vartime"))?;
     Ok(CircuitProof { C_L: ol.C_L, C_R: cr.C_R, C_O: ol.o.C_O, C_S, wnla })
 }
 
 impl CircuitProof {
+    /// Prove that `w` satisfies `c` for the input commitments `V` (`V_i` =
+    /// [`BpppGens::commit_input`]`(v_i, s_i)`). Absorbs the dimensions, the generators `G` and
+    /// `H_0`, the circuit digest and `V` (spec §3.8). Returns `Err(VerificationError)` if the
+    /// witness does not satisfy the circuit (the value term of spec §3.5 is non-zero).
+    pub fn prove<T: BpppTranscript, R: RngCore + CryptoRng>(
+        c: &ArithmeticCircuit,
+        gens: &BpppGens,
+        V: &[CompressedRistretto],
+        w: &CircuitWitness,
+        transcript: &mut T,
+        rng: &mut R,
+    ) -> Result<CircuitProof, ProofError> {
+        prove(c, gens, V, w, transcript, rng)
+    }
+
     /// Verify the proof for circuit `c` and input commitments `V`; absorbs the same statement
-    /// as [`prove`].
+    /// as [`CircuitProof::prove`].
     pub fn verify<T: BpppTranscript>(
         &self,
         c: &ArithmeticCircuit,

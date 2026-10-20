@@ -623,7 +623,7 @@ fn check_gens(c: &ReciprocalCircuit, gens: &BpppGens) -> Result<(), ProofError> 
 /// Prove that `w` satisfies the reciprocal form circuit `c` for the input commitments `V`
 /// (spec §4.3). Generators: [`BpppGens::new`] with `n_lin` and `n_p + n_m`. Returns an error if
 /// `alpha + w_D,i = 0` (probability `n_p / 2^252`) or the witness does not satisfy `c`.
-pub fn prove<T: BpppTranscript, R: RngCore + CryptoRng>(
+pub(crate) fn prove<T: BpppTranscript, R: RngCore + CryptoRng>(
     c: &ReciprocalCircuit,
     gens: &BpppGens,
     V: &[CompressedRistretto],
@@ -676,6 +676,63 @@ pub(crate) fn prove_impl<T: BpppTranscript, R: RngCore + CryptoRng>(
     prove_with(c, gens, V, w, |_, _| Ok(c.given_late(w)), transcript, |_, _| rng, require_satisfied)
 }
 
+/// A proof for a reciprocal form circuit (spec §4); the encoding is that of a
+/// [`CircuitProof`] for the compiled circuit (spec §4.6).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReciprocalProof(pub(crate) CircuitProof);
+
+impl ReciprocalProof {
+    /// Prove that `w` satisfies `c` for the input commitments `V` (spec §4.3). Generators:
+    /// [`ReciprocalCircuit::gens`]. An error if `alpha + w_D,i = 0` (probability
+    /// `n_p / 2^252`) or if the witness does not satisfy `c`.
+    pub fn prove<T: BpppTranscript, R: RngCore + CryptoRng>(
+        c: &ReciprocalCircuit,
+        gens: &BpppGens,
+        V: &[CompressedRistretto],
+        w: &ReciprocalWitness,
+        transcript: &mut T,
+        rng: &mut R,
+    ) -> Result<Self, ProofError> {
+        prove(c, gens, V, w, transcript, rng).map(ReciprocalProof)
+    }
+
+    /// [`ReciprocalProof::prove`] with the late values (`w_R` and the `LinR` elements of `w_O`)
+    /// computed by `late` from `alpha` and the reciprocals `w_P` (spec §4.3), for ordinary rows
+    /// that read reciprocals; the late entries of `w` are ignored. Same transcript, randomness
+    /// and proof as `prove` given the same values; an error of `late` is returned as is.
+    pub fn prove_two_phase<T, R, F>(
+        c: &ReciprocalCircuit,
+        gens: &BpppGens,
+        V: &[CompressedRistretto],
+        w: &ReciprocalWitness,
+        late: F,
+        transcript: &mut T,
+        rng: &mut R,
+    ) -> Result<Self, ProofError>
+    where
+        T: BpppTranscript,
+        R: RngCore + CryptoRng,
+        F: FnOnce(Scalar, &[Scalar]) -> Result<LateWitness, ProofError>,
+    {
+        prove_two_phase(c, gens, V, w, late, transcript, rng).map(ReciprocalProof)
+    }
+
+    /// Verify for the circuit `c` and the input commitments `V`.
+    pub fn verify<T: BpppTranscript>(&self, c: &ReciprocalCircuit, gens: &BpppGens, V: &[CompressedRistretto], transcript: &mut T) -> Result<(), ProofError> {
+        verify(&self.0, c, gens, V, transcript)
+    }
+
+    /// The proof bytes.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.0.to_bytes()
+    }
+
+    /// Parse a proof for the circuit `c`.
+    pub fn from_bytes(bytes: &[u8], c: &ReciprocalCircuit) -> Result<Self, ProofError> {
+        proof_from_bytes(bytes, c).map(ReciprocalProof)
+    }
+}
+
 /// The values committed after `alpha` (spec §4.3, two-phase prover): `w_R`, and the elements
 /// of `w_O` in slot `LinR`, in `w_O` order.
 #[derive(Clone)]
@@ -691,7 +748,7 @@ pub struct LateWitness {
 /// The values of `w.w_r` and of the `LinR` elements of `w.w_o` are ignored (the lengths are
 /// checked as for [`prove`]). Same transcript, randomness and
 /// proof as [`prove`] given the same values; an error of `late` is returned as is.
-pub fn prove_two_phase<T, R, F>(
+pub(crate) fn prove_two_phase<T, R, F>(
     c: &ReciprocalCircuit,
     gens: &BpppGens,
     V: &[CompressedRistretto],
@@ -774,7 +831,7 @@ where
 }
 
 /// Verify a reciprocal form proof (spec §4.3).
-pub fn verify<T: BpppTranscript>(
+pub(crate) fn verify<T: BpppTranscript>(
     proof: &CircuitProof,
     c: &ReciprocalCircuit,
     gens: &BpppGens,
@@ -815,7 +872,7 @@ pub(crate) fn terms<T: BpppTranscript>(
 }
 
 /// Parse a proof for the reciprocal circuit `c` (spec §4.6).
-pub fn proof_from_bytes(bytes: &[u8], c: &ReciprocalCircuit) -> Result<CircuitProof, ProofError> {
+pub(crate) fn proof_from_bytes(bytes: &[u8], c: &ReciprocalCircuit) -> Result<CircuitProof, ProofError> {
     CircuitProof::from_bytes_dims(bytes, c.n_lin, c.n_p.checked_add(c.n_m).ok_or(ProofError::FormatError)?)
 }
 
@@ -1421,8 +1478,8 @@ mod tests {
         let p2 = prove(&r, &gr, &Vr, &rw, &mut Transcript::new(b"b"), &mut rng).unwrap();
         let run = |p1: &CircuitProof| {
             let mut b = crate::bppp::BatchVerifier::new(&pc, &bp, ChaCha20Rng::seed_from_u64(1));
-            b.add_reciprocal(p1, &c, &[], &mut Transcript::new(b"b"))?;
-            b.add_reciprocal(&p2, &r, &Vr, &mut Transcript::new(b"b"))?;
+            b.add_reciprocal(&ReciprocalProof(p1.clone()), &c, &[], &mut Transcript::new(b"b"))?;
+            b.add_reciprocal(&ReciprocalProof(p2.clone()), &r, &Vr, &mut Transcript::new(b"b"))?;
             b.verify()
         };
         run(&p1).unwrap();

@@ -131,3 +131,10 @@ required-features = ["bppp"]
 [[bench]]
 name = "curves"
 harness = false
+
+[[test]]
+name = "facade"
+
+[[example]]
+name = "curves_table"
+required-features = ["yoloproofs", "bppp", "secp256k1"]

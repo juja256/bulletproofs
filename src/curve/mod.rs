@@ -9,6 +9,8 @@ pub use group;
 mod ristretto;
 pub use self::ristretto::Ristretto;
 #[cfg(feature = "secp256k1")]
+mod pippenger;
+#[cfg(feature = "secp256k1")]
 mod secp256k1;
 #[cfg(feature = "secp256k1")]
 pub use self::secp256k1::{Secp256k1, Secp256k1Compressed};

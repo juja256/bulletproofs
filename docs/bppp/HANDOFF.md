@@ -339,4 +339,24 @@ DESIGN (milestone M6). bpvm depends on this fork by git revision.
   verifier takes 32 s against BP's 16 s with `parallel` (single-threaded BP++ verifies faster).
   BP++ prover memory: ec_mini 2.14 GB vs BP 1.13 GB, ec_add 8.5 vs 10.1 GB. Tests: 156
   (bppp parallel yoloproofs cheats), 152 (bppp yoloproofs), 70, 34.
+- 2026-10-20 — refactoring review (owner's request: smaller, clearer code and API names; two
+  fresh reviewers: BP++ core, R1CS/builder/bpvm). Done, proofs and vectors unchanged in every
+  step (pins, golden, reference vectors): one prover path with the randomness as a closure
+  (`Randomness`/`DynRng` gone, digest computed once); `bppp::terms::Terms` for circuits, batch
+  and WNLA; `BpppGens::capacity`/`check_dims`, `H_FIXED`, `{Arithmetic,Reciprocal}Circuit::gens`;
+  `CircuitProof::from_bytes_dims` (no dummy circuits); named blinding masks; Range/MACT
+  `setup()`; `Builder.active` removed; one backend `match` in verify. API: **`Reciprocal` is a
+  handle recorded at creation** (a forgotten `finish_reciprocal` used to drop the argument
+  silently; spec §7.2/§7.4 updated), `constrain_product`, `Cost::{gates, linear}`,
+  `bppp_linear`, `Backend: Display + FromStr`, `cheats::with_unchecked_prover`,
+  `CircuitProof::prove`, `WnlaProof::prove`, `ReciprocalProof`, crate-private protocol
+  modules, `WnlaStatement.{h, n}`. Tests of circuit/reciprocal in their own files. README:
+  "Writing gadgets for both backends" (example `tests/guide.rs`). bpvm follows (`Env::mem_read`
+  etc., `witness`, `Stats.gates`). Not done (judged not worth the churn or needing review):
+  shared layout for `cost()` and the BP++ lowering, splitting `backend.rs`/`builder.rs` and the
+  BP body of `prover.rs`, one evaluator for prover and lowering (cfg mismatch), matrix field
+  renames `w_l` → `W_l` (collides with the witness names), moving `builder::cheat` into
+  `cheats.rs`, merging overlapping integration tests, `msm_*` chunk parameter, the verifier's
+  second compilation in `ReciprocalCircuit::check` (performance), panics of `SparseMatrix` on
+  reachable input. Tests: 162 (bppp parallel yoloproofs cheats), 157, 74, 34.
 

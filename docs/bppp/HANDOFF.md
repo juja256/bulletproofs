@@ -26,10 +26,10 @@ then the zkVM `bpvm` (github.com/juja256/bpvm, a separate repository) on BP++.
 | 7 | performance and hardening | `wnla.rs`, `batch.rs`, `oblivious.rs`, spec §2.6, §3.11 | branch `bppp-perf` (pushed); format changes held |
 | 7b | tuple poles (option F): lookups of tuples without the bound rule | `reciprocal.rs`, `builder.rs`, `backend.rs`, spec §4.1–4.7, §7.2–7.6 | branch `bppp-tuples` (pushed); reviewed, done |
 | 7c | option B: one BP++ lowering and encoding for every constraint system | `prover.rs`, `verifier.rs`, `proof.rs`, `backend.rs`, spec §6, §7.7 | branch `bppp-one-proof` (pushed); reviewed, done |
-| 8 | bpvm on BP++ | bpvm branch `bppp`; here `bppp-bpvm` (`R1CSProof::backend`, feature `cheats`, prover speed-ups) | done, reviewed; not pushed |
+| 8 | bpvm on BP++ | bpvm `main`; here `R1CSProof::backend`, feature `cheats`, prover and verifier speed-ups | done, reviewed |
 
-The branches are stacked: `main` ⊂ `bppp-circuit` ⊂ `bppp-reciprocal` ⊂ `bppp-range` ⊂
-`bppp-r1cs` ⊂ `claude/beautiful-goodall-m369g7` (phase 6). None of 2–5 is merged into `main` yet; ask the owner before merging.
+All phases are merged into `main` (2026-10-20, fast-forward to `f9f540a`, pushed); the
+`bppp-*` branches are kept for history.
 
 Numbers (Apple M4 Pro, one thread): a 64-bit range proof is 416 B (paper's figure) against 672 B
 for the BP `RangeProof`, proving in 2.55 vs 4.39 ms, verifying in 0.48 vs 0.61 ms; a circuit of
@@ -374,4 +374,6 @@ DESIGN (milestone M6). bpvm depends on this fork by git revision.
   (BP 16.4); prove ec_add 159 → 132 s (BP 166). Heap peaks unchanged (`mem_profile`). The
   remaining sequential part is the circuit digest (SHA3, before any challenge; parallel tree
   hashing would change the format). Tests: 165, 160, 74, 34.
+- 2026-10-20 — merged into `main` (fast-forward, 64 commits) and pushed, on the owner's word;
+  bpvm depends on `rev = f9f540a` and is pushed too (bpvm `main` `c5f9cd4`).
 

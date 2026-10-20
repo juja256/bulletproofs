@@ -2,6 +2,23 @@
 
 Entries are listed in reverse chronological order.
 
+## Unreleased (this fork)
+
+* Transcripts: every protocol takes its Fiat–Shamir transcript as `&mut T` for any
+  `T: TranscriptBackend`; `merlin::Transcript` stays the default with byte-identical proofs.
+  New `Sha256Transcript` (feature `sha256-transcript`, on with `secp256k1`): a transcript on
+  SHA-256 alone, for verifiers without Keccak such as Simplicity
+  (`docs/sha256-transcript.md`). Source changes for users:
+  * the R1CS `Prover` and `Verifier` take `T: TranscriptRef` instead of
+    `T: BorrowMut<merlin::Transcript>`: a `merlin::Transcript`, a `Sha256Transcript` or a
+    `&mut` of any `TranscriptBackend` (code generic over `BorrowMut<Transcript>`, or passing a
+    `Box<Transcript>`, needs updating);
+  * `ConstraintSystem::transcript()` returns `&mut dyn TranscriptBackend`; calling its methods
+    needs `use bulletproofs::TranscriptBackend;`;
+  * the BP range-proof provers and the MPC dealer require `Clone` of the transcript.
+* Earlier fork changes (Bulletproofs++, the circuit builder, the secp256k1 curve, Elements
+  commitments) are described in the README.
+
 ## 5.0.1
 
 * Support for `serde_json`. Any library trying to deserialize RangeProof from json would run into an error, which is now fixed.

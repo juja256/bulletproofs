@@ -124,7 +124,7 @@ fn commitments(g: &BpppGens, w: &CircuitWitness) -> Vec<CompressedRistretto> {
 }
 
 /// The prover without its satisfiability check, to test what the verifier rejects.
-fn prove_unchecked<C: Curve, T: BpppTranscript, R: RngCore + CryptoRng>(
+fn prove_unchecked<C: Curve, T: BpppTranscript + ?Sized, R: RngCore + CryptoRng>(
     c: &ArithmeticCircuit<C::Scalar>,
     g: &BpppGens<C>,
     V: &[C::Compressed],

@@ -703,3 +703,24 @@ fn readme_transcripts_example() {
     let (proof, commitments) = bppp::RangeProof::prove(&st, &pc_gens, &bp_gens, &[v], &[blinding], &mut Sha256Transcript::new(b"app"), &mut rng).unwrap();
     proof.verify(&st, &pc_gens, &bp_gens, &commitments, &mut Sha256Transcript::new(b"app")).unwrap();
 }
+
+/// A gadget can bind a nested proof to the constraint system's transcript: every verifier
+/// (and every prover that does not clone) takes the leased `&mut dyn TranscriptBackend`.
+#[cfg(all(feature = "yoloproofs", feature = "bppp"))]
+#[test]
+fn gadgets_can_pass_the_leased_transcript_to_protocols() {
+    use bulletproofs::r1cs::{ConstraintSystem, Prover};
+    let (pc, bp) = (PedersenGens::default(), BulletproofGens::new(64, 1));
+    let blinding = Scalar::from(4u8);
+    let mut nested_t = Transcript::new(b"nested");
+    let (nested, com) = RangeProof::prove_single_with_rng(&bp, &pc, &mut nested_t, 9, &blinding, 8, &mut ChaCha20Rng::seed_from_u64(1)).unwrap();
+    let st = bulletproofs::bppp::RangeStatement::new(16, vec![(0, 1 << 16)]).unwrap();
+    let bp2 = BulletproofGens::new(st.generators_capacity(), 1);
+    let (nested2, V) = bulletproofs::bppp::RangeProof::prove(&st, &pc, &bp2, &[9], &[blinding], &mut Transcript::new(b"nested"), &mut ChaCha20Rng::seed_from_u64(2)).unwrap();
+
+    let mut t = Transcript::new(b"outer");
+    let mut p = Prover::new(&pc, &mut t);
+    // fails: the nested proofs were made under another transcript
+    assert!(nested.verify_single(&bp, &pc, p.transcript(), &com, 8).is_err());
+    assert!(nested2.verify(&st, &pc, &bp2, &V, p.transcript()).is_err());
+}

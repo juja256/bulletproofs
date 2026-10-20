@@ -313,7 +313,7 @@ impl<C: Curve> RangeProof<C> {
     /// Verifies a rangeproof for a given value commitment \\(V\\).
     ///
     /// This is a convenience wrapper around `verify_multiple` for the `m=1` case.
-    pub fn verify_single_with_rng<T: RngCore + CryptoRng, X: TranscriptBackend>(
+    pub fn verify_single_with_rng<T: RngCore + CryptoRng, X: TranscriptBackend + ?Sized>(
         &self,
         bp_gens: &BulletproofGens<C>,
         pc_gens: &PedersenGens<C>,
@@ -330,7 +330,7 @@ impl<C: Curve> RangeProof<C> {
     /// This is a convenience wrapper around [`RangeProof::verify_single_with_rng`],
     /// passing in a threadsafe RNG.
     #[cfg(feature = "std")]
-    pub fn verify_single<X: TranscriptBackend>(
+    pub fn verify_single<X: TranscriptBackend + ?Sized>(
         &self,
         bp_gens: &BulletproofGens<C>,
         pc_gens: &PedersenGens<C>,
@@ -342,7 +342,7 @@ impl<C: Curve> RangeProof<C> {
     }
 
     /// Verifies an aggregated rangeproof for the given value commitments.
-    pub fn verify_multiple_with_rng<T: RngCore + CryptoRng, X: TranscriptBackend>(
+    pub fn verify_multiple_with_rng<T: RngCore + CryptoRng, X: TranscriptBackend + ?Sized>(
         &self,
         bp_gens: &BulletproofGens<C>,
         pc_gens: &PedersenGens<C>,
@@ -460,7 +460,7 @@ impl<C: Curve> RangeProof<C> {
     /// This is a convenience wrapper around [`RangeProof::verify_multiple_with_rng`],
     /// passing in a threadsafe RNG.
     #[cfg(feature = "std")]
-    pub fn verify_multiple<X: TranscriptBackend>(
+    pub fn verify_multiple<X: TranscriptBackend + ?Sized>(
         &self,
         bp_gens: &BulletproofGens<C>,
         pc_gens: &PedersenGens<C>,

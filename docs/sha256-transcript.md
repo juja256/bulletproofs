@@ -81,3 +81,6 @@ verifier-cost notes of the owner's research).
 - `tests/vectors/transcript/secp256k1-*.json`: full secp256k1 proofs under the SHA-256 transcript
   with the trace of every message and challenge; `python3 -I ref/sha256_transcript.py
   --check-trace tests/vectors/transcript/secp256k1-*.json` recomputes every challenge.
+  The trace starts after `new(label)`: the record `append_message("dom-sep", label)` that
+  `new` absorbs (with `label` = the file's `label`) is not in it. A verifier replaying a trace
+  starts from the midstate, absorbs that record first, then the trace.

@@ -314,8 +314,11 @@ passes a `merlin::Transcript` is unchanged and its proofs are byte-identical to 
   on Liquid. The byte format, the constants a verifier embeds and the cost of a challenge are
   in [docs/sha256-transcript.md](docs/sha256-transcript.md).
 - Any other type that implements `TranscriptBackend` (`append_message`, `append_u64`,
-  `challenge_bytes`, `build_rng`); the MPC dealer also needs `Clone`, and the R1CS prover
-  and verifier take an owned one through `TranscriptRef` (a `&mut` always works).
+  `challenge_bytes`, `build_rng`); the BP range-proof provers and the MPC dealer also need
+  `Clone`, and the R1CS prover and verifier take an owned one through `TranscriptRef` (a
+  `&mut` always works). Every other function also takes the `&mut dyn TranscriptBackend`
+  that `cs.transcript()` leases, so a gadget can bind a nested proof to the circuit's
+  transcript.
 
 A proof verifies only under the transcript type and label it was made with.
 

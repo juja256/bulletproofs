@@ -38,7 +38,7 @@ pub trait BpppTranscript {
     }
 }
 
-impl<T: TranscriptBackend> BpppTranscript for T {
+impl<T: TranscriptBackend + ?Sized> BpppTranscript for T {
     fn domain_sep(&mut self, label: &'static [u8]) {
         TranscriptBackend::append_message(self, b"dom-sep", label);
     }

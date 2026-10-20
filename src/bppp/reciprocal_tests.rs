@@ -745,9 +745,26 @@ fn shape_check_agrees_with_compiling() {
         if c.partition.len() > 1 {
             push(&|x| x.partition[1] = x.partition[0]);
         }
+        // boundaries of the compiled shape: f_m with k n_v at n_p + n_m and one above, a huge
+        // k, a NormO slot at the last norm position and one past it
+        push(&|x| {
+            x.f_m = true;
+            x.n_v = 1;
+            x.k = x.n_p + x.n_m;
+        });
+        push(&|x| {
+            x.f_m = true;
+            x.n_v = 1;
+            x.k = x.n_p + x.n_m + 1;
+        });
+        push(&|x| x.k = usize::MAX);
+        if !c.partition.is_empty() {
+            push(&|x| x.partition[0] = (Slot::NormO, x.n_p + x.n_m - 1));
+            push(&|x| x.partition[0] = (Slot::NormO, x.n_p + x.n_m));
+        }
         for v in &variants {
             let (new, old) = (v.check(), v.check_by_compiling());
-            assert_eq!(new.is_ok(), old.is_ok(), "{}: {:?} vs {:?}", case["name"], new, old);
+            assert_eq!(new, old, "{}", case["name"]);
             if new.is_ok() {
                 ok += 1;
             } else {

@@ -100,6 +100,7 @@ impl SparseMatrix {
     /// each thread owns a range of columns of `out` and scans all terms (no extra memory; the
     /// same sums, added in the same row order).
     pub(crate) fn add_transposed(&self, y: &[Scalar], out: &mut [Scalar]) {
+        debug_assert!(out.len() >= self.n_cols, "out has fewer entries than columns");
         let rows = self.n_rows().min(y.len());
         let add = |lo: usize, out: &mut [Scalar]| {
             let hi = lo + out.len();

@@ -1,7 +1,7 @@
 #![deny(missing_docs)]
 #![allow(non_snake_case)]
 // Some helpers serve only the optional R1CS and BP++ code.
-#![allow(dead_code)]
+#![cfg_attr(not(any(feature = "bppp", feature = "yoloproofs")), allow(dead_code))]
 
 extern crate alloc;
 

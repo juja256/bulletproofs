@@ -4,6 +4,8 @@ use alloc::vec::Vec;
 
 use curve25519_dalek::scalar::Scalar;
 
+use crate::curve::Field;
+
 /// Lowest degree held by [`Poly`]: `n(T)` reaches `T^-1`, so `<n, n>` reaches `T^-2`.
 const MIN_DEG: i32 = -2;
 /// Highest degree held by [`Poly`]: the blinding polynomial reaches `T^{3+7}` (spec §3.6).
@@ -12,22 +14,22 @@ const LEN: usize = (MAX_DEG - MIN_DEG + 1) as usize;
 
 /// A scalar Laurent polynomial with degrees `MIN_DEG..=MAX_DEG`.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Poly([Scalar; LEN]);
+pub(crate) struct Poly<F: Field = Scalar>([F; LEN]);
 
-impl Poly {
+impl<F: Field> Poly<F> {
     pub fn zero() -> Self {
-        Poly([Scalar::ZERO; LEN])
+        Poly([F::ZERO; LEN])
     }
 
-    pub fn coeff(&self, d: i32) -> Scalar {
+    pub fn coeff(&self, d: i32) -> F {
         self.0[(d - MIN_DEG) as usize]
     }
 
-    pub fn add(&mut self, d: i32, x: Scalar) {
+    pub fn add(&mut self, d: i32, x: F) {
         self.0[(d - MIN_DEG) as usize] += x;
     }
 
-    pub fn sub_poly(&mut self, o: &Poly) {
+    pub fn sub_poly(&mut self, o: &Poly<F>) {
         for (a, b) in self.0.iter_mut().zip(o.0.iter()) {
             *a -= b;
         }
@@ -35,20 +37,20 @@ impl Poly {
 }
 
 /// `t^d` for a possibly negative `d` (public values, variable time).
-pub(crate) fn pow_signed(t: Scalar, t_inv: Scalar, d: i32) -> Scalar {
+pub(crate) fn pow_signed<F: Field>(t: F, t_inv: F, d: i32) -> F {
     let (base, e) = if d >= 0 { (t, d as u64) } else { (t_inv, (-d) as u64) };
     crate::util::scalar_exp_vartime(&base, e)
 }
 
 /// A vector Laurent polynomial given by its non-zero terms `(degree, coefficients)`; terms of
 /// different lengths are zero-padded.
-pub(crate) struct VecPoly(pub Vec<(i32, Vec<Scalar>)>);
+pub(crate) struct VecPoly<F: Field = Scalar>(pub Vec<(i32, Vec<F>)>);
 
-impl VecPoly {
+impl<F: Field> VecPoly<F> {
     /// The value at `t`, as a vector of length `len`.
-    pub fn eval(&self, t: Scalar, t_inv: Scalar, len: usize) -> Vec<Scalar> {
-        let terms: Vec<(Scalar, &Vec<Scalar>)> = self.0.iter().map(|(d, v)| (pow_signed(t, t_inv, *d), v)).collect();
-        crate::util::map_index(len, |i| terms.iter().filter_map(|(x, v)| v.get(i).map(|a| x * a)).sum())
+    pub fn eval(&self, t: F, t_inv: F, len: usize) -> Vec<F> {
+        let terms: Vec<(F, &Vec<F>)> = self.0.iter().map(|(d, v)| (pow_signed(t, t_inv, *d), v)).collect();
+        crate::util::map_index(len, |i| terms.iter().filter_map(|(x, v)| v.get(i).map(|a| *x * a)).sum())
     }
 
     /// `<self(T), other(T)>`, or with weights `w` (`<a, b>_w = sum a_i b_i w_i`). The weights
@@ -56,14 +58,14 @@ impl VecPoly {
     /// alive at a time); for `p.inner(p, _)` only the pairs `i <= j` are computed (the product
     /// is symmetric); the inner products run in parallel with `parallel`. Same values as the
     /// direct double sum.
-    pub fn inner(&self, other: &VecPoly, w: Option<&[Scalar]>) -> Poly {
+    pub fn inner(&self, other: &VecPoly<F>, w: Option<&[F]>) -> Poly<F> {
         let same = core::ptr::eq(self, other);
         let mut p = Poly::zero();
         for (i, (da, a)) in self.0.iter().enumerate() {
-            let weighted: Vec<Scalar>;
-            let a: &[Scalar] = match w {
+            let weighted: Vec<F>;
+            let a: &[F] = match w {
                 Some(w) => {
-                    weighted = a.iter().zip(w).map(|(x, w)| x * w).collect();
+                    weighted = a.iter().zip(w).map(|(x, w)| *x * w).collect();
                     &weighted
                 }
                 None => a,

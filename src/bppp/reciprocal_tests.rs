@@ -1,6 +1,10 @@
 //! Tests of `bppp::reciprocal`.
 
 use super::*;
+#[allow(unused_imports)]
+use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
+#[allow(unused_imports)]
+use curve25519_dalek::scalar::Scalar;
 use crate::bppp::transcript::Replay;
 use crate::{BulletproofGens, PedersenGens};
 use merlin::Transcript;

@@ -3,8 +3,7 @@
 //! weights into one multiscalar multiplication. A batch that fails says only that some proof
 //! is invalid; verify the proofs one by one to find which.
 
-use curve25519_dalek::ristretto::CompressedRistretto;
-use curve25519_dalek::scalar::Scalar;
+use ff::Field as _;
 use rand_core::{CryptoRng, RngCore};
 
 use super::circuit::{ArithmeticCircuit, CircuitProof, Terms};
@@ -13,28 +12,29 @@ use super::mact::{MactProof, MactStatement};
 use super::range::{RangeProof, RangeStatement};
 use super::reciprocal::{self, ReciprocalCircuit, ReciprocalProof};
 use super::transcript::BpppTranscript;
+use crate::curve::Curve;
 use crate::errors::ProofError;
 use crate::{BulletproofGens, PedersenGens};
 
 /// Accumulates proofs; [`BatchVerifier::verify`] checks them all at once. Each `add_*` replays
 /// the proof's transcript (so a malformed proof or a failed check of the statement is an error
 /// right away) and adds its equation with a fresh random weight from `rng`.
-pub struct BatchVerifier<'a, R: RngCore + CryptoRng> {
-    pc: &'a PedersenGens,
-    bp: &'a BulletproofGens,
+pub struct BatchVerifier<'a, C: Curve, R: RngCore + CryptoRng> {
+    pc: &'a PedersenGens<C>,
+    bp: &'a BulletproofGens<C>,
     rng: R,
-    acc: Terms,
+    acc: Terms<C>,
 }
 
-impl<'a, R: RngCore + CryptoRng> BatchVerifier<'a, R> {
+impl<'a, C: Curve, R: RngCore + CryptoRng> BatchVerifier<'a, C, R> {
     /// An empty batch for proofs over these generators; `rng` draws the weights and must be
     /// unpredictable to the provers (a cryptographic RNG of the verifier, never a transcript).
-    pub fn new(pc: &'a PedersenGens, bp: &'a BulletproofGens, rng: R) -> Self {
+    pub fn new(pc: &'a PedersenGens<C>, bp: &'a BulletproofGens<C>, rng: R) -> Self {
         BatchVerifier { pc, bp, rng, acc: Terms::default() }
     }
 
-    fn add(&mut self, t: Terms) {
-        let w = Scalar::random(&mut self.rng);
+    fn add(&mut self, t: Terms<C>) {
+        let w = C::Scalar::random(&mut self.rng);
         self.acc.add_scaled(w, t);
     }
 
@@ -42,9 +42,9 @@ impl<'a, R: RngCore + CryptoRng> BatchVerifier<'a, R> {
     /// batch's `PedersenGens` and `BulletproofGens`.
     pub fn add_circuit<T: BpppTranscript>(
         &mut self,
-        proof: &CircuitProof,
-        c: &ArithmeticCircuit,
-        V: &[CompressedRistretto],
+        proof: &CircuitProof<C>,
+        c: &ArithmeticCircuit<C::Scalar>,
+        V: &[C::Compressed],
         transcript: &mut T,
     ) -> Result<(), ProofError> {
         let gens = c.gens(self.pc, self.bp)?;
@@ -56,9 +56,9 @@ impl<'a, R: RngCore + CryptoRng> BatchVerifier<'a, R> {
     /// Add a reciprocal form proof ([`ReciprocalProof::verify`]).
     pub fn add_reciprocal<T: BpppTranscript>(
         &mut self,
-        proof: &ReciprocalProof,
-        c: &ReciprocalCircuit,
-        V: &[CompressedRistretto],
+        proof: &ReciprocalProof<C>,
+        c: &ReciprocalCircuit<C::Scalar>,
+        V: &[C::Compressed],
         transcript: &mut T,
     ) -> Result<(), ProofError> {
         let gens = c.gens(self.pc, self.bp)?;
@@ -70,9 +70,9 @@ impl<'a, R: RngCore + CryptoRng> BatchVerifier<'a, R> {
     /// Add a range proof ([`RangeProof::verify`]).
     pub fn add_range<T: BpppTranscript>(
         &mut self,
-        proof: &RangeProof,
+        proof: &RangeProof<C>,
         st: &RangeStatement,
-        V: &[CompressedRistretto],
+        V: &[C::Compressed],
         transcript: &mut T,
     ) -> Result<(), ProofError> {
         let t = proof.terms(st, self.pc, self.bp, V, transcript)?;
@@ -83,9 +83,9 @@ impl<'a, R: RngCore + CryptoRng> BatchVerifier<'a, R> {
     /// Add a multi-asset transaction proof ([`MactProof::verify`]).
     pub fn add_mact<T: BpppTranscript>(
         &mut self,
-        proof: &MactProof,
+        proof: &MactProof<C>,
         st: &MactStatement,
-        V: &[CompressedRistretto],
+        V: &[C::Compressed],
         transcript: &mut T,
     ) -> Result<(), ProofError> {
         let t = proof.terms(st, self.pc, self.bp, V, transcript)?;
@@ -107,6 +107,10 @@ impl<'a, R: RngCore + CryptoRng> BatchVerifier<'a, R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
+    use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
+    #[allow(unused_imports)]
+    use curve25519_dalek::scalar::Scalar;
     use merlin::Transcript;
     use rand_chacha::rand_core::SeedableRng;
     use rand_chacha::ChaCha20Rng;

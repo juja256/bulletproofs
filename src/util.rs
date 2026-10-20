@@ -276,18 +276,8 @@ impl<F: Field> Drop for Poly6<F> {
 /// Raises `x` to the power `n` using binary exponentiation,
 /// with (1 to 2)*lg(n) scalar multiplications.
 /// TODO: a consttime version of this would be awfully similar to a Montgomery ladder.
-pub fn scalar_exp_vartime<F: Field>(x: &F, mut n: u64) -> F {
-    let mut result = F::ONE;
-    let mut aux = *x; // x, x^2, x^4, x^8, ...
-    while n > 0 {
-        let bit = n & 1;
-        if bit == 1 {
-            result = result * aux;
-        }
-        n = n >> 1;
-        aux = aux * aux; // FIXME: one unnecessary mult at the last step here!
-    }
-    result
+pub fn scalar_exp_vartime<F: Field>(x: &F, n: u64) -> F {
+    x.pow_vartime([n])
 }
 
 /// Takes the sum of all the powers of `x`, up to `n`
@@ -317,6 +307,12 @@ fn sum_of_powers_slow<F: Field>(x: &F, n: usize) -> F {
     exp_iter(*x).take(n).sum()
 }
 
+/// `x` as a field element (`ff` converts only from `u64`).
+pub fn from_u128<F: Field>(x: u128) -> F {
+    let two64 = F::from(u64::MAX) + F::ONE;
+    F::from((x >> 64) as u64) * two64 + F::from(x as u64)
+}
+
 /// `1/x`, or zero for zero (as dalek's `Scalar::invert`).
 pub fn invert<F: Field>(x: F) -> F {
     x.invert().unwrap_or(F::ZERO)
@@ -333,6 +329,13 @@ pub fn read32(data: &[u8]) -> [u8; 32] {
 mod tests {
     use super::*;
     use zeroize::Zeroize;
+
+    #[test]
+    fn from_u128_matches_dalek() {
+        for x in [0u128, 1, u64::MAX as u128, 1 << 64, (1 << 64) + 5, u128::MAX - 1, u128::MAX] {
+            assert_eq!(from_u128::<Scalar>(x), Scalar::from(x), "{}", x);
+        }
+    }
 
     #[test]
     fn exp_2_is_powers_of_2() {

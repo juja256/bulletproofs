@@ -142,7 +142,7 @@ fn wnla_and_circuit_from_bytes() {
         let len = rng.gen_range(0..1500);
         let x: Vec<u8> = (0..len).map(|_| rng.gen()).collect();
         let (a, b) = (rng.gen_range(0..300), rng.gen_range(0..300));
-        let _ = bppp::WnlaProof::from_bytes(&x, a, b);
+        let _ = bppp::WnlaProof::<bulletproofs::curve::Ristretto>::from_bytes(&x, a, b);
     }
     let _ = CompressedRistretto([0xff; 32]).decompress();
 }

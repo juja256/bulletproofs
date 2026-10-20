@@ -1,6 +1,10 @@
 //! Tests of `bppp::circuit`.
 
 use super::*;
+#[allow(unused_imports)]
+use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
+#[allow(unused_imports)]
+use curve25519_dalek::scalar::Scalar;
 use crate::bppp::testutil::{sc, scs, slot, sparse_from, ScalarRng};
 use crate::bppp::transcript::Replay;
 use crate::{BulletproofGens, PedersenGens};
@@ -136,7 +140,7 @@ fn prove_and_verify(c: &ArithmeticCircuit, w: &CircuitWitness, rng: &mut ChaCha2
     let g = BpppGens::new(&pc, &bp, c.n_lin, c.n_m)?;
     let V = commitments(&g, w);
     let proof = prove_unchecked(c, &g, &V, w, &mut Transcript::new(b"test"), rng)?;
-    let parsed = CircuitProof::from_bytes(&proof.to_bytes(), c)?;
+    let parsed = CircuitProof::<Ristretto>::from_bytes(&proof.to_bytes(), c)?;
     assert_eq!(parsed, proof);
     proof.verify(c, &g, &V, &mut Transcript::new(b"test"))
 }
@@ -182,7 +186,7 @@ fn matches_reference_vectors() {
             s: scs(&case["s"]),
         };
         assert_eq!(c.is_satisfied(&w), case["satisfied"].as_bool().unwrap(), "{}", name);
-        let bp = BulletproofGens::new(BpppGens::capacity(n_lin, n_m), 1);
+        let bp = BulletproofGens::new(crate::bppp::gens::capacity(n_lin, n_m), 1);
         let g = BpppGens::new(&pc, &bp, n_lin, n_m).unwrap();
         let point = |p: &serde_json::Value| {
             use curve25519_dalek::traits::MultiscalarMul;
@@ -366,12 +370,12 @@ fn forged_value_generator_is_rejected() {
     t.append_point(b"C_L", &proof.C_L);
     t.append_point(b"C_R", &proof.C_R);
     t.append_point(b"C_O", &proof.C_O);
-    let (rho, lambda) = (t.challenge(b"rho"), t.challenge(b"lambda"));
-    let (beta, delta) = (t.challenge(b"beta"), t.challenge(b"delta"));
+    let (rho, lambda): (Scalar, Scalar) = (t.challenge(b"rho"), t.challenge(b"lambda"));
+    let (beta, delta): (Scalar, Scalar) = (t.challenge(b"beta"), t.challenge(b"delta"));
     let wt = Weights::new(&c, rho, lambda);
     let delta_inv = delta.invert();
     t.append_point(b"C_S", &proof.C_S);
-    let tau = t.challenge(b"tau");
+    let tau: Scalar = t.challenge(b"tau");
     let (tau_inv, tau3) = (tau.invert(), tau * tau * tau);
     let p_n = wt.p_n(delta_inv).eval(tau, tau_inv, c.n_m);
     let p_s = p_n.iter().zip(&wt.mu_vec).map(|(a, m)| a * a * m).sum::<Scalar>() + tau3 * wt.affine;
@@ -439,10 +443,10 @@ fn absurd_dimensions_are_errors() {
         let _ = big.check(); // must not panic or allocate per slot
         assert!(proof.verify(&big, &g, &V, &mut Transcript::new(b"t")).is_err());
         assert!(prove(&big, &g, &V, &w, &mut Transcript::new(b"t"), &mut rng).is_err());
-        assert!(CircuitProof::from_bytes(&proof.to_bytes(), &big).is_err());
+        assert!(CircuitProof::<Ristretto>::from_bytes(&proof.to_bytes(), &big).is_err());
     }
-    assert!(WnlaProof::from_bytes(&[], usize::MAX, 0).is_err());
-    assert!(WnlaProof::from_bytes(&[], usize::MAX, usize::MAX).is_err());
+    assert!(WnlaProof::<Ristretto>::from_bytes(&[], usize::MAX, 0).is_err());
+    assert!(WnlaProof::<Ristretto>::from_bytes(&[], usize::MAX, usize::MAX).is_err());
 }
 
 #[test]
@@ -498,8 +502,8 @@ fn malformed_inputs_are_errors() {
     let V = commitments(&g, &w);
     let proof = prove(&c, &g, &V, &w, &mut Transcript::new(b"t"), &mut rng).unwrap();
     let bytes = proof.to_bytes();
-    assert!(CircuitProof::from_bytes(&bytes[1..], &c).is_err());
-    assert!(CircuitProof::from_bytes(&[], &c).is_err());
+    assert!(CircuitProof::<Ristretto>::from_bytes(&bytes[1..], &c).is_err());
+    assert!(CircuitProof::<Ristretto>::from_bytes(&[], &c).is_err());
     let ok = |p: &CircuitProof, V: &[CompressedRistretto]| p.verify(&c, &g, V, &mut Transcript::new(b"t")).is_ok();
     assert!(ok(&proof, &V));
     assert!(!ok(&proof, &V[..1]), "missing input");

@@ -4,6 +4,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use curve25519_dalek::scalar::Scalar;
+
+use crate::curve::Field;
 use sha3::{Digest, Sha3_256};
 
 /// SHA3-256 fed through a 64 KiB buffer: the digest of the same byte stream with far fewer
@@ -42,14 +44,14 @@ impl BufHasher {
 /// A matrix stored by rows: row `r` holds the `(column, coefficient)` terms
 /// `start[r]..start[r + 1]`, in the order they were pushed.
 #[derive(Clone, Debug, PartialEq)]
-pub struct SparseMatrix {
+pub struct SparseMatrix<F: Field = Scalar> {
     n_cols: usize,
     start: Vec<usize>,
     cols: Vec<u32>,
-    vals: Vec<Scalar>,
+    vals: Vec<F>,
 }
 
-impl SparseMatrix {
+impl<F: Field> SparseMatrix<F> {
     /// An empty matrix (no rows) with `n_cols` columns.
     pub fn new(n_cols: usize) -> Self {
         assert!(n_cols <= u32::MAX as usize, "too many columns");
@@ -57,7 +59,7 @@ impl SparseMatrix {
     }
 
     /// Append a row of `(column, coefficient)` terms. Panics on a column out of range.
-    pub fn push_row<I: IntoIterator<Item = (usize, Scalar)>>(&mut self, terms: I) {
+    pub fn push_row<I: IntoIterator<Item = (usize, F)>>(&mut self, terms: I) {
         for (c, v) in terms {
             assert!(c < self.n_cols, "column {} out of range ({} columns)", c, self.n_cols);
             self.cols.push(c as u32);
@@ -67,7 +69,7 @@ impl SparseMatrix {
     }
 
     /// Append the rows of `other` (same number of columns).
-    pub(crate) fn extend_rows(&mut self, other: &SparseMatrix) {
+    pub(crate) fn extend_rows(&mut self, other: &SparseMatrix<F>) {
         assert_eq!(self.n_cols, other.n_cols, "column counts differ");
         let base = self.cols.len();
         self.cols.extend_from_slice(&other.cols);
@@ -86,28 +88,28 @@ impl SparseMatrix {
     }
 
     /// The terms of row `r`.
-    pub fn row(&self, r: usize) -> impl Iterator<Item = (usize, &Scalar)> {
+    pub fn row(&self, r: usize) -> impl Iterator<Item = (usize, &F)> {
         let (a, b) = (self.start[r], self.start[r + 1]);
         self.cols[a..b].iter().map(|&c| c as usize).zip(&self.vals[a..b])
     }
 
     /// `M x` for `x` with at least `n_cols` entries.
-    pub fn mul_vec(&self, x: &[Scalar]) -> Vec<Scalar> {
-        (0..self.n_rows()).map(|r| self.row(r).map(|(c, v)| v * x[c]).sum()).collect()
+    pub fn mul_vec(&self, x: &[F]) -> Vec<F> {
+        (0..self.n_rows()).map(|r| self.row(r).map(|(c, v)| *v * x[c]).sum()).collect()
     }
 
     /// `out += y^T M`, for `y` with `n_rows` and `out` with `n_cols` entries. With `parallel`,
     /// each thread owns a range of columns of `out` and scans all terms (no extra memory; the
     /// same sums, added in the same row order).
-    pub(crate) fn add_transposed(&self, y: &[Scalar], out: &mut [Scalar]) {
+    pub(crate) fn add_transposed(&self, y: &[F], out: &mut [F]) {
         debug_assert!(out.len() >= self.n_cols, "out has fewer entries than columns");
         let rows = self.n_rows().min(y.len());
-        let add = |lo: usize, out: &mut [Scalar]| {
+        let add = |lo: usize, out: &mut [F]| {
             let hi = lo + out.len();
             for (r, yr) in y.iter().enumerate().take(rows) {
                 for (c, v) in self.row(r) {
                     if (lo..hi).contains(&c) {
-                        out[c - lo] += yr * v;
+                        out[c - lo] += *yr * v;
                     }
                 }
             }
@@ -131,7 +133,7 @@ impl SparseMatrix {
             h.update(((self.start[r + 1] - self.start[r]) as u64).to_le_bytes());
             for (c, v) in self.row(r) {
                 h.update((c as u64).to_le_bytes());
-                h.update(v.as_bytes());
+                h.update(v.to_bytes32());
             }
         }
     }

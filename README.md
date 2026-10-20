@@ -171,6 +171,15 @@ The `parallel` feature (this fork) runs the prover and verifier on all threads w
 polynomial passes and constraint flattening, the inner-product argument and generator
 derivation. Proofs are identical to the serial ones.
 
+The `bppp` feature (this fork) adds Bulletproofs++: its protocols in `bulletproofs::bppp` and a
+second backend of the R1CS front end and the circuit builder (see
+[Bulletproofs++](#bulletproofs-experimental) and
+[Writing gadgets for both backends](#writing-gadgets-for-both-backends)).
+`bppp-vartime` computes the BP++ norm argument in variable time (its inputs are uniformly
+random given the transcript; same proofs, faster proving; constant time is the default).
+`cheats` is for tests only: `r1cs::cheats::with_unchecked_prover` makes the prover skip its
+own checks, so that a soundness test can check that the verifier rejects the result.
+
 ### Prover and verifier optimisations in this fork
 
 Compared to upstream, the R1CS prover needs about 3x less memory and is faster, the
@@ -218,7 +227,7 @@ Status:
 
 - `bppp::wnla`, the weighted norm linear argument. It binds its statement (`G`, `C`, `rho`, `c`) but
   is not zero-knowledge: a building block, not a proof system to use on its own.
-- `bppp::circuit`, arithmetic circuits (paper §5, spec §3): `w_L ∘ w_R = W_m w + f_m w_V + a_m`,
+- `bppp::CircuitProof::{prove, verify}`, arithmetic circuits (paper §5, spec §3): `w_L ∘ w_R = W_m w + f_m w_V + a_m`,
   `W_l w + f_l w_V + a_l = 0` with sparse matrices, a partition of `w_O` and committed input
   vectors (`BpppGens::commit_input`; a single value is an ordinary `PedersenGens` commitment).
   The generators come from the same `PedersenGens` and `BulletproofGens` as the BP backend.
@@ -226,7 +235,8 @@ Status:
   circuit and the inputs. The Rust prover reproduces the independently written circuit part of
   the Python reference (`tests/vectors/bppp/circuit.json`) commitment for commitment.
 
-- `bppp::reciprocal`, reciprocal form circuits (paper §6.2–6.3, spec §4): private poles
+- `bppp::ReciprocalProof::{prove, prove_two_phase, verify}`, reciprocal form circuits (paper
+  §6.2–6.3, spec §4): private poles
   committed with the initial witness, reciprocals committed after the challenge `alpha`, and
   reciprocal rows (sums of reciprocals and public poles) that must vanish as rational functions.
   Numerators and multiplicities may only read columns committed before `alpha`. A reciprocal
@@ -292,8 +302,8 @@ constraints with three terms each (`cargo bench --features "bppp yoloproofs" --b
 | $2^{10}$ | 800 / 1057 B | 69 / 66 ms | 3.9 / 5.9 ms |
 | $2^{14}$ | 1056 / 1313 B | 1.10 / 0.99 s | 52 / 77 ms |
 
-The BP++ prover is not optimised yet (phase 7 of the plan); verification is about a third
-faster and proofs about a fifth smaller.
+Verification is about a third faster and proofs about a fifth smaller (these rows predate the
+prover optimisations; see the large circuits below).
 
 The circuit builder, $n$ committed values range-checked to 32 bits through a byte table (four
 lookups each; `cargo bench --features "bppp yoloproofs" --bench bppp -- builder`; this machine,
@@ -305,7 +315,7 @@ lookups each; `cargo bench --features "bppp yoloproofs" --bench bppp -- builder`
 | 1024 | 945 / 1345 B | 1.13 / 1.26 s | 75 / 119 ms |
 
 At small $n$ BP++ pays for its linear slots: witnesses and multiplicities beyond the
-$N_p + N_m$ norm slots lengthen $H$ (phase 7).
+$N_p + N_m$ norm slots lengthen $H$.
 
 Large circuits (`examples/bppp_profile.rs`, one process per row for the peak memory; Xeon
 2.1 GHz, one thread; *vt* = feature `bppp-vartime`):
@@ -321,6 +331,145 @@ Large circuits (`examples/bppp_profile.rs`, one process per row for the peak mem
 instead of 168 ms one by one).
 
 Apple M4 Pro, single-threaded, `rustc 1.99.1`, release profile.
+
+## Writing gadgets for both backends
+
+A gadget is a function that adds variables and constraints to a constraint system. In this
+fork the same gadget code is proven with Bulletproofs (BP) or Bulletproofs++ (BP++), chosen per
+proof with `set_backend`. The complete example below is `tests/guide.rs`.
+
+### The traits
+
+| trait | operations | backends |
+|---|---|---|
+| `ConstraintSystem` (upstream) | `multiply(l, r)`, `allocate(v)`, `allocate_multiplier(l, r)`, `constrain(lc)`, `metrics()` | both |
+| `RandomizableConstraintSystem` (upstream) | `specify_randomized_constraints(f)`: a second phase with challenges | **BP only** |
+| `CircuitBuilder` (this fork, spec §7) | `witness(v)`, `constrain_product(l, r, out)`, `table(rows)`, `lookup(t, tuple)`, `lookup_value(t, v)`, `reciprocal(m)` with `Reciprocal::{add, sub, add_weighted, add_public}`, `cost()` | both |
+
+`CircuitBuilder: ConstraintSystem`, and both are implemented by `Prover` and `Verifier`, so
+one gadget mixes plain R1CS and builder operations on the same variables, and existing
+gadgets keep working unchanged. `CircuitBuilder` is object safe (`&mut dyn CircuitBuilder`).
+
+### One gadget, two roles
+
+The prover passes the values (`Some(v)`), the verifier `None`; both must issue the same
+operations in the same order. Committed values come from `Prover::commit(v, blinding)` /
+`Verifier::commit(V)` before the gadget runs and are passed in as `Variable`s.
+
+```rust,ignore
+/// `x < 2^16`: two byte lookups. `v` is the prover's value (`None` for the verifier).
+fn range16<CS: CircuitBuilder>(cs: &mut CS, t: &Tables, x: LinearCombination, v: Option<u64>) -> Result<(), R1CSError> {
+    let lo = cs.lookup_value(t.byte, v.map(|v| v & 0xff))?;
+    let hi = cs.lookup_value(t.byte, v.map(|v| v >> 8))?;
+    cs.constrain(x - lo - hi * Scalar::from(256u64));
+    Ok(())
+}
+
+/// `z = x ^ y` for nibbles: one lookup of the tuple `(x, y, z)`; no range checks of the
+/// components are needed (the lookup proves the tuple is a row, component by component).
+fn xor4<CS: CircuitBuilder>(cs: &mut CS, t: &Tables, x: Variable, y: Variable, v: Option<(u64, u64)>) -> Result<Variable, R1CSError> {
+    let z = cs.witness(v.map(|(a, b)| Scalar::from(a ^ b)))?;
+    cs.lookup(t.xor, &[x.into(), y.into(), z.into()])?;
+    Ok(z)
+}
+
+/// `output` is a permutation of `input`: sum 1/(X + x) - sum 1/(X + y) = 0.
+fn shuffle<CS: CircuitBuilder>(cs: &mut CS, input: &[Variable], output: &[Variable]) -> Result<(), R1CSError> {
+    let arg = cs.reciprocal(1)?;
+    for x in input {
+        arg.add(cs, &[(*x).into()])?;
+    }
+    for y in output {
+        arg.sub(cs, &[(*y).into()])?;
+    }
+    Ok(())
+}
+```
+
+Proving and verifying (the tables are created once per statement and shared by all lookups):
+
+```rust,ignore
+let mut transcript = Transcript::new(b"guide");
+transcript.append_u64(b"product", product); // public data not in the constraints
+let mut prover = Prover::new(&pc, &mut transcript);
+prover.set_backend(Backend::Bppp);
+let (ca, va) = prover.commit(Scalar::from(a), blinding_a);
+// ... statement(&mut prover, ...)
+let bp = BulletproofGens::new(prover.cost().gens_capacity(Backend::Bppp), 1);
+let proof = prover.prove(&bp)?;
+
+let mut verifier = Verifier::new(&mut transcript_v);
+verifier.set_backend(proof.backend()); // or require one backend
+let va = verifier.commit(ca);
+// ... the same statement(&mut verifier, ...), with None for the values
+let bp = BulletproofGens::new(verifier.cost().gens_capacity(proof.backend()), 1);
+verifier.verify(&proof, &pc, &bp)?;
+```
+
+`set_backend` may be called at any time before `prove`/`verify`: the builder only records
+operations and lowers them at the end (BP: randomized constraints, spec §7.5; BP++: a
+reciprocal form circuit, §7.6). A proof says which backend made it (`R1CSProof::backend`, and
+`Backend` parses from and prints as `"bp"` / `"bppp"`); a verifier set to the other backend
+rejects it. Accepting either backend means trusting both.
+
+### What things cost
+
+| operation | BP | BP++ |
+|---|---|---|
+| `multiply`, `allocate_multiplier` | 1 multiplier | 1 gate |
+| `allocate` | ½ multiplier | ½ gate (paired into a real gate; reading its wire in a tuple or numerator costs a linear slot) |
+| `witness`, `lookup_value`'s witness | ½ multiplier | no gate (a free slot of `w_O`: a spare output slot of a gate, else a linear slot) |
+| `constrain_product(l, r, out)` | 1 multiplier (as `multiply` + `constrain`) | 1 gate, no linear rows |
+| `constrain(lc)` | free (a row of the randomized combination) | free |
+| `lookup` | 1 second-phase multiplier | 1 gate (+ a linear slot per component that reads a multiplier wire, for 2+ columns) |
+| a table with lookups | `\|T\|/2` multipliers (multiplicities) | `\|T\|` linear slots |
+| a term of a reciprocal argument | 1 second-phase multiplier | 1 gate (+ linear slots for copies, as for `lookup`) |
+| a public term (`add_public`) | free | free |
+
+`cost()` reports both (`gates(backend)`, `linear(backend)`, `gens_capacity(backend)`);
+the verifier can compute it without the witness. BP's capacity is the multipliers rounded up
+to a power of two, plus your own randomized multipliers, which `cost()` does not count. BP++'s
+is `max(gates, linear + 6)`. Proof size grows with the logarithm of both. `metrics()` counts
+only the plain R1CS part.
+
+### Rules and pitfalls
+
+- **Phases.** Builder operations belong to the first phase, and every variable they read must
+  already exist. **BP++ refuses `specify_randomized_constraints`** (a `GadgetError` from the
+  prover and the verifier): write permutations, lookups and multiset checks with `table`,
+  `lookup` and `reciprocal`, not with your own challenges.
+- **Tuples need no range checks.** Both backends compress a tuple with a challenge drawn after
+  its components are committed. A lookup therefore proves the tuple *is* a row, whatever the
+  components are. A reciprocal argument proves that its terms cancel per tuple (a multiset
+  equality).
+- **Tables.** Rows are public `u64`s. A table without lookups costs nothing. Create each table
+  once and share it: its multiplicities are paid once per table.
+- **Reciprocal arguments** are recorded when `reciprocal(m)` is called; terms are validated
+  as they are added; an argument without terms adds nothing.
+- **What the prover refuses.** Errors appear at `prove`, not at the operation:
+
+  | witness fault | BP prover | BP++ prover |
+  |---|---|---|
+  | lookup equal to no row | `GadgetError` | `GadgetError` |
+  | unsatisfied multiplication or reciprocal argument | a proof that does not verify | refused |
+  | violated linear constraint | a proof that does not verify | a proof that does not verify |
+
+- **Binding.** BP++ binds a digest of the lowered circuit; BP does not hash the constraint
+  system. Absorb public statement data that the constraints do not contain into the
+  transcript before `Prover::new` (as `product` above).
+- **Constant time.** Computing the witness values in your gadget is your code: keep it constant
+  time in the secrets. The builder's own multiplicity counting is constant time.
+- **Compatibility.** `Variable::Witness` is a new variant: exhaustive `match`es on `Variable`
+  in downstream code need an arm for it.
+
+### Testing
+
+Use `Prover::prove_with_rng` for deterministic proofs. To test soundness, prove false
+statements with the testing feature `cheats`:
+`r1cs::cheats::with_unchecked_prover(|| prove(...))` makes the prover skip its own checks
+(lookups equal to no row, unsatisfied BP++ circuits), and the verifier must reject the result.
+bpvm (github.com/juja256/bpvm) is a larger example: an RV32IM zkVM written once against
+`CircuitBuilder` and proven with either backend.
 
 ## About
 

@@ -182,6 +182,38 @@ own checks, so that a soundness test can check that the verifier rejects the res
 
 The `secp256k1` feature (this fork) adds the curve secp256k1 (see [Curves](#curves)).
 
+### Prover and verifier optimisations in this fork
+
+Compared to upstream, the R1CS prover needs about 3x less memory and is faster, the
+verifier too, with byte-identical proofs (`tests/golden.rs` pins proof bytes produced by
+upstream `d27dde0` with fixed randomness via `Prover::prove_with_rng`):
+
+- multiscalar multiplications run in chunks over slices (no lookup tables or buffers
+  for all points at once, no copies of the generators);
+- constraints are stored compactly, 8 bytes per term (`r1cs::compact`), on both sides;
+- the vector polynomials `l(X)`, `r(X)` are never materialised: `t(X)` is accumulated per
+  index and `l(x)`, `r(x)` overwrite the witness vectors in place;
+- the inner-product prover computes the first rounds from the input generators and
+  materialises the folded generators once, instead of folding them every round.
+
+The `avx2_backend` feature enables `curve25519-dalek`'s AVX2 backend,
+which implements curve arithmetic using [parallel
+formulas][parallel_edwards].  To use it for Bulletproofs, the
+`target_cpu` must support AVX2:
+
+```text
+RUSTFLAGS="-C target_cpu=skylake" cargo bench --features "avx2_backend"
+```
+
+Skylake-X CPUs have double the AVX2 registers. To use them, try
+
+```text
+RUSTFLAGS="-C target_cpu=skylake-avx512" cargo bench --features "avx2_backend"
+```
+
+This prevents spills in the AVX2 parallel field multiplication code, but causes
+worse code generation elsewhere ¯\\\_(ツ)\_/¯
+
 ## Curves
 
 Every proof of the crate (range, linear, aggregated range proofs, R1CS and the circuit
@@ -265,38 +297,6 @@ Elements displays. The BP range proof does not absorb the value generator into i
 
 These are compatible commitments, not compatible proofs: the proofs are this crate's (BP or
 BP++ with Merlin transcripts), not Elements' own range proof format.
-
-### Prover and verifier optimisations in this fork
-
-Compared to upstream, the R1CS prover needs about 3x less memory and is faster, the
-verifier too, with byte-identical proofs (`tests/golden.rs` pins proof bytes produced by
-upstream `d27dde0` with fixed randomness via `Prover::prove_with_rng`):
-
-- multiscalar multiplications run in chunks over slices (no lookup tables or buffers
-  for all points at once, no copies of the generators);
-- constraints are stored compactly, 8 bytes per term (`r1cs::compact`), on both sides;
-- the vector polynomials `l(X)`, `r(X)` are never materialised: `t(X)` is accumulated per
-  index and `l(x)`, `r(x)` overwrite the witness vectors in place;
-- the inner-product prover computes the first rounds from the input generators and
-  materialises the folded generators once, instead of folding them every round.
-
-The `avx2_backend` feature enables `curve25519-dalek`'s AVX2 backend,
-which implements curve arithmetic using [parallel
-formulas][parallel_edwards].  To use it for Bulletproofs, the
-`target_cpu` must support AVX2:
-
-```text
-RUSTFLAGS="-C target_cpu=skylake" cargo bench --features "avx2_backend"
-```
-
-Skylake-X CPUs have double the AVX2 registers. To use them, try
-
-```text
-RUSTFLAGS="-C target_cpu=skylake-avx512" cargo bench --features "avx2_backend"
-```
-
-This prevents spills in the AVX2 parallel field multiplication code, but causes
-worse code generation elsewhere ¯\\\_(ツ)\_/¯
 
 ## Bulletproofs++ (experimental)
 
@@ -424,17 +424,77 @@ A gadget is a function that adds variables and constraints to a constraint syste
 fork the same gadget code is proven with Bulletproofs (BP) or Bulletproofs++ (BP++), chosen per
 proof with `set_backend`. The complete example below is `tests/guide.rs`.
 
-### The traits
+### The building blocks
 
-| trait | operations | backends |
-|---|---|---|
-| `ConstraintSystem` (upstream) | `multiply(l, r)`, `allocate(v)`, `allocate_multiplier(l, r)`, `constrain(lc)`, `metrics()` | both |
-| `RandomizableConstraintSystem` (upstream) | `specify_randomized_constraints(f)`: a second phase with challenges | **BP only** |
-| `CircuitBuilder` (this fork, spec §7) | `witness(v)`, `constrain_product(l, r, out)`, `table(rows)`, `lookup(t, tuple)`, `lookup_value(t, v)`, `reciprocal(m)` with `Reciprocal::{add, sub, add_weighted, add_public}`, `cost()` | both |
+A **`Variable`** is a wire of the circuit: a committed input, a multiplication wire, a free
+witness or the constant one. A **`LinearCombination`** is a weighted sum of variables plus a
+constant, such as `x - lo - hi * 256`. Constraints are statements about linear combinations.
+The prover knows the value of every variable; the verifier knows none and only checks the
+proof.
 
-`CircuitBuilder: ConstraintSystem`, and both are implemented by `Prover` and `Verifier`, so
-one gadget mixes plain R1CS and builder operations on the same variables, and existing
-gadgets keep working unchanged. `CircuitBuilder` is object safe (`&mut dyn CircuitBuilder`).
+Every operation below is called by both roles. The prover passes the values (`Some(v)`), the
+verifier passes `None`, and both must issue the same calls in the same order: the sequence of
+calls *is* the statement.
+
+### `ConstraintSystem`: plain R1CS (upstream, both backends)
+
+| method | what it does |
+|---|---|
+| `multiply(l, r)` | Creates a multiplication gate: three new wires `(left, right, out)` with `out = left * right`, and ties `left = l`, `right = r`. Use it to compute a product of two linear combinations; `out` is the product. |
+| `allocate(v)` | Creates one new wire with the prover's value `v` and no constraint on it. Two consecutive `allocate`s share one multiplication gate (as its left and right inputs). Constrain the wire yourself. |
+| `allocate_multiplier(Some((a, b)))` | Creates a multiplication gate from the values `a`, `b` directly: wires `(left, right, out)` with `out = a * b`, without linear combinations as inputs. |
+| `constrain(lc)` | Asserts `lc = 0`. Free on both backends: it adds a row to the linear part, no gate. |
+| `eval(lc)` | The value of a linear combination: `Some` for the prover, `None` for the verifier. For computing the witness inside a gadget. |
+| `transcript()` | The Fiat–Shamir transcript, to bind extra public data into the proof. |
+| `metrics()` | Counts multipliers and constraints of the plain R1CS part. |
+
+### `RandomizableConstraintSystem`: constraints with challenges (upstream, BP only)
+
+| method | what it does |
+|---|---|
+| `specify_randomized_constraints(\|cs\| ..)` | Defers a closure to a second phase that runs after every first-phase wire is committed. Inside, `cs.challenge_scalar(label)` returns a random challenge bound to those wires, for checks that need randomness (permutations, polynomial identities). **BP++ refuses it**: use `lookup` and `reciprocal` instead. |
+
+### `CircuitBuilder`: lookups and multiset arguments (this fork, both backends)
+
+`CircuitBuilder` extends `ConstraintSystem`, so one gadget mixes both on the same variables.
+Its operations are recorded and lowered at `prove`/`verify` to whichever backend is chosen.
+
+| method | what it does |
+|---|---|
+| `witness(v)` | A free wire with the prover's value `v` and no constraint. Like `allocate`, but cheaper on BP++ (no gate). The default choice for values you constrain yourself. |
+| `constrain_product(l, r, out)` | Asserts `l * r = out` for three linear combinations, without creating wires. Use it when the product already has a name (for example `out` is a witness). |
+| `table(rows)` | Declares a public table: a list of rows of equal length (`u64` entries), such as all bytes `{0..255}` or all triples `(a, b, a ^ b)`. Returns a `TableId`. Costs nothing until it is looked up; create each table once and share it. |
+| `lookup(t, tuple)` | Asserts that the tuple of linear combinations is a row of table `t`, column by column. The components need no separate range checks: a lookup into a byte table also proves "this is a byte". |
+| `lookup_value(t, v)` | A new witness that must be an entry of the one-column table `t`: `witness` + `lookup` in one call, the usual way to get a bounded value (a byte, a nibble). |
+| `reciprocal(m)` | Starts a reciprocal (logUp-style) argument over tuples of `m` columns and returns a handle. The argument asserts that its terms `num / (X + tuple)` sum to zero for every `X`, i.e. they cancel tuple by tuple. That is a multiset equality: permutations, memory consistency, a bus between parts of a circuit. |
+| `reciprocal_term(r, num, tuple)`, `reciprocal_public(r, coeff, row)` | The low-level way to add terms to an argument; the handle methods below are the usual way. |
+| `cost()` | The circuit's size so far on each backend: `gates(backend)`, `linear(backend)`, `gens_capacity(backend)` (the `BulletproofGens` capacity to create). The verifier can compute it too. |
+
+The handle returned by `reciprocal(m)` adds terms:
+
+| method | what it does |
+|---|---|
+| `arg.add(cs, tuple)` | Adds `+1 / (X + tuple)`: the tuple goes into the multiset once. |
+| `arg.sub(cs, tuple)` | Adds `-1 / (X + tuple)`: the tuple comes out of the multiset once. |
+| `arg.add_weighted(cs, num, tuple)` | Adds `num / (X + tuple)`: the tuple `num` times (a multiplicity that is itself a linear combination). |
+| `arg.add_public(cs, coeff, row)` | Adds `coeff / (X + row)` for a public row: for example the initial contents of a memory known to both sides. |
+
+So `output` is a permutation of `input` when the argument with `add(x)` for every input and
+`sub(y)` for every output cancels.
+
+### `Prover` and `Verifier`
+
+| method | what it does |
+|---|---|
+| `Prover::new(&pc_gens, transcript)` | A prover over the curve of the Pedersen generators. |
+| `Verifier::new(transcript)`, `Verifier::<_, C>::for_curve(transcript)` | A verifier over ristretto255, or over any curve `C`. |
+| `prover.commit(v, blinding)` | Commits to a secret input: returns the public commitment `V = v * B + blinding * B_blinding` and the variable that stands for `v` in the circuit. |
+| `verifier.commit(V)` | The verifier's side: the variable for the committed input `V`. |
+| `set_backend(Backend::Bp \| Backend::Bppp)` | Chooses the proof system; any time before `prove`/`verify`. |
+| `prover.prove(&bp_gens)`, `prove_with_rng(&bp_gens, rng)` | Lowers the recorded circuit and proves it. Fails if a lookup or (on BP++) a multiplication is not satisfied. |
+| `verifier.verify(&proof, &pc_gens, &bp_gens)` | Checks the proof against the same circuit. |
+
+### Gadgets over any curve
 
 All three traits take the scalar field as a parameter that defaults to ristretto255's:
 `ConstraintSystem<F = Scalar>`, `CircuitBuilder<F = Scalar>`. A gadget written as
@@ -452,11 +512,11 @@ curve. In generic code:
   `Verifier::new(..)` is the ristretto255 verifier, `Verifier::<_, C>::for_curve(..)` the one
   over `C`.
 
-### One gadget, two roles
+### An example
 
-The prover passes the values (`Some(v)`), the verifier `None`; both must issue the same
-operations in the same order. Committed values come from `Prover::commit(v, blinding)` /
-`Verifier::commit(V)` before the gadget runs and are passed in as `Variable`s.
+Committed values come from `Prover::commit(v, blinding)` / `Verifier::commit(V)` before the
+gadget runs and are passed in as `Variable`s. `CircuitBuilder` is object safe
+(`&mut dyn CircuitBuilder`).
 
 ```rust,ignore
 /// `x < 2^16`: two byte lookups. `v` is the prover's value (`None` for the verifier).
@@ -570,13 +630,15 @@ Use `Prover::prove_with_rng` for deterministic proofs. To test soundness, prove 
 statements with the testing feature `cheats`:
 `r1cs::cheats::with_unchecked_prover(|| prove(...))` makes the prover skip its own checks
 (lookups equal to no row, unsatisfied BP++ circuits), and the verifier must reject the result.
-bpvm (github.com/juja256/bpvm) is a larger example: an RV32IM zkVM written once against
+[bpvm](https://github.com/juja256/bpvm) is a larger example: an RV32IM zkVM written once against
 `CircuitBuilder` and proven with either backend.
 
 ## About
 
-This is a research project sponsored by [Interstellar][interstellar],
-developed by Henry de Valence, Cathie Yun, and Oleg Andreev.
+The original library, [dalek-cryptography/bulletproofs](https://github.com/dalek-cryptography/bulletproofs)
+(continued at [zkcrypto/bulletproofs](https://github.com/zkcrypto/bulletproofs)), was developed
+by Henry de Valence, Cathie Yun and Oleg Andreev as a research project sponsored by
+[Interstellar][interstellar]. This repository is a research project built on it.
 
 [bp_website]: https://crypto.stanford.edu/bulletproofs/
 [ristretto]: https://ristretto.group

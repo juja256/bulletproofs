@@ -59,7 +59,7 @@ impl<C: Curve> InnerProductProof<C> {
     ///
     /// The lengths of the vectors must all be the same, and must all be
     /// either 0 or a power of 2.
-    pub fn create<X: TranscriptBackend>(
+    pub fn create<X: TranscriptBackend + ?Sized>(
         transcript: &mut X,
         Q: &C::Point,
         G_factors: &[C::Scalar],
@@ -73,7 +73,7 @@ impl<C: Curve> InnerProductProof<C> {
     }
 
     /// As [`InnerProductProof::create`], but reads the generators from slices.
-    pub fn create_from_slices<X: TranscriptBackend>(
+    pub fn create_from_slices<X: TranscriptBackend + ?Sized>(
         transcript: &mut X,
         Q: &C::Point,
         G_factors: &[C::Scalar],
@@ -108,7 +108,7 @@ impl<C: Curve> InnerProductProof<C> {
     /// The folded generators are then materialised once, each as a \\(2^r\\)-term combination,
     /// and the remaining rounds fold as usual. The proof is the same as with folding in every
     /// round; the input generators are not copied and only \\(2n/2^r\\) points are allocated.
-    pub(crate) fn create_with_factor_fns<GF, HF, X: TranscriptBackend>(
+    pub(crate) fn create_with_factor_fns<GF, HF, X: TranscriptBackend + ?Sized>(
         transcript: &mut X,
         Q: &C::Point,
         gf: GF,
@@ -262,7 +262,7 @@ impl<C: Curve> InnerProductProof<C> {
     /// Computes three vectors of verification scalars \\([u\_{i}^{2}]\\), \\([u\_{i}^{-2}]\\) and \\([s\_{i}]\\) for combined multiscalar multiplication
     /// in a parent protocol. See [inner product protocol notes](index.html#verification-equation) for details.
     /// The verifier must provide the input length \\(n\\) explicitly to avoid unbounded allocation within the inner product proof.
-    pub(crate) fn verification_scalars<X: TranscriptBackend>(
+    pub(crate) fn verification_scalars<X: TranscriptBackend + ?Sized>(
         &self,
         n: usize,
         transcript: &mut X,
@@ -337,7 +337,7 @@ impl<C: Curve> InnerProductProof<C> {
     /// method to combine inner product verification with other checks
     /// in a single multiscalar multiplication.
     #[allow(dead_code)]
-    pub fn verify<IG, IH, X: TranscriptBackend>(
+    pub fn verify<IG, IH, X: TranscriptBackend + ?Sized>(
         &self,
         n: usize,
         transcript: &mut X,

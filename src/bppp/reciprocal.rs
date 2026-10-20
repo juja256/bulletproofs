@@ -632,7 +632,7 @@ impl<F: Field> ReciprocalCircuit<F> {
 }
 
 /// Absorb the statement (spec §4.4); returns the circuit digest.
-fn absorb_statement<C: Curve, T: BpppTranscript>(t: &mut T, c: &ReciprocalCircuit<C::Scalar>, gens: &BpppGens<C>, V: &[C::Compressed]) -> [u8; 32] {
+fn absorb_statement<C: Curve, T: BpppTranscript + ?Sized>(t: &mut T, c: &ReciprocalCircuit<C::Scalar>, gens: &BpppGens<C>, V: &[C::Compressed]) -> [u8; 32] {
     let v2 = c.uses_eta();
     t.domain_sep(if v2 { b"bppp-reciprocal v2" } else { b"bppp-reciprocal v1" });
     let labels: [&'static [u8]; 10] =
@@ -653,7 +653,7 @@ fn check_gens<C: Curve>(c: &ReciprocalCircuit<C::Scalar>, gens: &BpppGens<C>) ->
 /// Prove that `w` satisfies the reciprocal form circuit `c` for the input commitments `V`
 /// (spec §4.3). Generators: [`BpppGens::new`] with `n_lin` and `n_p + n_m`. Returns an error if
 /// `alpha + w_D,i = 0` (probability `n_p / 2^252`) or the witness does not satisfy `c`.
-pub(crate) fn prove<C: Curve, T: BpppTranscript, R: RngCore + CryptoRng>(
+pub(crate) fn prove<C: Curve, T: BpppTranscript + ?Sized, R: RngCore + CryptoRng>(
     c: &ReciprocalCircuit<C::Scalar>,
     gens: &BpppGens<C>,
     V: &[C::Compressed],
@@ -666,7 +666,7 @@ pub(crate) fn prove<C: Curve, T: BpppTranscript, R: RngCore + CryptoRng>(
 
 /// [`prove`]; with `require_satisfied = false` an unsatisfied witness is proven instead of
 /// refused (feature `cheats` of the R1CS front end: such a proof must not verify).
-pub(crate) fn prove_checked<C: Curve, T: BpppTranscript, R: RngCore + CryptoRng>(
+pub(crate) fn prove_checked<C: Curve, T: BpppTranscript + ?Sized, R: RngCore + CryptoRng>(
     c: &ReciprocalCircuit<C::Scalar>,
     gens: &BpppGens<C>,
     V: &[C::Compressed],
@@ -680,7 +680,7 @@ pub(crate) fn prove_checked<C: Curve, T: BpppTranscript, R: RngCore + CryptoRng>
 
 /// The prover's RNG from the transcript, the digest and the initial witness (spec §1; the late
 /// values are not known to the two-phase prover before `alpha`, and both provers must agree).
-fn rekeyed<F: Field, T: BpppTranscript, R: RngCore + CryptoRng>(t: &T, c: &ReciprocalCircuit<F>, digest: &[u8; 32], w: &ReciprocalWitness<F>, rng: &mut R) -> merlin::TranscriptRng {
+fn rekeyed<F: Field, T: BpppTranscript + ?Sized, R: RngCore + CryptoRng>(t: &T, c: &ReciprocalCircuit<F>, digest: &[u8; 32], w: &ReciprocalWitness<F>, rng: &mut R) -> merlin::TranscriptRng {
     let early_o = w.w_o.iter().zip(&c.partition).filter(|(_, (s, _))| *s != Slot::LinR).map(|(x, _)| x);
     // tuple poles are not known before eta: hashed as 0 (spec §1)
     let mut w_d = w.w_d.clone();
@@ -694,7 +694,7 @@ fn rekeyed<F: Field, T: BpppTranscript, R: RngCore + CryptoRng>(t: &T, c: &Recip
 /// The prover with the caller's RNG as is (the reference vectors replay its values), and an
 /// unsatisfied witness proven unless `require_satisfied` (tests).
 #[cfg(test)]
-pub(crate) fn prove_impl<C: Curve, T: BpppTranscript, R: RngCore + CryptoRng>(
+pub(crate) fn prove_impl<C: Curve, T: BpppTranscript + ?Sized, R: RngCore + CryptoRng>(
     c: &ReciprocalCircuit<C::Scalar>,
     gens: &BpppGens<C>,
     V: &[C::Compressed],
@@ -715,7 +715,7 @@ impl<C: Curve> ReciprocalProof<C> {
     /// Prove that `w` satisfies `c` for the input commitments `V` (spec §4.3). Generators:
     /// [`ReciprocalCircuit::gens`]. An error if `alpha + w_D,i = 0` (probability
     /// `n_p / 2^252`) or if the witness does not satisfy `c`.
-    pub fn prove<T: BpppTranscript, R: RngCore + CryptoRng>(
+    pub fn prove<T: BpppTranscript + ?Sized, R: RngCore + CryptoRng>(
         c: &ReciprocalCircuit<C::Scalar>,
         gens: &BpppGens<C>,
         V: &[C::Compressed],
@@ -740,7 +740,7 @@ impl<C: Curve> ReciprocalProof<C> {
         rng: &mut R,
     ) -> Result<Self, ProofError>
     where
-        T: BpppTranscript,
+        T: BpppTranscript + ?Sized,
         R: RngCore + CryptoRng,
         LF: FnOnce(C::Scalar, &[C::Scalar]) -> Result<LateWitness<C::Scalar>, ProofError>,
     {
@@ -748,7 +748,7 @@ impl<C: Curve> ReciprocalProof<C> {
     }
 
     /// Verify for the circuit `c` and the input commitments `V`.
-    pub fn verify<T: BpppTranscript>(&self, c: &ReciprocalCircuit<C::Scalar>, gens: &BpppGens<C>, V: &[C::Compressed], transcript: &mut T) -> Result<(), ProofError> {
+    pub fn verify<T: BpppTranscript + ?Sized>(&self, c: &ReciprocalCircuit<C::Scalar>, gens: &BpppGens<C>, V: &[C::Compressed], transcript: &mut T) -> Result<(), ProofError> {
         verify(&self.0, c, gens, V, transcript)
     }
 
@@ -789,7 +789,7 @@ pub(crate) fn prove_two_phase<C, T, R, LF>(
 ) -> Result<CircuitProof<C>, ProofError>
 where
     C: Curve,
-    T: BpppTranscript,
+    T: BpppTranscript + ?Sized,
     R: RngCore + CryptoRng,
     LF: FnOnce(C::Scalar, &[C::Scalar]) -> Result<LateWitness<C::Scalar>, ProofError>,
 {
@@ -811,7 +811,7 @@ fn prove_with<C, T, R, LF, G>(
 ) -> Result<CircuitProof<C>, ProofError>
 where
     C: Curve,
-    T: BpppTranscript,
+    T: BpppTranscript + ?Sized,
     R: RngCore + CryptoRng,
     LF: FnOnce(C::Scalar, &[C::Scalar]) -> Result<LateWitness<C::Scalar>, ProofError>,
     G: FnOnce(&T, &[u8; 32]) -> R,
@@ -863,7 +863,7 @@ where
 }
 
 /// Verify a reciprocal form proof (spec §4.3).
-pub(crate) fn verify<C: Curve, T: BpppTranscript>(
+pub(crate) fn verify<C: Curve, T: BpppTranscript + ?Sized>(
     proof: &CircuitProof<C>,
     c: &ReciprocalCircuit<C::Scalar>,
     gens: &BpppGens<C>,
@@ -874,7 +874,7 @@ pub(crate) fn verify<C: Curve, T: BpppTranscript>(
 }
 
 /// [`verify`] up to the multiscalar multiplication, for batch verification.
-pub(crate) fn terms<C: Curve, T: BpppTranscript>(
+pub(crate) fn terms<C: Curve, T: BpppTranscript + ?Sized>(
     proof: &CircuitProof<C>,
     c: &ReciprocalCircuit<C::Scalar>,
     gens: &BpppGens<C>,

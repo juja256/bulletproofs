@@ -135,7 +135,7 @@ impl<C: Curve> WnlaStatement<'_, C> {
     }
 }
 
-fn absorb_header<C: Curve, T: BpppTranscript>(transcript: &mut T, a: usize, b: usize) {
+fn absorb_header<C: Curve, T: BpppTranscript + ?Sized>(transcript: &mut T, a: usize, b: usize) {
     transcript.domain_sep(b"bppp-wnla v1");
     transcript.curve_domain_sep::<C>();
     transcript.append_u64(b"l", a as u64);
@@ -143,7 +143,7 @@ fn absorb_header<C: Curve, T: BpppTranscript>(transcript: &mut T, a: usize, b: u
 }
 
 /// Absorb the public input of a standalone argument (spec §2.3).
-fn absorb_statement<C: Curve, T: BpppTranscript>(transcript: &mut T, st: &WnlaStatement<C>, com: &C::Compressed) {
+fn absorb_statement<C: Curve, T: BpppTranscript + ?Sized>(transcript: &mut T, st: &WnlaStatement<C>, com: &C::Compressed) {
     transcript.domain_sep(b"bppp-wnla-statement v1");
     transcript.append_point(b"G", &C::compress(st.g));
     transcript.append_point(b"C", com);
@@ -152,7 +152,7 @@ fn absorb_statement<C: Curve, T: BpppTranscript>(transcript: &mut T, st: &WnlaSt
 }
 
 /// [`WnlaProof::prove`].
-pub(crate) fn prove<C: Curve, T: BpppTranscript>(
+pub(crate) fn prove<C: Curve, T: BpppTranscript + ?Sized>(
     st: &WnlaStatement<C>,
     com: &C::Point,
     transcript: &mut T,
@@ -169,7 +169,7 @@ pub(crate) fn prove<C: Curve, T: BpppTranscript>(
 /// computing `C` explicitly would cost a full multiscalar multiplication. `vartime` computes
 /// the round commitments in variable time (only for inputs that are uniformly random given
 /// the transcript, spec §2.6).
-pub(crate) fn prove_unbound<C: Curve, T: BpppTranscript>(
+pub(crate) fn prove_unbound<C: Curve, T: BpppTranscript + ?Sized>(
     st: &WnlaStatement<C>,
     transcript: &mut T,
     l: Vec<C::Scalar>,
@@ -259,7 +259,7 @@ impl<'a, C: Curve> Deferred<'a, C> {
     }
 }
 
-fn prove_rounds<C: Curve, T: BpppTranscript>(
+fn prove_rounds<C: Curve, T: BpppTranscript + ?Sized>(
     st: &WnlaStatement<C>,
     transcript: &mut T,
     l: Vec<C::Scalar>,
@@ -346,7 +346,7 @@ impl<C: Curve> WnlaProof<C> {
     /// Replay the transcript and compute the scalars of the final check for `|l| = c.len()`,
     /// `|n| = b`. Does not absorb the statement: the counterpart of [`prove_unbound`], for
     /// the circuit protocol.
-    pub(crate) fn verification_scalars<T: BpppTranscript>(
+    pub(crate) fn verification_scalars<T: BpppTranscript + ?Sized>(
         &self,
         c: &[C::Scalar],
         rho: C::Scalar,
@@ -407,7 +407,7 @@ impl<C: Curve> WnlaProof<C> {
 
     /// Prove knowledge of the opening `(l, n)` of `C`. Absorbs `G`, `C`, `rho` and `c` before the
     /// rounds, so the challenges bind the whole statement.
-    pub fn prove<T: BpppTranscript>(
+    pub fn prove<T: BpppTranscript + ?Sized>(
         st: &WnlaStatement<C>,
         com: &C::Point,
         transcript: &mut T,
@@ -419,7 +419,7 @@ impl<C: Curve> WnlaProof<C> {
 
     /// Verify against the commitment `C`; absorbs `G`, `C`, `rho` and `c` like
     /// [`WnlaProof::prove`].
-    pub fn verify<T: BpppTranscript>(
+    pub fn verify<T: BpppTranscript + ?Sized>(
         &self,
         st: &WnlaStatement<C>,
         com: &C::Point,

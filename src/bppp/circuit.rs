@@ -363,7 +363,7 @@ fn commit<C: Curve>(gens: &BpppGens<C>, r: &[C::Scalar; 8], l: &[C::Scalar], n: 
 }
 
 /// Absorb the statement (spec §3.8); returns the circuit digest.
-fn absorb_statement<C: Curve, T: BpppTranscript>(t: &mut T, c: &ArithmeticCircuit<C::Scalar>, gens: &BpppGens<C>, V: &[C::Compressed]) -> [u8; 32] {
+fn absorb_statement<C: Curve, T: BpppTranscript + ?Sized>(t: &mut T, c: &ArithmeticCircuit<C::Scalar>, gens: &BpppGens<C>, V: &[C::Compressed]) -> [u8; 32] {
     t.domain_sep(b"bppp-circuit v1");
     let labels: [&'static [u8]; 8] = [b"N_m", b"N_O", b"N_v", b"N_lin", b"k", b"N_l", b"f_l", b"f_m"];
     for (label, x) in labels.iter().zip(c.dims()) {
@@ -376,7 +376,7 @@ fn absorb_statement<C: Curve, T: BpppTranscript>(t: &mut T, c: &ArithmeticCircui
 /// generators `G`, `H_0`, the circuit digest and the inputs; returns the digest. The value and
 /// blinding generators may be application-specific (asset generators), so they are part of
 /// the statement; the others are the fixed setup.
-pub(crate) fn absorb_tail<C: Curve, T: BpppTranscript>(t: &mut T, gens: &BpppGens<C>, digest: [u8; 32], V: &[C::Compressed]) -> [u8; 32] {
+pub(crate) fn absorb_tail<C: Curve, T: BpppTranscript + ?Sized>(t: &mut T, gens: &BpppGens<C>, digest: [u8; 32], V: &[C::Compressed]) -> [u8; 32] {
     t.curve_domain_sep::<C>();
     t.append_point(b"G", &C::compress(&gens.g));
     t.append_point(b"H_0", &C::compress(&gens.h[0]));
@@ -388,7 +388,7 @@ pub(crate) fn absorb_tail<C: Curve, T: BpppTranscript>(t: &mut T, gens: &BpppGen
 }
 
 /// A challenge that must be invertible (zero has probability `2^-252`).
-fn nonzero<F: Field, T: BpppTranscript>(t: &mut T, label: &'static [u8]) -> Result<F, ProofError> {
+fn nonzero<F: Field, T: BpppTranscript + ?Sized>(t: &mut T, label: &'static [u8]) -> Result<F, ProofError> {
     let x: F = t.challenge(label);
     if x == F::ZERO {
         Err(ProofError::VerificationError)
@@ -398,7 +398,7 @@ fn nonzero<F: Field, T: BpppTranscript>(t: &mut T, label: &'static [u8]) -> Resu
 }
 
 /// [`CircuitProof::prove`].
-pub(crate) fn prove<C: Curve, T: BpppTranscript, R: RngCore + CryptoRng>(
+pub(crate) fn prove<C: Curve, T: BpppTranscript + ?Sized, R: RngCore + CryptoRng>(
     c: &ArithmeticCircuit<C::Scalar>,
     gens: &BpppGens<C>,
     V: &[C::Compressed],
@@ -423,7 +423,7 @@ fn prove_impl<C, T, R, RF>(
 ) -> Result<CircuitProof<C>, ProofError>
 where
     C: Curve,
-    T: BpppTranscript,
+    T: BpppTranscript + ?Sized,
     R: RngCore + CryptoRng,
     RF: FnOnce(&T, &[u8; 32]) -> R,
 {
@@ -539,7 +539,7 @@ pub(crate) fn commit_r<C: Curve, R: RngCore + CryptoRng>(
 
 /// The inner protocol (spec §3.4–3.7), from the challenge `rho` on; the caller has absorbed
 /// the statement and `C_L`, `C_R`, `C_O`. The witness and circuit must be checked.
-pub(crate) fn prove_inner<C: Curve, T: BpppTranscript, R: RngCore + CryptoRng>(
+pub(crate) fn prove_inner<C: Curve, T: BpppTranscript + ?Sized, R: RngCore + CryptoRng>(
     c: &ArithmeticCircuit<C::Scalar>,
     gens: &BpppGens<C>,
     w: &CircuitWitness<C::Scalar>,
@@ -633,7 +633,7 @@ impl<C: Curve> CircuitProof<C> {
     /// [`BpppGens::commit_input`]`(v_i, s_i)`). Absorbs the dimensions, the generators `G` and
     /// `H_0`, the circuit digest and `V` (spec §3.8). Returns `Err(VerificationError)` if the
     /// witness does not satisfy the circuit (the value term of spec §3.5 is non-zero).
-    pub fn prove<T: BpppTranscript, R: RngCore + CryptoRng>(
+    pub fn prove<T: BpppTranscript + ?Sized, R: RngCore + CryptoRng>(
         c: &ArithmeticCircuit<C::Scalar>,
         gens: &BpppGens<C>,
         V: &[C::Compressed],
@@ -646,7 +646,7 @@ impl<C: Curve> CircuitProof<C> {
 
     /// Verify the proof for circuit `c` and input commitments `V`; absorbs the same statement
     /// as [`CircuitProof::prove`].
-    pub fn verify<T: BpppTranscript>(
+    pub fn verify<T: BpppTranscript + ?Sized>(
         &self,
         c: &ArithmeticCircuit<C::Scalar>,
         gens: &BpppGens<C>,
@@ -658,7 +658,7 @@ impl<C: Curve> CircuitProof<C> {
 
     /// The terms of the verification equation (spec §3.7) of [`CircuitProof::verify`], for
     /// batch verification.
-    pub(crate) fn terms<T: BpppTranscript>(
+    pub(crate) fn terms<T: BpppTranscript + ?Sized>(
         &self,
         c: &ArithmeticCircuit<C::Scalar>,
         gens: &BpppGens<C>,
@@ -679,7 +679,7 @@ impl<C: Curve> CircuitProof<C> {
 
     /// The terms of the inner verification (spec §3.7), from the challenge `rho` on; the caller
     /// has checked the shapes and absorbed the statement and `C_L`, `C_R`, `C_O`.
-    pub(crate) fn inner_terms<T: BpppTranscript>(
+    pub(crate) fn inner_terms<T: BpppTranscript + ?Sized>(
         &self,
         c: &ArithmeticCircuit<C::Scalar>,
         V: &[C::Compressed],

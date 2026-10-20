@@ -35,7 +35,7 @@ impl<C: Curve> LinearProof<C> {
     ///
     /// The lengths of the vectors must all be the same, and must all be either 0 or a power of 2.
     /// The proof is created with respect to the bases \\(G\\).
-    pub fn create<T: RngCore + CryptoRng, X: TranscriptBackend>(
+    pub fn create<T: RngCore + CryptoRng, X: TranscriptBackend + ?Sized>(
         transcript: &mut X,
         rng: &mut T,
         // Commitment to witness
@@ -138,7 +138,7 @@ impl<C: Curve> LinearProof<C> {
         })
     }
 
-    pub fn verify<X: TranscriptBackend>(
+    pub fn verify<X: TranscriptBackend + ?Sized>(
         &self,
         transcript: &mut X,
         // Commitment to witness
@@ -208,7 +208,7 @@ impl<C: Curve> LinearProof<C> {
     }
 
     /// Appends the public data to the transcript.
-    fn append_statement<X: TranscriptBackend>(
+    fn append_statement<X: TranscriptBackend + ?Sized>(
         transcript: &mut X,
         commitment: &C::Compressed,
         b_vec: &[C::Scalar],
@@ -234,7 +234,7 @@ impl<C: Curve> LinearProof<C> {
     /// Also computes \\(b_0\\) which is the base case for public vector \\(b\\).
     ///
     /// The verifier must provide the input length \\(n\\) explicitly to avoid unbounded allocation.
-    pub(crate) fn verification_scalars<X: TranscriptBackend>(
+    pub(crate) fn verification_scalars<X: TranscriptBackend + ?Sized>(
         &self,
         n: usize,
         transcript: &mut X,

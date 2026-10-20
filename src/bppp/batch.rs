@@ -40,7 +40,7 @@ impl<'a, C: Curve, R: RngCore + CryptoRng> BatchVerifier<'a, C, R> {
 
     /// Add an arithmetic circuit proof ([`CircuitProof::verify`]); `gens` must come from this
     /// batch's `PedersenGens` and `BulletproofGens`.
-    pub fn add_circuit<T: BpppTranscript>(
+    pub fn add_circuit<T: BpppTranscript + ?Sized>(
         &mut self,
         proof: &CircuitProof<C>,
         c: &ArithmeticCircuit<C::Scalar>,
@@ -54,7 +54,7 @@ impl<'a, C: Curve, R: RngCore + CryptoRng> BatchVerifier<'a, C, R> {
     }
 
     /// Add a reciprocal form proof ([`ReciprocalProof::verify`]).
-    pub fn add_reciprocal<T: BpppTranscript>(
+    pub fn add_reciprocal<T: BpppTranscript + ?Sized>(
         &mut self,
         proof: &ReciprocalProof<C>,
         c: &ReciprocalCircuit<C::Scalar>,
@@ -68,7 +68,7 @@ impl<'a, C: Curve, R: RngCore + CryptoRng> BatchVerifier<'a, C, R> {
     }
 
     /// Add a range proof ([`RangeProof::verify`]).
-    pub fn add_range<T: BpppTranscript>(
+    pub fn add_range<T: BpppTranscript + ?Sized>(
         &mut self,
         proof: &RangeProof<C>,
         st: &RangeStatement,
@@ -81,7 +81,7 @@ impl<'a, C: Curve, R: RngCore + CryptoRng> BatchVerifier<'a, C, R> {
     }
 
     /// Add a multi-asset transaction proof ([`MactProof::verify`]).
-    pub fn add_mact<T: BpppTranscript>(
+    pub fn add_mact<T: BpppTranscript + ?Sized>(
         &mut self,
         proof: &MactProof<C>,
         st: &MactStatement,

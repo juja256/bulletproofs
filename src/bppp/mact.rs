@@ -160,7 +160,7 @@ impl MactStatement {
     }
 
     /// The circuit and generators for verification, with the domain separator absorbed.
-    fn setup<'a, C: Curve, T: BpppTranscript>(&self, pc: &PedersenGens<C>, bp: &'a BulletproofGens<C>, t: &mut T) -> Result<(ReciprocalCircuit<C::Scalar>, BpppGens<'a, C>), ProofError> {
+    fn setup<'a, C: Curve, T: BpppTranscript + ?Sized>(&self, pc: &PedersenGens<C>, bp: &'a BulletproofGens<C>, t: &mut T) -> Result<(ReciprocalCircuit<C::Scalar>, BpppGens<'a, C>), ProofError> {
         let (c, _) = self.circuit();
         let g = c.gens(pc, bp)?;
         t.domain_sep(b"bppp-mact v1");
@@ -196,7 +196,7 @@ impl<C: Curve> MactProof<C> {
     /// Prove that `inputs` and `outputs` balance per asset type and that the outputs are in
     /// range; returns the proof and the commitments (inputs, then outputs). Fails if they do
     /// not balance. Input amounts are not range-checked (see the module documentation).
-    pub fn prove<T: BpppTranscript, R: RngCore + CryptoRng>(
+    pub fn prove<T: BpppTranscript + ?Sized, R: RngCore + CryptoRng>(
         st: &MactStatement,
         pc: &PedersenGens<C>,
         bp: &BulletproofGens<C>,
@@ -222,7 +222,7 @@ impl<C: Curve> MactProof<C> {
 
     /// Verify against the commitments `V` (inputs, then outputs). Sound only if the input
     /// commitments are known to open to amounts in `[0, 2^64)` (see the module documentation).
-    pub fn verify<T: BpppTranscript>(
+    pub fn verify<T: BpppTranscript + ?Sized>(
         &self,
         st: &MactStatement,
         pc: &PedersenGens<C>,
@@ -235,7 +235,7 @@ impl<C: Curve> MactProof<C> {
     }
 
     /// [`Self::verify`] up to the multiscalar multiplication, for batch verification.
-    pub(crate) fn terms<T: BpppTranscript>(
+    pub(crate) fn terms<T: BpppTranscript + ?Sized>(
         &self,
         st: &MactStatement,
         pc: &PedersenGens<C>,

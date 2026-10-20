@@ -240,7 +240,7 @@ impl RangeStatement {
     }
 
     /// The circuit and generators for verification, with the domain separator absorbed.
-    fn setup<'a, C: Curve, T: BpppTranscript>(&self, pc: &PedersenGens<C>, bp: &'a BulletproofGens<C>, t: &mut T) -> Result<(ReciprocalCircuit<C::Scalar>, BpppGens<'a, C>), ProofError> {
+    fn setup<'a, C: Curve, T: BpppTranscript + ?Sized>(&self, pc: &PedersenGens<C>, bp: &'a BulletproofGens<C>, t: &mut T) -> Result<(ReciprocalCircuit<C::Scalar>, BpppGens<'a, C>), ProofError> {
         let (c, _) = self.circuit();
         let g = c.gens(pc, bp)?;
         t.domain_sep(b"bppp-range v1");
@@ -255,7 +255,7 @@ pub struct RangeProof<C: Curve = Ristretto>(pub(crate) CircuitProof<C>);
 impl<C: Curve> RangeProof<C> {
     /// Prove `values[i] in [A_i, B_i)` for commitments `values[i] B + blindings[i] B_blinding`;
     /// returns the proof and the commitments. `FormatError` if a value is out of its range.
-    pub fn prove<T: BpppTranscript, R: RngCore + CryptoRng>(
+    pub fn prove<T: BpppTranscript + ?Sized, R: RngCore + CryptoRng>(
         st: &RangeStatement,
         pc: &PedersenGens<C>,
         bp: &BulletproofGens<C>,
@@ -282,7 +282,7 @@ impl<C: Curve> RangeProof<C> {
     }
 
     /// Verify against the commitments `V`.
-    pub fn verify<T: BpppTranscript>(
+    pub fn verify<T: BpppTranscript + ?Sized>(
         &self,
         st: &RangeStatement,
         pc: &PedersenGens<C>,
@@ -295,7 +295,7 @@ impl<C: Curve> RangeProof<C> {
     }
 
     /// [`Self::verify`] up to the multiscalar multiplication, for batch verification.
-    pub(crate) fn terms<T: BpppTranscript>(
+    pub(crate) fn terms<T: BpppTranscript + ?Sized>(
         &self,
         st: &RangeStatement,
         pc: &PedersenGens<C>,

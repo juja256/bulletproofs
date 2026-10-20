@@ -3,6 +3,8 @@
 //! operation, the lowered reciprocal form circuit and witness column for column, the costs,
 //! the commitments (as for `reciprocal.json`), and real proofs with both backends.
 
+#![allow(non_snake_case)]
+
 use curve25519_dalek::ristretto::CompressedRistretto;
 use curve25519_dalek::scalar::Scalar;
 use merlin::Transcript;

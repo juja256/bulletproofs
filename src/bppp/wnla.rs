@@ -28,9 +28,9 @@ pub struct WnlaStatement<'a> {
     /// Value generator `G`.
     pub g: &'a RistrettoPoint,
     /// Generators of the linear part `l`.
-    pub h_vec: &'a [RistrettoPoint],
+    pub h: &'a [RistrettoPoint],
     /// Generators of the norm part `n`.
-    pub n_vec: &'a [RistrettoPoint],
+    pub n: &'a [RistrettoPoint],
     /// Linear constraint vector.
     pub c: &'a [Scalar],
     /// Square root of the norm weight, `mu = rho^2`; non-zero.
@@ -119,7 +119,7 @@ fn ct_msm(s: &[Scalar], p: &[RistrettoPoint]) -> RistrettoPoint {
 
 impl WnlaStatement<'_> {
     fn check(&self, a: usize, b: usize) -> Result<(), ProofError> {
-        if self.h_vec.len() != a || self.c.len() != a || self.n_vec.len() != b {
+        if self.h.len() != a || self.c.len() != a || self.n.len() != b {
             return Err(ProofError::InvalidGeneratorsLength);
         }
         if self.rho == Scalar::ZERO {
@@ -131,7 +131,7 @@ impl WnlaStatement<'_> {
     /// `v*G + <l, H> + <n, N>` with `v = <c, l> + |n|^2_mu` (constant time).
     pub fn commit(&self, l: &[Scalar], n: &[Scalar]) -> RistrettoPoint {
         let v = ip(self.c, l) + wip(n, n, self.rho * self.rho);
-        self.g * v + ct_msm(l, self.h_vec) + ct_msm(n, self.n_vec)
+        self.g * v + ct_msm(l, self.h) + ct_msm(n, self.n)
     }
 }
 
@@ -150,9 +150,8 @@ fn absorb_statement<T: BpppTranscript>(transcript: &mut T, st: &WnlaStatement, C
     st.c.iter().for_each(|c| transcript.append_scalar(b"c", c));
 }
 
-/// Prove knowledge of the opening `(l, n)` of `C`. Absorbs `G`, `C`, `rho` and `c` before the
-/// rounds, so the challenges bind the whole statement.
-pub fn prove<T: BpppTranscript>(
+/// [`WnlaProof::prove`].
+pub(crate) fn prove<T: BpppTranscript>(
     st: &WnlaStatement,
     C: &RistrettoPoint,
     transcript: &mut T,
@@ -272,8 +271,8 @@ fn prove_rounds<T: BpppTranscript>(
     let (mut l, mut n, mut c) = (l, n, st.c.to_vec());
     // The folded generators: `H` as they are, `N` as `s * N'` (so that folding `N` costs one
     // scalar multiplication per pair, as for `H`); the inputs are not copied.
-    let mut h = Deferred::new(st.h_vec);
-    let mut g = Deferred::new(st.n_vec);
+    let mut h = Deferred::new(st.h);
+    let mut g = Deferred::new(st.n);
     let mut s = Scalar::ONE;
     let (mut rho, mut mu) = (st.rho, st.rho * st.rho);
     let (mut xs, mut rs) = (Vec::new(), Vec::new());
@@ -406,16 +405,29 @@ impl WnlaProof {
         Ok(WnlaScalars { g: v, h, n, gammas })
     }
 
-    /// Verify against the commitment `C`; absorbs `G`, `C`, `rho` and `c` like [`prove`].
+    /// Prove knowledge of the opening `(l, n)` of `C`. Absorbs `G`, `C`, `rho` and `c` before the
+    /// rounds, so the challenges bind the whole statement.
+    pub fn prove<T: BpppTranscript>(
+        st: &WnlaStatement,
+        C: &RistrettoPoint,
+        transcript: &mut T,
+        l: Vec<Scalar>,
+        n: Vec<Scalar>,
+    ) -> Result<WnlaProof, ProofError> {
+        prove(st, C, transcript, l, n)
+    }
+
+    /// Verify against the commitment `C`; absorbs `G`, `C`, `rho` and `c` like
+    /// [`WnlaProof::prove`].
     pub fn verify<T: BpppTranscript>(
         &self,
         st: &WnlaStatement,
         C: &RistrettoPoint,
         transcript: &mut T,
     ) -> Result<(), ProofError> {
-        st.check(st.c.len(), st.n_vec.len())?;
+        st.check(st.c.len(), st.n.len())?;
         absorb_statement(transcript, st, &C.compress());
-        let s = self.verification_scalars(st.c, st.rho, st.n_vec.len(), transcript)?;
+        let s = self.verification_scalars(st.c, st.rho, st.n.len(), transcript)?;
         let decompress = |p: &CompressedRistretto| p.decompress().ok_or(ProofError::VerificationError);
         let xs = self.X.iter().map(decompress).collect::<Result<Vec<_>, _>>()?;
         let rs = self.R.iter().map(decompress).collect::<Result<Vec<_>, _>>()?;
@@ -424,7 +436,7 @@ impl WnlaProof {
             .chain(s.gammas.iter().zip(xs).map(|(g, x)| (-g, x)))
             .chain(s.gammas.iter().zip(rs).map(|(g, r)| (Scalar::ONE - g * g, r)))
             .collect();
-        Terms { g: s.g, h: s.h, n: s.n, points }.check_with(st.g, st.h_vec, st.n_vec)
+        Terms { g: s.g, h: s.h, n: s.n, points }.check_with(st.g, st.h, st.n)
     }
 
     /// `X_0 R_0 ... X_{k-1} R_{k-1} l n`, 32 bytes each.
@@ -494,7 +506,7 @@ mod tests {
         for &(a, b) in &[(7usize, 1usize), (7, 2), (7, 37), (13, 64), (8, 100), (1, 9), (21, 3)] {
             let (g, h, nv) = (gens("G", 1)[0], gens("H", a), gens("N", b));
             let c: Vec<Scalar> = (0..a).map(|_| Scalar::random(&mut rng)).collect();
-            let st = WnlaStatement { g: &g, h_vec: &h, n_vec: &nv, c: &c, rho: Scalar::random(&mut rng) };
+            let st = WnlaStatement { g: &g, h: &h, n: &nv, c: &c, rho: Scalar::random(&mut rng) };
             let l: Vec<Scalar> = (0..a).map(|_| Scalar::random(&mut rng)).collect();
             let n: Vec<Scalar> = (0..b).map(|_| Scalar::random(&mut rng)).collect();
             let gammas: Vec<Scalar> = (0..20).map(|_| Scalar::random(&mut rng)).collect();
@@ -533,7 +545,7 @@ mod tests {
             let b = case["b"].as_u64().unwrap() as usize;
             let (G, H, N) = (gens("G", 1)[0], gens("H", a), gens("N", b));
             let c = scs(&case["c"]);
-            let st = WnlaStatement { g: &G, h_vec: &H, n_vec: &N, c: &c, rho: sc(&case["rho"]) };
+            let st = WnlaStatement { g: &G, h: &H, n: &N, c: &c, rho: sc(&case["rho"]) };
             let gammas = scs(&case["gammas"]);
             let (l, n) = (scs(&case["l"]), scs(&case["n"]));
             let proof = prove_unbound(&st, &mut Replay::new(gammas.clone()), l.clone(), n.clone(), false).unwrap();
@@ -562,7 +574,7 @@ mod tests {
         let (G, H, N) = (gens("G", 1)[0], gens("H", 8), gens("N", 8));
         let mut rng = ChaCha20Rng::seed_from_u64(3);
         let c: Vec<Scalar> = (0..8).map(|_| Scalar::random(&mut rng)).collect();
-        let st = WnlaStatement { g: &G, h_vec: &H, n_vec: &N, c: &c, rho: Scalar::random(&mut rng) };
+        let st = WnlaStatement { g: &G, h: &H, n: &N, c: &c, rho: Scalar::random(&mut rng) };
         let (k, af, bf) = rounds(8, 8);
         let xs: Vec<Scalar> = (0..k).map(|_| Scalar::random(&mut rng)).collect();
         let ys: Vec<Scalar> = (0..k).map(|_| Scalar::random(&mut rng)).collect();
@@ -592,7 +604,7 @@ mod tests {
         let (G, H, N) = (gens("G", 1)[0], gens("H", 9), gens("N", 13));
         let mut rng = ChaCha20Rng::seed_from_u64(1);
         let c: Vec<Scalar> = (0..9).map(|_| Scalar::random(&mut rng)).collect();
-        let st = WnlaStatement { g: &G, h_vec: &H, n_vec: &N, c: &c, rho: Scalar::random(&mut rng) };
+        let st = WnlaStatement { g: &G, h: &H, n: &N, c: &c, rho: Scalar::random(&mut rng) };
         let l: Vec<Scalar> = (0..9).map(|_| Scalar::random(&mut rng)).collect();
         let n: Vec<Scalar> = (0..13).map(|_| Scalar::random(&mut rng)).collect();
         let C = st.commit(&l, &n);
@@ -633,7 +645,7 @@ mod tests {
         for (a, b) in [(0, 0), (1, 1), (5, 0), (0, 6), (8, 8), (9, 13), (1, 64), (64, 1), (30, 17)] {
             let (G, H, N) = (gens("G", 1)[0], gens("H", a), gens("N", b));
             let c: Vec<Scalar> = (0..a).map(|_| Scalar::random(&mut rng)).collect();
-            let st = WnlaStatement { g: &G, h_vec: &H, n_vec: &N, c: &c, rho: Scalar::random(&mut rng) };
+            let st = WnlaStatement { g: &G, h: &H, n: &N, c: &c, rho: Scalar::random(&mut rng) };
             let l: Vec<Scalar> = (0..a).map(|_| Scalar::random(&mut rng)).collect();
             let n: Vec<Scalar> = (0..b).map(|_| Scalar::random(&mut rng)).collect();
             let C = st.commit(&l, &n);
@@ -664,7 +676,7 @@ mod tests {
     fn malformed_proofs_are_errors() {
         let (G, H, N) = (gens("G", 1)[0], gens("H", 8), gens("N", 8));
         let c = vec![Scalar::ONE; 8];
-        let st = WnlaStatement { g: &G, h_vec: &H, n_vec: &N, c: &c, rho: Scalar::from(3u64) };
+        let st = WnlaStatement { g: &G, h: &H, n: &N, c: &c, rho: Scalar::from(3u64) };
         let (l, n) = (vec![Scalar::from(5u64); 8], vec![Scalar::from(7u64); 8]);
         let C = st.commit(&l, &n);
         let proof = prove(&st, &C, &mut Transcript::new(b"t"), l, n).unwrap();

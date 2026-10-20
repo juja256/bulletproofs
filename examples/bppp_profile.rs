@@ -130,12 +130,12 @@ fn main() {
             let gens = BpppGens::new(&pc, &bp, 0, n).unwrap();
             let (h_vec, n_vec, g) = (gens.h.clone(), gens.n.to_vec(), gens.g);
             let c: Vec<Scalar> = (0..7).map(|_| Scalar::random(&mut rng)).collect();
-            let st = WnlaStatement { g: &g, h_vec: &h_vec, n_vec: &n_vec, c: &c, rho: Scalar::from(3u64) };
+            let st = WnlaStatement { g: &g, h: &h_vec, n: &n_vec, c: &c, rho: Scalar::from(3u64) };
             let l: Vec<Scalar> = (0..7).map(|_| Scalar::random(&mut rng)).collect();
             let nv: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
             let C: RistrettoPoint = st.commit(&l, &nv);
             let t = Instant::now();
-            let p = bppp::wnla::prove(&st, &C, &mut Transcript::new(b"p"), l, nv).unwrap();
+            let p = bppp::WnlaProof::prove(&st, &C, &mut Transcript::new(b"p"), l, nv).unwrap();
             let pm = ms(t);
             let t = Instant::now();
             p.verify(&st, &C, &mut Transcript::new(b"p")).unwrap();
@@ -147,7 +147,7 @@ fn main() {
             let bp = BulletproofGens::new(g.n.max(6), 1);
             let gens = BpppGens::new(&pc, &bp, 0, g.n).unwrap();
             let t = Instant::now();
-            let p = bppp::circuit::prove(&c, &gens, &[], &w, &mut Transcript::new(b"p"), &mut rng).unwrap();
+            let p = bppp::CircuitProof::prove(&c, &gens, &[], &w, &mut Transcript::new(b"p"), &mut rng).unwrap();
             let pm = ms(t);
             let t = Instant::now();
             p.verify(&c, &gens, &[], &mut Transcript::new(b"p")).unwrap();

@@ -3,13 +3,13 @@
 
 #![allow(non_snake_case)]
 
-pub mod batch;
-pub mod circuit;
+pub(crate) mod batch;
+pub(crate) mod circuit;
 mod gens;
-pub mod mact;
+pub(crate) mod mact;
 mod poly;
-pub mod range;
-pub mod reciprocal;
+pub(crate) mod range;
+pub(crate) mod reciprocal;
 mod sparse;
 mod terms;
 #[cfg(test)]
@@ -17,14 +17,14 @@ pub(crate) mod testutil;
 #[cfg(test)]
 mod tuple_tests;
 pub(crate) mod transcript;
-pub mod wnla;
+pub(crate) mod wnla;
 
 pub use self::batch::BatchVerifier;
 pub use self::circuit::{ArithmeticCircuit, CircuitProof, CircuitWitness, Slot};
 pub use self::gens::BpppGens;
 pub use self::mact::{MactEntry, MactProof, MactStatement};
 pub use self::range::{RangeProof, RangeStatement};
-pub use self::reciprocal::{Component, LateWitness, Pole, ReciprocalCircuit, ReciprocalRow, ReciprocalWitness, TuplePole};
+pub use self::reciprocal::{Component, LateWitness, Pole, ReciprocalCircuit, ReciprocalProof, ReciprocalRow, ReciprocalWitness, TuplePole};
 pub use self::sparse::SparseMatrix;
 pub use self::transcript::BpppTranscript;
 pub use self::wnla::{WnlaProof, WnlaStatement};

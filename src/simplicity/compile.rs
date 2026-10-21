@@ -51,7 +51,7 @@ pub struct SimplicityWitness(HashMap<Arc<str>, ::simplicity::Value>);
 /// What the program contains.
 #[derive(Clone, Debug)]
 pub struct Stats {
-    /// Jet calls by name.
+    /// Jet calls by name, as executed (a recomputed value counts at each reader).
     pub jets: BTreeMap<&'static str, usize>,
     /// Live operations of the traced verifier.
     pub tape_ops: usize,
@@ -63,6 +63,8 @@ pub struct Stats {
     pub witness_scalars: usize,
     /// Steps the program runs (values read several times, checks, terms of the sum).
     pub steps: usize,
+    /// Steps that store a value for later steps (the rest is recomputed where it is read).
+    pub stored: usize,
     /// Σ over steps of the bits kept for later steps (the scheduler's measure of copying).
     pub live_bits: u64,
 }
@@ -281,11 +283,20 @@ pub(crate) fn compile_with<R: rand_core::RngCore + rand_core::CryptoRng>(
     let acc = msm(&mut p, &msm_terms);
     assert_infinity(&mut p, acc);
 
+    let p = crate::simplicity::opt::optimize(&p);
+    #[cfg(test)]
+    LAST_STORED.with(|k| *k.borrow_mut() = Some(p.stored_report()));
     let term = p.to_term();
     let commit = term.commit().map_err(|e| gadget_err(&format!("the generated program does not type: {}", e)))?;
     let cmr = commit.cmr();
-    let stats = Stats { jets: p.stats(), tape_ops: live.iter().filter(|x| **x).count(), msm_terms: msm_terms.len(), witness_points: n_points, witness_scalars: n_scalars, steps: p.step_count(), live_bits: p.live_bits() };
+    let stats = Stats { jets: p.stats(), tape_ops: live.iter().filter(|x| **x).count(), msm_terms: msm_terms.len(), witness_points: n_points, witness_scalars: n_scalars, steps: p.step_count(), stored: p.stored_count(), live_bits: p.live_bits() };
     Ok(SimplicityVerifier { term, text: std::sync::OnceLock::new(), cmr, n_lin, n_mm, stats })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Diagnostic: stored values by operation (count, bits × steps, executions), of the last compile.
+    pub(crate) static LAST_STORED: std::cell::RefCell<Option<std::collections::BTreeMap<String, (usize, u64, u64)>>> = std::cell::RefCell::new(None);
 }
 
 #[cfg(test)]
@@ -486,7 +497,7 @@ mod tests {
     #[ignore]
     fn chain_growth() {
         let env = dummy_env();
-        for n in [16usize, 32, 64] {
+        for n in [2usize, 16, 32, 64] {
             let pc = PedersenGens::<Secp256k1>::for_curve();
             let bp = BulletproofGens::<Secp256k1>::for_curve(2 * n + 64, 1);
             let chain = |cs: &mut dyn FnMut(crate::r1cs::LinearCombination<K>, crate::r1cs::LinearCombination<K>) -> Variable, x: Variable| {
@@ -518,6 +529,11 @@ mod tests {
             let st = sv.stats();
             if let Some(kinds) = crate::simplicity::compile::LAST_TAPE_KINDS.with(|k| k.borrow().clone()) {
                 println!("n {}: tape kinds {:?}", n, kinds);
+            }
+            if let Some(st) = crate::simplicity::compile::LAST_STORED.with(|k| k.borrow().clone()) {
+                for (k, (c, bs, e)) in st {
+                    println!("    stored {:>28}: {:>4} values, {:>9} bit-steps, {:>5} reads", k, c, bs, e);
+                }
             }
             if let Some(b) = crate::simplicity::run::LAST_BREAKDOWN.with(|b| b.borrow().clone()) {
                 for (k, c) in b.iter().filter(|(k, _)| k.starts_with('#')) {

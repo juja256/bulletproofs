@@ -66,15 +66,21 @@ pub(crate) fn ge_to_gej(p: &mut Prog, ge: Val) -> Val {
     p.push(Op::Pair(ge, z, Ty::gej()))
 }
 
-/// `Σ k_i · P_i` with `scale` and `gej_add` (no multiscalar jet exists).
+/// `Σ k_i · P_i` with `scale` and `gej_add` (no multiscalar jet exists), as a balanced tree:
+/// with the terms recomputed where they are read, the whole sum is one expression.
 pub(crate) fn msm(p: &mut Prog, terms: &[(Val, Val)]) -> Val {
     assert!(!terms.is_empty(), "an empty multiscalar multiplication");
-    let mut acc = p.push(Op::Jet("scale", vec![terms[0].0, terms[0].1], Ty::gej()));
-    for (k, pt) in &terms[1..] {
-        let t = p.push(Op::Jet("scale", vec![*k, *pt], Ty::gej()));
-        acc = p.push(Op::Jet("gej_add", vec![acc, t], Ty::gej()));
+    let scaled: Vec<Val> = terms.iter().map(|(k, pt)| p.push(Op::Jet("scale", vec![*k, *pt], Ty::gej()))).collect();
+    sum(p, &scaled)
+}
+
+fn sum(p: &mut Prog, v: &[Val]) -> Val {
+    if v.len() == 1 {
+        return v[0];
     }
-    acc
+    let h = v.len() / 2;
+    let (l, r) = (sum(p, &v[..h]), sum(p, &v[h..]));
+    p.push(Op::Jet("gej_add", vec![l, r], Ty::gej()))
 }
 
 /// Fail unless `gej` is the point at infinity.
@@ -192,5 +198,37 @@ mod tests {
 
     fn hex(s: &str) -> Vec<u8> {
         (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+
+    /// The sum is a balanced tree of the same value: Σ k_i x_i G - (Σ k_i x_i) G = 0.
+    #[test]
+    fn msm_tree_sums_like_the_chain() {
+        let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(9);
+        for m in [1usize, 2, 3, 5, 86] {
+            for bad in [false, true] {
+                let mut p = Prog::new();
+                let mut total = Scalar::ZERO;
+                let mut terms = Vec::new();
+                for i in 0..m {
+                    let (k, x) = (Scalar::random(&mut rng), Scalar::random(&mut rng));
+                    total += k * x;
+                    let k = if bad && i == m / 2 { k + Scalar::ONE } else { k };
+                    let kv = p.push(Op::Const(Ty::word(), k.to_repr().to_vec()));
+                    let g = const_gej(&mut p, &(ProjectivePoint::GENERATOR * x).to_affine());
+                    terms.push((kv, g));
+                }
+                let kv = p.push(Op::Const(Ty::word(), (-total).to_repr().to_vec()));
+                let g = const_gej(&mut p, &AffinePoint::GENERATOR);
+                terms.push((kv, g));
+                let acc = msm(&mut p, &terms);
+                assert_infinity(&mut p, acc);
+                let r = execute_term(&p.to_term(), &HashMap::new(), &dummy_env(), false);
+                assert_eq!(r.is_ok(), !bad, "m {} bad {}", m, bad);
+                if m == 86 && !bad {
+                    // one expression: the check is the only step
+                    assert_eq!(p.step_count(), 1);
+                }
+            }
+        }
     }
 }

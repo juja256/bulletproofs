@@ -2,10 +2,12 @@
 //! proof of the circuit's dimensions, lower the transcript log, the tape and the final
 //! multiscalar multiplication into the IR, and keep what the witness of a real proof needs.
 
+#![allow(non_snake_case)]
+
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use k256::elliptic_curve::ff::{Field as _, PrimeField as _};
+use k256::elliptic_curve::ff::PrimeField as _;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 
 use crate::bppp::{BpppGens, BpppTranscript, CircuitProof, ReciprocalCircuit};

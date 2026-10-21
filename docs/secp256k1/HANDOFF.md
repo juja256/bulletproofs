@@ -21,6 +21,7 @@ encodings, range proofs over Elements commitments. Not in scope: MACT for Elemen
 | 2 | `Secp256k1` on k256: encodings, CT MSM (k256 `lincomb_ext`), VT Pippenger, all protocols, vectors, facade, README, benches | `src/curve/secp256k1.rs`, `src/curve/pippenger.rs`, `tests/curves.rs`, `ref/gen_vectors.py --curve secp256k1`, `src/lib.rs` (`secp256k1`), `examples/curves_table.rs` | commits `91887ce..` + review fixes; reviewed (fable), done |
 | 3 | Elements: `generator_generate` (SvdW), encodings 0x08/0x09 and 0x0a/0x0b, BP/BP++ range proofs over Elements commitments (task 13, BP++ generators à la secp256k1-zkp, skipped by the owner) | `src/elements.rs`, `PedersenGens::with_value_generator`, `tests/elements.rs`, `ref/extract_elements_vectors.py` | commits `e01bff4..` + review fixes; reviewed (fable), done |
 | — | Transcripts: `TranscriptBackend` (every protocol generic over the transcript, Merlin the default), `TranscriptRef` (R1CS), `Sha256Transcript` for Simplicity verifiers | `src/transcript/`, `docs/sha256-transcript.md`, `ref/sha256_transcript.py`, `tests/transcript.rs`, `tests/vectors/transcript/` | branch `sha256-transcript`, commits `8ef3ea7..` |
+| — | Simplicity verifier, stage 1: `Verifier::compile_to_simplicity` (BP++, secp256k1, SHA-256 transcript), tracing the crate's verifier into an SSA IR lowered to Simplicity | `src/simplicity/`, `tests/simplicity.rs`, `docs/simplicity-verifier.md`, `examples/simplicity_costs.rs` | branch `simplicity-verifier` |
 
 The plan (Ukrainian) and the research report live in the owner's knowledge base; the plan's
 tasks are numbered 1.1–3.4 there, Task 1–14 in the ledger.
@@ -111,3 +112,11 @@ tasks are numbered 1.1–3.4 there, Task 1–14 in the ledger.
   records `0x41`/`0x43` with le32 lengths, outputs `finalize(copy ‖ le64(i))`; KATs from an
   independent Python reference; full secp256k1 proofs (BP++ range, R1CS on both backends) with
   traces checked by Python. All existing bytes unchanged; bpvm passes its 29 tests unchanged.
+- 2026-10-21 — Simplicity verifier, stage 1 (plan: the owner's knowledge base,
+  `research/2026-10-20-simplicity-verifier-stage1-plan.md`): runner as a node (adapted from
+  simple-groth16's harness), SSA IR with liveness, `CompileTranscript` and SHA-256 in the
+  program, witness points and MSM, the tracer (`Traced`, `TracedCurve`), `compile_to_simplicity`.
+  Honest proofs verify; tampered proofs, another transaction and Merlin proofs are rejected.
+  Measurements: 2/4/8-gate chains cost 8.5/13.4/22.3M mWU within budget (program bytes pay),
+  cells far under the limit once `main` is a balanced tree of `comp`; data movement ≈ 85–90% of
+  the cost, program ≈ 3.7 kB per gate: stage 2 optimizes.

@@ -8,6 +8,7 @@ use crate::simplicity::ir::{Op, Prog, Ty, Val};
 /// A point of the proof read from the witness as (parity of y, x).
 pub(crate) struct WitPoint {
     /// The parity bit of y.
+    #[allow(dead_code)]
     pub parity: Val,
     /// x.
     pub x: Val,

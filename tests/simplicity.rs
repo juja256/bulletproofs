@@ -6,7 +6,7 @@
 #![allow(non_snake_case)]
 
 use bulletproofs::curve::{Curve, Secp256k1};
-use bulletproofs::r1cs::{lc, Backend, ConstraintSystem, Prover, R1CSProof, RandomizableConstraintSystem, RandomizedConstraintSystem, Variable, Verifier};
+use bulletproofs::r1cs::{lc, Backend, CircuitBuilder, ConstraintSystem, Prover, R1CSProof, RandomizableConstraintSystem, RandomizedConstraintSystem, Variable, Verifier};
 use bulletproofs::secp256k1::{BulletproofGens, PedersenGens, Scalar};
 use bulletproofs::simplicity::{dummy_env, dummy_env_with_output, sighash_of, CompileTranscript, SimplicityVerifier, SIGHASH_LABEL};
 use bulletproofs::{Sha256Transcript, TranscriptBackend, TranscriptRef};
@@ -143,4 +143,91 @@ fn program_is_deterministic() {
     let (a, b) = (compile(&V), compile(&V));
     assert_eq!(a.to_text(), b.to_text());
     assert_eq!(a.cmr(), b.cmr());
+}
+
+/// A table lookup and a witness variable of the circuit builder (the reciprocal form has poles).
+fn gadgets<CS: CircuitBuilder<Scalar>>(cs: &mut CS, x: Variable, y: Variable, prover: bool) {
+    product(cs, x, y);
+    let t = cs.table((0..16u64).map(|v| vec![v]).collect()).unwrap();
+    let l = cs.lookup_value(t, if prover { Some(3) } else { None }).unwrap();
+    cs.constrain(lc(l) - lc(x));
+    let w = cs.witness(if prover { Some(Scalar::from(7u64)) } else { None }).unwrap();
+    cs.constrain_product(lc(w), lc(y), lc(Variable::One()) * Scalar::from(35u64)).unwrap();
+}
+
+#[test]
+fn circuit_builder_gadgets_verify() {
+    let env = dummy_env();
+    let (pc, bp) = gens();
+    let mut rng = ChaCha20Rng::seed_from_u64(7);
+    let mut t = Sha256Transcript::new(b"gadgets");
+    t.append_message(SIGHASH_LABEL, &sighash_of(&env));
+    let mut p = Prover::new(&pc, &mut t);
+    p.set_backend(Backend::Bppp);
+    let r = |rng: &mut ChaCha20Rng| <Scalar as bulletproofs::curve::ff::Field>::random(rng);
+    let (cx, x) = p.commit(Scalar::from(3u64), r(&mut rng));
+    let (cy, y) = p.commit(Scalar::from(5u64), r(&mut rng));
+    gadgets(&mut p, x, y, true);
+    let proof = p.prove_with_rng(&bp, &mut rng).unwrap();
+    let mut ct = CompileTranscript::new(b"gadgets");
+    ct.append_message(SIGHASH_LABEL, &[0u8; 32]);
+    let mut v = Verifier::<_, Secp256k1>::for_curve(&mut ct);
+    v.set_backend(Backend::Bppp);
+    let (x, y) = (v.commit(cx), v.commit(cy));
+    gadgets(&mut v, x, y, false);
+    let sv = v.compile_to_simplicity(&pc, &bp).unwrap();
+    let w = sv.witness(&proof).unwrap();
+    match sv.execute(&w, &env) {
+        Ok(r) => println!("gadgets: cost {} mWU of {}, cells {}", r.cost_mwu, r.budget_mwu, r.cells),
+        Err(e) => panic!("{:?}", e),
+    }
+    assert!(sv.execute(&w, &dummy_env_with_output(7)).is_err());
+}
+
+/// `n` multiplications `v_{i+1} = v_i · x` from a committed `x`, the last value fixed.
+fn chain<CS: ConstraintSystem<Scalar>>(cs: &mut CS, x: Variable, n: usize) {
+    let mut last = Scalar::from(3u64);
+    let mut v = lc(x);
+    for _ in 0..n {
+        let (_, _, o) = cs.multiply(v, lc(x));
+        v = lc(o);
+        last *= Scalar::from(3u64);
+    }
+    cs.constrain(v - last);
+}
+
+fn chain_proof_and_verifier(n: usize, env: &bulletproofs::simplicity::Env) -> (R1CSProof<Secp256k1>, SimplicityVerifier) {
+    let pc = PedersenGens::for_curve();
+    let bp = BulletproofGens::for_curve(2 * n + 64, 1);
+    let mut rng = ChaCha20Rng::seed_from_u64(n as u64);
+    let mut t = Sha256Transcript::new(b"chain");
+    t.append_message(SIGHASH_LABEL, &sighash_of(env));
+    let mut p = Prover::new(&pc, &mut t);
+    p.set_backend(Backend::Bppp);
+    let (cx, x) = p.commit(Scalar::from(3u64), <Scalar as bulletproofs::curve::ff::Field>::random(&mut rng));
+    chain(&mut p, x, n);
+    let proof = p.prove_with_rng(&bp, &mut rng).unwrap();
+    let mut ct = CompileTranscript::new(b"chain");
+    ct.append_message(SIGHASH_LABEL, &[0u8; 32]);
+    let mut v = Verifier::<_, Secp256k1>::for_curve(&mut ct);
+    v.set_backend(Backend::Bppp);
+    let x = v.commit(cx);
+    chain(&mut v, x, n);
+    (proof, v.compile_to_simplicity(&pc, &bp).unwrap())
+}
+
+/// Chains of 2, 4 and 8 gates verify within the budget and the cell limit; a proof of 2 gates
+/// does not fit the 4-gate program.
+#[test]
+fn chains_verify() {
+    let env = dummy_env();
+    let mut built = Vec::new();
+    for n in [2, 4, 8] {
+        let (p, v) = chain_proof_and_verifier(n, &env);
+        let r = v.execute(&v.witness(&p).unwrap(), &env).unwrap();
+        println!("chain {}: tape {} msm {} cost {} mWU of {}, cells {}", n, v.stats().tape_ops, v.stats().msm_terms, r.cost_mwu, r.budget_mwu, r.cells);
+        assert!(r.cells <= bulletproofs::simplicity::MAX_CELLS);
+        built.push((p, v));
+    }
+    assert!(built[1].1.witness(&built[0].0).is_err());
 }

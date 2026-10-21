@@ -185,6 +185,9 @@ The `secp256k1` feature (this fork) adds the curve secp256k1 (see [Curves](#curv
 The `sha256-transcript` feature (this fork, on with `secp256k1`) adds `Sha256Transcript`, a
 Fiat–Shamir transcript on SHA-256 alone (see [Transcripts](#transcripts)).
 
+The `simplicity` feature (this fork, experimental) compiles R1CS circuits into Simplicity
+verifiers (see [Simplicity verifier](#simplicity-verifier-experimental)).
+
 ### Prover and verifier optimisations in this fork
 
 Compared to upstream, the R1CS prover needs about 3x less memory and is faster, the
@@ -340,6 +343,18 @@ from the independent reference [ref/sha256_transcript.py](ref/sha256_transcript.
 backends) with the trace of every message and challenge;
 `python3 -I ref/sha256_transcript.py --check-trace tests/vectors/transcript/secp256k1-*.json`
 recomputes the challenges.
+
+## Simplicity verifier (experimental)
+
+With the feature `simplicity`, `Verifier::compile_to_simplicity` turns an R1CS circuit on the BP++
+backend (secp256k1, `Sha256Transcript`) into a [Simplicity](https://github.com/BlockstreamResearch/simplicity)
+program that verifies its proofs and is bound to the spending transaction. The program runs as a
+Liquid node would run it (`SimplicityVerifier::execute`).
+
+The compiler traces the crate's own verifier into a straight-line program. Stage 1 is a correct
+baseline: small circuits fit their budget, but the cost is mostly data movement and grows with the
+circuit. See [docs/simplicity-verifier.md](docs/simplicity-verifier.md) for the flow, the witness
+format and the measurements.
 
 ## Bulletproofs++ (experimental)
 

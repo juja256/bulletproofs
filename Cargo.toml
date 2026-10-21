@@ -149,3 +149,7 @@ required-features = ["yoloproofs", "bppp", "secp256k1"]
 
 [[test]]
 name = "elements"
+
+[[example]]
+name = "simplicity_costs"
+required-features = ["simplicity"]

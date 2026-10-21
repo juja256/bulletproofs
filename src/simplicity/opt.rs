@@ -10,6 +10,11 @@ use crate::simplicity::ir::{Op, Prog, Ty, Val};
 
 type K = k256::Scalar;
 
+/// The most distinct atoms a product may have to be rewritten as a monomial: a product of more
+/// (a prefix of a batch inversion) is kept as the tape built it, since rebuilding each such
+/// product from its atoms is quadratic in their number.
+const MAX_ATOMS: usize = 8;
+
 /// The rewrites, in order.
 pub(crate) fn optimize(p: &Prog) -> Prog {
     dce(&reassociate(&monomials(p)))
@@ -177,11 +182,12 @@ fn monomials(p: &Prog) -> Prog {
                 };
                 m = m.and_then(|m| m.times(&f));
             }
-            if m.is_some() {
+            if m.as_ref().map_or(false, |m| m.f.len() <= MAX_ATOMS) {
                 mono[i] = m;
                 continue;
             }
-            // an exponent past u64: built as it is, an atom for the products that read it
+            // a product of many distinct factors (a prefix product of a batch inversion), or an
+            // exponent past u64: built as it is, an atom for the products that read it
         }
         let args: Vec<Val> = op.args().iter().map(|a| get(&mut b, &mut built, &mono, a.index())).collect();
         built[i] = Some(b.push(op.with_args(&args)));
@@ -606,5 +612,39 @@ mod tests {
         let wit = HashMap::from([("x", x)]);
         assert!(eval(&p, &wit).is_ok());
         assert!(eval(&optimize(&p), &wit).is_ok());
+    }
+
+    /// Montgomery's batch inversion of `n` values: prefix products, one inversion, products
+    /// back. Its products have up to `n` factors; expanding each from scratch is quadratic.
+    fn batch_inversion(n: usize) -> usize {
+        let xs: Vec<K> = (0..n).map(|i| K::from(i as u64 + 2)).collect();
+        let names: Vec<String> = (0..n).map(|i| format!("x{}", i)).collect();
+        let mut p = Prog::new();
+        let w: Vec<Val> = names.iter().map(|nm| p.push(Op::Witness(nm.as_str().into(), Ty::word()))).collect();
+        let mut prefix = vec![w[0]];
+        for i in 1..n {
+            let v = mul(&mut p, prefix[i - 1], w[i]);
+            prefix.push(v);
+        }
+        let mut inv = p.push(Op::Jet("scalar_invert", vec![prefix[n - 1]], Ty::word()));
+        for i in (1..n).rev() {
+            let y = mul(&mut p, inv, prefix[i - 1]);
+            check(&mut p, y, xs[i].invert().unwrap());
+            inv = mul(&mut p, inv, w[i]);
+        }
+        check(&mut p, inv, xs[0].invert().unwrap());
+        let q = optimize(&p);
+        let wit: HashMap<&str, K> = names.iter().map(|s| s.as_str()).zip(xs.iter().copied()).collect();
+        assert!(eval(&q, &wit).is_ok());
+        count(&q, "scalar_multiply")
+    }
+
+    /// The products of a batch inversion stay linear in its size (stage 3: 20 298 for 200).
+    #[test]
+    fn many_factor_products_stay_linear() {
+        let (a, b) = (batch_inversion(200), batch_inversion(400));
+        println!("batch inversion: {} products for 200, {} for 400", a, b);
+        assert!(a <= 8 * 200, "{} products for 200 values", a);
+        assert!(b * 10 <= a * 22, "{} for 400 against {} for 200: not linear", b, a);
     }
 }

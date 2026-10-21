@@ -329,3 +329,46 @@ fn stage3_not_worse_than_stage2() {
         assert!(r.cost_mwu <= cost && r.program_bytes <= bytes, "chain {}", n);
     }
 }
+
+/// `lookups` lookups into a table of `rows` values (a range table, as bpvm's VM has): the
+/// verifier inverts `rows` challenge-dependent values.
+fn table_circuit<CS: CircuitBuilder<Scalar>>(cs: &mut CS, rows: u64, lookups: u64, prover: bool) {
+    let t = cs.table((0..rows).map(|v| vec![v]).collect()).unwrap();
+    for i in 0..lookups {
+        cs.lookup_value(t, if prover { Some((i * 7) % rows) } else { None }).unwrap();
+    }
+}
+
+/// The program of a table circuit, run on an honest proof.
+fn table_program(rows: u64, lookups: u64, env: &bulletproofs::simplicity::Env) -> (SimplicityVerifier, Result<bulletproofs::simplicity::Report, bulletproofs::simplicity::ExecError>) {
+    let pc = PedersenGens::for_curve();
+    let bp = BulletproofGens::for_curve((4 * rows + 256) as usize, 1);
+    let mut rng = ChaCha20Rng::seed_from_u64(rows);
+    let mut t = Sha256Transcript::new(b"table");
+    t.append_message(SIGHASH_LABEL, &sighash_of(env));
+    let mut p = Prover::new(&pc, &mut t);
+    p.set_backend(Backend::Bppp);
+    table_circuit(&mut p, rows, lookups, true);
+    let proof = p.prove_with_rng(&bp, &mut rng).unwrap();
+    let mut ct = CompileTranscript::new(b"table");
+    ct.append_message(SIGHASH_LABEL, &[0u8; 32]);
+    let mut v = Verifier::<_, Secp256k1>::for_curve(&mut ct);
+    v.set_backend(Backend::Bppp);
+    table_circuit(&mut v, rows, lookups, false);
+    let sv = v.compile_to_simplicity(&pc, &bp).unwrap();
+    let r = sv.execute(&sv.witness(&proof).unwrap(), env);
+    (sv, r)
+}
+
+/// The program grows linearly with the table: 4× the rows, at most 5× the bytes and the cost
+/// (stage 3 gave 8.3× and 8.1×: products of many factors were expanded from scratch).
+#[test]
+fn table_program_grows_linearly() {
+    let env = dummy_env();
+    let (_, a) = table_program(64, 8, &env);
+    let (_, b) = table_program(256, 8, &env);
+    let (a, b) = (a.unwrap(), b.unwrap());
+    println!("table 64: {} mWU, {} B; table 256: {} mWU, {} B", a.cost_mwu, a.program_bytes, b.cost_mwu, b.program_bytes);
+    assert!(b.program_bytes <= 5 * a.program_bytes, "bytes grow {:.1}×", b.program_bytes as f64 / a.program_bytes as f64);
+    assert!(b.cost_mwu <= 5 * a.cost_mwu, "cost grows {:.1}×", b.cost_mwu as f64 / a.cost_mwu as f64);
+}

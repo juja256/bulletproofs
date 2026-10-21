@@ -209,6 +209,12 @@ struct Lowering<'a> {
     order: Vec<usize>,
     /// The scheduler's measure: Σ over steps of the live bits.
     live_bits: u64,
+    /// The slot of each stored value (`usize::MAX` if none yet).
+    slot: Vec<usize>,
+    /// The value in each slot of the environment tree.
+    occupant: Vec<Option<usize>>,
+    /// The tree's height: `2^height` slots.
+    height: usize,
     consts: HashMap<(Ty, Vec<u8>), Term>,
     witnesses: HashMap<Arc<str>, Term>,
 }
@@ -297,7 +303,24 @@ impl<'a> Lowering<'a> {
                 last_use[a] = last_use[a].max(pos[owner[i]]);
             }
         }
-        Lowering { p, role, last_use, order, live_bits, consts: HashMap::new(), witnesses: HashMap::new() }
+        // the most values alive at once: the number of slots
+        let mut deaths = vec![0usize; order.len() + 1];
+        for &r in &order {
+            if !matches!(p.ops[r], Op::Assert(_)) && last_use[r] > pos[r] {
+                deaths[last_use[r]] += 1;
+            }
+        }
+        let mut alive = 0usize;
+        let mut most = 1usize;
+        for (k, &r) in order.iter().enumerate() {
+            alive -= deaths[k];
+            if !matches!(p.ops[r], Op::Assert(_)) && last_use[r] > k {
+                alive += 1;
+            }
+            most = most.max(alive);
+        }
+        let height = (usize::BITS - (most - 1).leading_zeros()) as usize;
+        Lowering { p, role, last_use, order, live_bits, slot: vec![usize::MAX; n], occupant: vec![None; 1 << height], height, consts: HashMap::new(), witnesses: HashMap::new() }
     }
 
     /// The number of steps (roots).
@@ -313,7 +336,7 @@ impl<'a> Lowering<'a> {
     }
 
     /// The expression for value `v` given the environment `env` (stored values, in order).
-    fn read(&mut self, v: Val, env: &[Val]) -> Term {
+    fn read(&mut self, v: Val) -> Term {
         let i = v.0 as usize;
         match (&self.p.ops[i], self.role[i]) {
             (Op::Const(t, b), _) => {
@@ -321,24 +344,30 @@ impl<'a> Lowering<'a> {
                 self.constant(&t, &b)
             }
             (Op::Witness(name, _), Role::InlineWitness) => self.witness(name),
-            (_, Role::Inline) => self.expr(i, env),
+            (_, Role::Inline) => self.expr(i),
             _ => {
-                // paths are written out per use: a shared path would have one type for every
-                // environment it is used in
-                let pos = env.iter().position(|x| *x == v).expect("a value read after it was dropped");
+                let slot = self.slot[i];
+                assert!(slot != usize::MAX && self.occupant[slot] == Some(i), "a value read after it was dropped");
                 #[cfg(test)]
                 PATH_STATS.with(|c| {
                     let mut c = c.borrow_mut();
                     c.0 += 1;
-                    c.1 += pos;
+                    c.1 += self.height;
                 });
-                let mut path = Term::take(&Term::iden());
-                for _ in 0..pos {
-                    path = Term::drop_(&path);
-                }
-                path
+                Self::path(slot, self.height, 0, &Term::iden())
             }
         }
+    }
+
+    /// The path from the root of the environment tree (height `h`) to the node at `prefix`
+    /// (its first `levels` bits of the slot number, most significant first), then `inner`.
+    fn path(slot: usize, h: usize, levels_from_leaf: usize, inner: &Term) -> Term {
+        // descend from the leaf's parent level upwards: innermost selector is the deepest bit
+        let mut t = inner.clone();
+        for bit in levels_from_leaf..h {
+            t = if (slot >> bit) & 1 == 0 { Term::take(&t) } else { Term::drop_(&t) };
+        }
+        t
     }
 
     fn witness(&mut self, name: &Arc<str>) -> Term {
@@ -346,7 +375,7 @@ impl<'a> Lowering<'a> {
     }
 
     /// The expression computing op `i`'s value from `env`.
-    fn expr(&mut self, i: usize, env: &[Val]) -> Term {
+    fn expr(&mut self, i: usize) -> Term {
         let op = self.p.ops[i].clone();
         match op {
             Op::Const(..) => unreachable!("constants are inline"),
@@ -355,21 +384,21 @@ impl<'a> Lowering<'a> {
                 if args.is_empty() {
                     return Term::comp(&Term::unit(), &Term::jet(name));
                 }
-                let tuple = self.tuple(&args, env);
+                let tuple = self.tuple(&args);
                 Term::comp(&tuple, &Term::jet(name))
             }
             Op::Unwrap(v, _) => {
-                let x = self.read(v, env);
+                let x = self.read(v);
                 Term::comp(&Term::pair(&x, &Term::unit()), &Term::assertr(&Term::take(&Term::iden())))
             }
             Op::Pair(a, b, _) => {
-                let (x, y) = (self.read(a, env), self.read(b, env));
+                let (x, y) = (self.read(a), self.read(b));
                 Term::pair(&x, &y)
             }
-            Op::Fst(v, _) => Term::comp(&self.read(v, env), &Term::take(&Term::iden())),
-            Op::Snd(v, _) => Term::comp(&self.read(v, env), &Term::drop_(&Term::iden())),
+            Op::Fst(v, _) => Term::comp(&self.read(v), &Term::take(&Term::iden())),
+            Op::Snd(v, _) => Term::comp(&self.read(v), &Term::drop_(&Term::iden())),
             Op::Select(c, a, b, _) => {
-                let (bit, x, y) = (self.read(c, env), self.read(a, env), self.read(b, env));
+                let (bit, x, y) = (self.read(c), self.read(a), self.read(b));
                 Term::comp(&Term::pair(&bit, &Term::iden()), &Term::case(&Term::drop_(&y), &Term::drop_(&x)))
             }
             Op::Assert(_) => unreachable!("assertions are steps of their own"),
@@ -377,68 +406,83 @@ impl<'a> Lowering<'a> {
     }
 
     /// Arguments paired right-nested.
-    fn tuple(&mut self, args: &[Val], env: &[Val]) -> Term {
-        let first = self.read(args[0], env);
+    fn tuple(&mut self, args: &[Val]) -> Term {
+        let first = self.read(args[0]);
         if args.len() == 1 {
             first
         } else {
-            let rest = self.tuple(&args[1..], env);
+            let rest = self.tuple(&args[1..]);
             Term::pair(&first, &rest)
         }
     }
 
-    /// `drop^k iden`: the environment from position `k` on (its unit terminator included).
-    fn suffix(k: usize) -> Term {
-        let mut s = Term::iden();
-        for _ in 0..k {
-            s = Term::drop_(&s);
-        }
-        s
-    }
-
     fn run(mut self) -> Term {
-        // The environment is ordered by last use (then value number): the values read for the
-        // last time at a step are a prefix of it, and a new value goes where its last use puts
-        // it, so a step rebuilds only the front and passes the rest on as one path.
-        let key = |l: &Lowering, v: Val| (l.last_use[v.0 as usize], v);
-        let mut env: Vec<Val> = Vec::new();
+        // The environment is a binary tree of `2^height` slots (an empty subtree is `1`): a
+        // value lives in a slot from its step to its last reader's step, a read is a path of
+        // `height` selectors, and a step rebuilds only the paths to the slots it changes,
+        // passing every other subtree on as one path.
         let mut steps = Vec::new();
         let order = self.order.clone();
         for (k, &i) in order.iter().enumerate() {
-            let v = Val(i as u32);
-            let dead = env.iter().take_while(|x| self.last_use[x.0 as usize] <= k).count();
-            let rest: Vec<Val> = env[dead..].to_vec();
-            let (step, next) = match &self.p.ops[i] {
-                Op::Assert(b) => {
-                    let bit = self.read(*b, &env);
+            // values read for the last time at this step leave after it
+            let dying: Vec<usize> = self.occupant.iter().enumerate().filter_map(|(s, o)| o.filter(|v| self.last_use[*v] <= k).map(|_| s)).collect();
+            let keep = !matches!(self.p.ops[i], Op::Assert(_)) && self.last_use[i] > k;
+            let fresh = if matches!(self.p.ops[i], Op::Assert(_)) { None } else { Some(self.expr(i)) };
+            let before = self.occupant.clone();
+            for s in &dying {
+                self.occupant[*s] = None;
+            }
+            let mut changes: BTreeMap<usize, Option<Term>> = dying.iter().map(|s| (*s, None)).collect();
+            if keep {
+                let s = self.occupant.iter().position(|o| o.is_none()).expect("a free slot");
+                self.occupant[s] = Some(i);
+                self.slot[i] = s;
+                changes.insert(s, fresh.clone());
+            }
+            let rebuilt = self.rebuild(&before, &changes, self.height, 0);
+            let step = match (&self.p.ops[i], keep) {
+                (Op::Assert(b), _) => {
+                    // read before the slots change
+                    let occupant = std::mem::replace(&mut self.occupant, before.clone());
+                    let bit = self.read(*b);
+                    self.occupant = occupant;
                     let verify = Term::comp(&bit, &Term::jet("verify"));
-                    (Term::comp(&Term::pair(&verify, &Self::suffix(dead)), &Term::drop_(&Term::iden())), rest)
+                    Term::comp(&Term::pair(&verify, &rebuilt), &Term::drop_(&Term::iden()))
                 }
-                _ => {
-                    let e = self.expr(i, &env);
-                    if self.last_use[i] > k {
-                        let pos = rest.iter().take_while(|x| key(&self, **x) < key(&self, v)).count();
-                        let mut s = Term::pair(&e, &Self::suffix(dead + pos));
-                        for x in rest[..pos].iter().rev() {
-                            let r = self.read(*x, &env);
-                            s = Term::pair(&r, &s);
-                        }
-                        let mut next = rest[..pos].to_vec();
-                        next.push(v);
-                        next.extend_from_slice(&rest[pos..]);
-                        (s, next)
-                    } else {
-                        // a value nobody reads: computed and discarded
-                        (Term::comp(&Term::pair(&e, &Self::suffix(dead)), &Term::drop_(&Term::iden())), rest)
-                    }
-                }
+                (_, true) => rebuilt,
+                // a value nobody reads: computed and discarded
+                (_, false) => Term::comp(&Term::pair(fresh.as_ref().unwrap(), &rebuilt), &Term::drop_(&Term::iden())),
             };
             steps.push(step);
-            env = next;
         }
         // composition is associative: a balanced tree of `comp` keeps the program shallow
         steps.push(Term::unit());
         balanced(&steps)
+    }
+
+    /// The subtree of the environment at `prefix` (of `level` levels above the leaves) after the
+    /// step's `changes` (slot -> new value or none), from the environment `before`.
+    fn rebuild(&self, before: &[Option<usize>], changes: &BTreeMap<usize, Option<Term>>, level: usize, prefix: usize) -> Term {
+        let lo = prefix << level;
+        let hi = lo + (1 << level);
+        let changed = changes.range(lo..hi).next().is_some();
+        let occupied_after = (lo..hi).any(|s| match changes.get(&s) {
+            Some(c) => c.is_some(),
+            None => before[s].is_some(),
+        });
+        if !occupied_after {
+            return Term::unit();
+        }
+        if !changed {
+            // the same subtree as before: one path to it
+            return Self::path(lo, self.height, level, &Term::iden());
+        }
+        if level == 0 {
+            return changes[&lo].clone().expect("an occupied changed slot has a value");
+        }
+        let l = self.rebuild(before, changes, level - 1, prefix << 1);
+        let r = self.rebuild(before, changes, level - 1, (prefix << 1) | 1);
+        Term::pair(&l, &r)
     }
 }
 

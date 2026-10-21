@@ -463,4 +463,44 @@ mod tests {
         println!("program {} B, steps {}, reads {} (mean depth {:.1}), constant bytes {}, text lines {}, witness nodes {}", r.program_bytes, sv.stats().steps, reads, depth as f64 / reads as f64, consts, text.lines().count(), witness_cmrs);
     }
 
+
+    /// Diagnostic: chains of multiplications — steps, the scheduler's live bits, the cost.
+    #[test]
+    #[ignore]
+    fn chain_growth() {
+        let env = dummy_env();
+        for n in [16usize, 32, 64] {
+            let pc = PedersenGens::<Secp256k1>::for_curve();
+            let bp = BulletproofGens::<Secp256k1>::for_curve(2 * n + 64, 1);
+            let chain = |cs: &mut dyn FnMut(crate::r1cs::LinearCombination<K>, crate::r1cs::LinearCombination<K>) -> Variable, x: Variable| {
+                let mut v = lc(x);
+                for _ in 0..n {
+                    let o = cs(v, lc(x));
+                    v = lc(o);
+                }
+                v
+            };
+            let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(1);
+            let mut t = Sha256Transcript::new(b"chain");
+            t.append_message(SIGHASH_LABEL, &sighash_of(&env));
+            let mut p = Prover::new(&pc, &mut t);
+            p.set_backend(Backend::Bppp);
+            let (cx, x) = p.commit(K::from(3u64), K::random(&mut rng));
+            let _ = chain(&mut |a, b| p.multiply(a, b).2, x);
+            let proof = p.prove_with_rng(&bp, &mut rng).unwrap();
+            let mut ct = CompileTranscript::new(b"chain");
+            TranscriptBackend::append_message(&mut ct, SIGHASH_LABEL, &[0u8; 32]);
+            let mut v = Verifier::<_, Secp256k1>::for_curve(&mut ct);
+            v.set_backend(Backend::Bppp);
+            let xv = v.commit(cx);
+            let _ = chain(&mut |a, b| v.multiply(a, b).2, xv);
+            crate::simplicity::ir::PATH_STATS.with(|c| *c.borrow_mut() = (0, 0));
+            let sv = v.compile_to_simplicity(&pc, &bp).unwrap();
+            let (reads, depth) = crate::simplicity::ir::PATH_STATS.with(|c| *c.borrow());
+            let r = crate::simplicity::run::execute_term(&sv.term, &sv.witness(&proof).unwrap().0, &env, false);
+            let st = sv.stats();
+            println!("n {}: steps {}, live bits {} ({:.0} per step), reads {} depth sum {} (~{} mWU of path overhead), cost {:?}", n, st.steps, st.live_bits, st.live_bits as f64 / st.steps as f64, reads, depth, 100 * (depth + reads), r.map(|r| r.cost_mwu));
+        }
+    }
+
 }

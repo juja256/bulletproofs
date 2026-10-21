@@ -288,8 +288,14 @@ struct Lowering<'a> {
     slot: Vec<usize>,
     /// The value in each slot of the environment tree.
     occupant: Vec<Option<usize>>,
-    /// The tree's height: `2^height` slots.
+    /// The (cold) tree's height: `2^height` slots.
     height: usize,
+    /// The hot tree's height (0: no hot tree, the environment is the cold tree).
+    hot_levels: usize,
+    /// The hot tree's slots (0 or `2^hot_levels`); they come first.
+    hot_size: usize,
+    /// Whether each stored value lives in the hot tree.
+    hot: Vec<bool>,
     consts: HashMap<(Ty, Vec<u8>), Term>,
     witnesses: HashMap<Arc<str>, Term>,
     /// The expressions of inlined values built in the current step (they read its slots).
@@ -337,24 +343,69 @@ impl<'a> Lowering<'a> {
                 last_use[a] = last_use[a].max(pos[r]);
             }
         }
-        // the most values alive at once: the number of slots
-        let mut deaths = vec![0usize; order.len() + 1];
-        for &r in &order {
-            if !matches!(p.ops[r], Op::Assert(_)) && last_use[r] > pos[r] {
-                deaths[last_use[r]] += 1;
+        // reads of each stored value (each run of a reader counts)
+        let reads_of: Vec<u64> = (0..n).map(|i| readers[i].iter().map(|&r| if role[r] == Role::Root { 1 } else { exec[r] }).fold(0u64, |a, b| a.saturating_add(b))).collect();
+        let kept = |r: usize| !matches!(p.ops[r], Op::Assert(_)) && last_use[r] > pos[r];
+        // The environment is (hot, cold) with `hot_cold`: the values read most go to a small
+        // hot tree, each if a hot slot is free over its whole life. 0..=4 hot levels are tried
+        // (0: one tree), keeping the fewest selectors read (ties to fewer levels).
+        let mut by_reads: Vec<usize> = order.iter().copied().filter(|&r| kept(r) && reads_of[r] >= HOT_READS).collect();
+        by_reads.sort_by(|a, b| reads_of[*b].cmp(&reads_of[*a]).then(a.cmp(b)));
+        let simulate = |hh: usize| -> (Vec<bool>, usize, u64) {
+            let cap = if hh > 0 { 1usize << hh } else { 0 };
+            let mut hot = vec![false; n];
+            let mut busy = vec![0usize; order.len() + 1];
+            for &r in &by_reads {
+                let (from, to) = (pos[r], last_use[r]);
+                if busy[from..to].iter().all(|b| *b < cap) {
+                    hot[r] = true;
+                    busy[from..to].iter_mut().for_each(|b| *b += 1);
+                }
+            }
+            let mut dies = vec![0usize; order.len() + 1];
+            let (mut cold_alive, mut most_cold) = (0usize, 1usize);
+            for (k, &r) in order.iter().enumerate() {
+                cold_alive -= dies[k];
+                if kept(r) && !hot[r] {
+                    cold_alive += 1;
+                    dies[last_use[r]] += 1;
+                    most_cold = most_cold.max(cold_alive);
+                }
+            }
+            let hc = (usize::BITS - (most_cold - 1).leading_zeros()) as usize;
+            let cold_depth = if hh > 0 { hc + 1 } else { hc } as u64;
+            let selectors = order.iter().filter(|&&r| kept(r)).map(|&r| reads_of[r].saturating_mul(if hot[r] { hh as u64 + 1 } else { cold_depth })).fold(0u64, |a, b| a.saturating_add(b));
+            (hot, hc, selectors)
+        };
+        let mut best = (0usize, simulate(0));
+        if opts.hot_cold {
+            for hh in 1..=4 {
+                let t = simulate(hh);
+                if t.2 < (best.1).2 {
+                    best = (hh, t);
+                }
             }
         }
-        let mut alive = 0usize;
-        let mut most = 1usize;
-        for (k, &r) in order.iter().enumerate() {
-            alive -= deaths[k];
-            if !matches!(p.ops[r], Op::Assert(_)) && last_use[r] > k {
-                alive += 1;
-            }
-            most = most.max(alive);
+        let (hot_levels, (hot, height, _)) = best;
+        let hot_size = if hot_levels > 0 { 1usize << hot_levels } else { 0 };
+        Lowering {
+            p,
+            role,
+            exec,
+            pos,
+            last_use,
+            order,
+            live_bits,
+            slot: vec![usize::MAX; n],
+            occupant: vec![None; hot_size + (1 << height)],
+            height,
+            hot_levels,
+            hot_size,
+            hot,
+            consts: HashMap::new(),
+            witnesses: HashMap::new(),
+            cache: HashMap::new(),
         }
-        let height = (usize::BITS - (most - 1).leading_zeros()) as usize;
-        Lowering { p, role, exec, pos, last_use, order, live_bits, slot: vec![usize::MAX; n], occupant: vec![None; 1 << height], height, consts: HashMap::new(), witnesses: HashMap::new(), cache: HashMap::new() }
     }
 
     /// Roles from the last operation back: a value's readers are decided before it, so the
@@ -494,6 +545,35 @@ impl<'a> Lowering<'a> {
         (lo, hi)
     }
 
+    /// The selectors from the environment's root to stored value `i`'s slot.
+    #[cfg(test)]
+    fn depth_of(&self, i: usize) -> usize {
+        if self.hot_size == 0 {
+            self.height
+        } else if self.hot[i] {
+            self.hot_levels + 1
+        } else {
+            self.height + 1
+        }
+    }
+
+    /// The deepest stored value's selectors.
+    #[cfg(test)]
+    fn max_depth(&self) -> usize {
+        self.order.iter().filter(|&&r| !matches!(self.p.ops[r], Op::Assert(_)) && self.last_use[r] > self.pos[r]).map(|&r| self.depth_of(r)).max().unwrap_or(0)
+    }
+
+    /// The path to `slot` (hot slots first, then cold), then `inner`.
+    fn path_of(&self, slot: usize, inner: &Term) -> Term {
+        if self.hot_size == 0 {
+            Self::path(slot, self.height, 0, inner)
+        } else if slot < self.hot_size {
+            Term::take(&Self::path(slot, self.hot_levels, 0, inner))
+        } else {
+            Term::drop_(&Self::path(slot - self.hot_size, self.height, 0, inner))
+        }
+    }
+
     /// The number of steps (roots).
     fn steps(&self) -> usize {
         self.order.len()
@@ -530,9 +610,9 @@ impl<'a> Lowering<'a> {
                 PATH_STATS.with(|c| {
                     let mut c = c.borrow_mut();
                     c.0 += 1;
-                    c.1 += self.height;
+                    c.1 += self.depth_of(i);
                 });
-                Self::path(slot, self.height, 0, &Term::iden())
+                self.path_of(slot, &Term::iden())
             }
         }
     }
@@ -613,12 +693,19 @@ impl<'a> Lowering<'a> {
             }
             let mut changes: BTreeMap<usize, Option<Term>> = dying.iter().map(|s| (*s, None)).collect();
             if keep {
-                let s = self.occupant.iter().position(|o| o.is_none()).expect("a free slot");
+                let range = if self.hot[i] { 0..self.hot_size } else { self.hot_size..self.occupant.len() };
+                let s = range.into_iter().find(|s| self.occupant[*s].is_none()).expect("a free slot");
                 self.occupant[s] = Some(i);
                 self.slot[i] = s;
                 changes.insert(s, fresh.clone());
             }
-            let rebuilt = self.rebuild(&before, &changes, self.height, 0);
+            let rebuilt = if self.hot_size == 0 {
+                self.rebuild(&before, &changes, 0, self.height, None, self.height, 0)
+            } else {
+                let h = self.rebuild(&before, &changes, 0, self.hot_levels, Some(false), self.hot_levels, 0);
+                let c = self.rebuild(&before, &changes, self.hot_size, self.height, Some(true), self.height, 0);
+                Term::pair(&h, &c)
+            };
             let step = match (&self.p.ops[i], keep) {
                 (Op::Assert(b), _) => {
                     // read before the slots change
@@ -639,10 +726,12 @@ impl<'a> Lowering<'a> {
         balanced(&steps)
     }
 
-    /// The subtree of the environment at `prefix` (of `level` levels above the leaves) after the
-    /// step's `changes` (slot -> new value or none), from the environment `before`.
-    fn rebuild(&self, before: &[Option<usize>], changes: &BTreeMap<usize, Option<Term>>, level: usize, prefix: usize) -> Term {
-        let lo = prefix << level;
+    /// The subtree at `prefix` (of `level` levels above the leaves) of the tree of height `h`
+    /// whose slots start at `base` (reached by `wrap`: none, `take` or `drop`) after the step's
+    /// `changes` (slot -> new value or none), from the environment `before`.
+    #[allow(clippy::too_many_arguments)]
+    fn rebuild(&self, before: &[Option<usize>], changes: &BTreeMap<usize, Option<Term>>, base: usize, h: usize, wrap: Option<bool>, level: usize, prefix: usize) -> Term {
+        let lo = base + (prefix << level);
         let hi = lo + (1 << level);
         let changed = changes.range(lo..hi).next().is_some();
         let occupied_after = (lo..hi).any(|s| match changes.get(&s) {
@@ -654,13 +743,18 @@ impl<'a> Lowering<'a> {
         }
         if !changed {
             // the same subtree as before: one path to it
-            return Self::path(lo, self.height, level, &Term::iden());
+            let t = Self::path(prefix << level, h, level, &Term::iden());
+            return match wrap {
+                None => t,
+                Some(false) => Term::take(&t),
+                Some(true) => Term::drop_(&t),
+            };
         }
         if level == 0 {
             return changes[&lo].clone().expect("an occupied changed slot has a value");
         }
-        let l = self.rebuild(before, changes, level - 1, prefix << 1);
-        let r = self.rebuild(before, changes, level - 1, (prefix << 1) | 1);
+        let l = self.rebuild(before, changes, base, h, wrap, level - 1, prefix << 1);
+        let r = self.rebuild(before, changes, base, h, wrap, level - 1, (prefix << 1) | 1);
         Term::pair(&l, &r)
     }
 }
@@ -687,6 +781,9 @@ pub(crate) fn bits_of(t: &Ty) -> u64 {
 const NODE: u64 = 100;
 /// The environment's height assumed when deciding what to store.
 const ASSUMED_HEIGHT: u64 = 6;
+/// Reads that make a stored value a candidate for the hot tree.
+const HOT_READS: u64 = 4;
+
 /// How a program is lowered; the compiler tries several and keeps the lightest program.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Options {
@@ -694,11 +791,13 @@ pub(crate) struct Options {
     /// inlined in the cost of recomputing a value (fewer recomputations, more stored values:
     /// less cost, more bytes).
     pub(crate) role_passes: usize,
+    /// The environment as a small hot tree for the values read most and a cold tree.
+    pub(crate) hot_cold: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { role_passes: 1 }
+        Options { role_passes: 1, hot_cold: false }
     }
 }
 
@@ -1085,6 +1184,54 @@ mod tests {
         assert!(run(gx).is_ok());
         assert!(run(vec![0u8; 32]).is_err());
     }
+
+    /// With `hot_cold`, a value read many times sits in the small hot tree: its reads take fewer
+    /// selectors than the cold values' (20 witnesses alive at once at the end). The program
+    /// still runs and fails on a wrong witness.
+    #[test]
+    fn hot_values_have_short_paths() {
+        let mut p = Prog::new();
+        let wx = p.push(Op::Witness("x".into(), Ty::word()));
+        let inv = p.push(Op::Jet("scalar_invert", vec![wx], Ty::word()));
+        let mut cold = Vec::new();
+        for i in 0..20u64 {
+            let w = p.push(Op::Witness(format!("c{}", i).as_str().into(), Ty::word()));
+            let v = p.push(Op::Jet("scalar_invert", vec![w], Ty::word()));
+            let kc = p.push(Op::Const(Ty::word(), be(&sc(i + 2).invert().unwrap())));
+            cold.push((v, kc));
+        }
+        for &(v, kc) in &cold {
+            let e = p.push(Op::Jet("eq_256", vec![v, kc], Ty::Bit));
+            p.push(Op::Assert(e));
+        }
+        let k = p.push(Op::Const(Ty::word(), be(&sc(5).invert().unwrap())));
+        for _ in 0..64 {
+            let e = p.push(Op::Jet("eq_256", vec![inv, k], Ty::Bit));
+            p.push(Op::Assert(e));
+        }
+        // the cold values read together at the end: all alive at once
+        let mut acc = cold[0].0;
+        for &(v, _) in &cold[1..] {
+            acc = p.push(Op::Jet("scalar_add", vec![acc, v], Ty::word()));
+        }
+        let total = (0..20u64).map(|i| sc(i + 2).invert().unwrap()).fold(sc(0), |a, b| a + b);
+        let kt = p.push(Op::Const(Ty::word(), be(&total)));
+        let e = p.push(Op::Jet("eq_256", vec![acc, kt], Ty::Bit));
+        p.push(Op::Assert(e));
+        let opts = Options { role_passes: 1, hot_cold: true };
+        let mut w = HashMap::new();
+        w.insert(Arc::<str>::from("x"), word_value(&be(&sc(5))));
+        for i in 0..20u64 {
+            w.insert(Arc::<str>::from(format!("c{}", i).as_str()), word_value(&be(&sc(i + 2))));
+        }
+        assert!(execute_term(&p.lower(&opts).term, &w, &dummy_env(), false).is_ok());
+        let l = Lowering::new(&p, &opts);
+        assert!(l.depth_of(inv.0 as usize) < l.max_depth(), "{} vs {}", l.depth_of(inv.0 as usize), l.max_depth());
+        let one_tree = Lowering::new(&p, &Options::default());
+        assert_eq!(one_tree.depth_of(inv.0 as usize), one_tree.max_depth());
+        w.insert(Arc::<str>::from("x"), word_value(&be(&sc(6))));
+        assert!(execute_term(&p.lower(&opts).term, &w, &dummy_env(), false).is_err());
+    }
 }
 
 /// Random programs (suggested by the stage 2 review): every check must run after inlining,
@@ -1174,15 +1321,20 @@ pub(crate) mod random_programs {
     #[test]
     fn random_programs_accept_and_every_check_runs() {
         let mut total = 0;
-        for seed in 1..60u64 {
-            for n in [5usize, 20, 60] {
-                let (p, w, checks) = build(seed, n, None);
-                let r = execute_term(&p.to_term(), &w, &dummy_env(), false);
-                assert!(r.is_ok(), "seed {} n {}: {:?}", seed, n, r.err());
-                for c in 0..checks {
-                    let (p, w, _) = build(seed, n, Some(c));
-                    assert!(execute_term(&p.to_term(), &w, &dummy_env(), false).is_err(), "seed {} n {} check {} skipped", seed, n, c);
-                    total += 1;
+        // every lowering the compiler may pick
+        let all = [(1, false), (2, false), (1, true), (2, true)].map(|(role_passes, hot_cold)| Options { role_passes, hot_cold });
+        for (k, opts) in all.iter().enumerate() {
+            // the default lowering on every seed, the others on a share of them
+            for seed in (1..60u64).filter(|s| k == 0 || s % 3 == k as u64 % 3) {
+                for n in [5usize, 20, 60] {
+                    let (p, w, checks) = build(seed, n, None);
+                    let r = execute_term(&p.lower(opts).term, &w, &dummy_env(), false);
+                    assert!(r.is_ok(), "{:?} seed {} n {}: {:?}", opts, seed, n, r.err());
+                    for c in 0..checks {
+                        let (p, w, _) = build(seed, n, Some(c));
+                        assert!(execute_term(&p.lower(opts).term, &w, &dummy_env(), false).is_err(), "{:?} seed {} n {} check {} skipped", opts, seed, n, c);
+                        total += 1;
+                    }
                 }
             }
         }

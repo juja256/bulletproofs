@@ -4,6 +4,7 @@
 
 mod compile;
 mod ir;
+mod opt;
 mod run;
 mod point;
 mod sched;

@@ -35,6 +35,10 @@ The compiler traces the crate's own BP++ verifier (`reciprocal::terms`):
 - It runs the verifier on a dummy proof of the circuit's dimensions, over a scalar type that records
   every operation on a tape and a curve whose points remember whether they come from the proof.
   Operations on constants fold. A scalar from the proof or a challenge starts a node.
+- The tracer tells proof data from constants by their bytes. The dummy proof is therefore drawn
+  at random for every compilation, so that no statement can be crafted to equal one of its
+  points; the compiler also refuses a statement or generator point equal to one. The program
+  does not depend on the dummy proof.
 - The verifier's control flow depends only on the circuit's shape. Its value-dependent checks
   become assertions, and an equality between two traced values is refused. A test traces two
   proofs and requires the same tape.

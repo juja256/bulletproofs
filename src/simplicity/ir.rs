@@ -67,6 +67,13 @@ impl Ty {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct Val(u32);
 
+impl Val {
+    /// The position of the operation that defines it.
+    pub(crate) fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
 /// An operation.
 #[derive(Clone, Debug)]
 pub(crate) enum Op {
@@ -93,13 +100,28 @@ pub(crate) enum Op {
 }
 
 impl Op {
-    fn args(&self) -> Vec<Val> {
+    /// The arguments, in order.
+    pub(crate) fn args(&self) -> Vec<Val> {
         match self {
             Op::Const(..) | Op::Witness(..) => vec![],
             Op::Jet(_, a, _) => a.clone(),
             Op::Unwrap(v, _) | Op::Fst(v, _) | Op::Snd(v, _) | Op::Assert(v) => vec![*v],
             Op::Pair(a, b, _) => vec![*a, *b],
             Op::Select(c, a, b, _) => vec![*c, *a, *b],
+        }
+    }
+
+    /// The same operation on other arguments (in the order of [`Op::args`]).
+    pub(crate) fn with_args(&self, a: &[Val]) -> Op {
+        match self {
+            Op::Const(..) | Op::Witness(..) => self.clone(),
+            Op::Jet(n, _, t) => Op::Jet(n, a.to_vec(), t.clone()),
+            Op::Unwrap(_, t) => Op::Unwrap(a[0], t.clone()),
+            Op::Pair(_, _, t) => Op::Pair(a[0], a[1], t.clone()),
+            Op::Fst(_, t) => Op::Fst(a[0], t.clone()),
+            Op::Snd(_, t) => Op::Snd(a[0], t.clone()),
+            Op::Select(_, _, _, t) => Op::Select(a[0], a[1], a[2], t.clone()),
+            Op::Assert(_) => Op::Assert(a[0]),
         }
     }
 
@@ -141,6 +163,11 @@ impl Prog {
         self.tys.push(op.ty());
         self.ops.push(op);
         v
+    }
+
+    /// The operations in order.
+    pub(crate) fn ops(&self) -> &[Op] {
+        &self.ops
     }
 
     /// The type of a value.
@@ -244,7 +271,7 @@ impl<'a> Lowering<'a> {
             .map(|(i, o)| match o {
                 Op::Const(..) => Role::Const,
                 Op::Assert(_) => Role::Root,
-                Op::Witness(..) if uses[i] <= 1 && !in_branch[i] => Role::InlineWitness,
+                Op::Witness(..) if uses[i] == 1 && !in_branch[i] => Role::InlineWitness,
                 _ if uses[i] == 1 && !in_branch[i] => Role::Inline,
                 _ => Role::Root,
             })
@@ -762,7 +789,7 @@ mod tests {
 /// Random programs (suggested by the stage 2 review): every check must run after inlining,
 /// scheduling and the slot tree.
 #[cfg(test)]
-mod random_programs {
+pub(crate) mod random_programs {
     use super::*;
     use crate::simplicity::run::{dummy_env, execute_term, word_value};
     use k256::elliptic_curve::ff::PrimeField as _;
@@ -775,7 +802,7 @@ mod random_programs {
 
     /// Random scalar programs with checks at random nodes (and random selections between
     /// values); every check must run: perturbing any one of them must fail.
-    fn build(seed: u64, n: usize, bad: Option<usize>) -> (Prog, HashMap<Arc<str>, ::simplicity::Value>, usize) {
+    pub(crate) fn build(seed: u64, n: usize, bad: Option<usize>) -> (Prog, HashMap<Arc<str>, ::simplicity::Value>, usize) {
         let mut x = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
         let mut rnd = move || {
             x ^= x << 13;

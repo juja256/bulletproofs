@@ -176,43 +176,54 @@ impl Prog {
         self.tys[v.0 as usize].as_ref().expect("an assertion has no value")
     }
 
-    /// Jets by name: how many times the program runs each (a recomputed value runs at each
-    /// of its readers); `verify` once per check.
-    pub(crate) fn stats(&self) -> BTreeMap<&'static str, usize> {
-        let l = Lowering::new(self);
-        let mut m = BTreeMap::new();
+    /// The program as a DAG of combinators, and what it runs, with the lowering `opts`.
+    pub(crate) fn lower(&self, opts: &Options) -> Lowered {
+        let l = Lowering::new(self, opts);
+        let mut jets = BTreeMap::new();
         for (i, o) in self.ops.iter().enumerate() {
             let times = if l.role[i] == Role::Root { 1 } else { l.exec[i] as usize };
             match o {
-                Op::Jet(n, _, _) => *m.entry(*n).or_insert(0) += times,
-                Op::Assert(_) => *m.entry("verify").or_insert(0) += 1,
+                Op::Jet(n, _, _) => *jets.entry(*n).or_insert(0) += times,
+                Op::Assert(_) => *jets.entry("verify").or_insert(0) += 1,
                 _ => {}
             }
         }
-        m
+        let steps = l.steps();
+        let stored = l.order.iter().filter(|&&r| !matches!(self.ops[r], Op::Assert(_)) && l.last_use[r] > l.pos[r]).count();
+        let live_bits = l.live_bits;
+        Lowered { term: l.run(), jets, steps, stored, live_bits }
     }
 
-    /// The program as a DAG of combinators.
+    /// Jets by name: how many times the program runs each (a recomputed value runs at each
+    /// of its readers); `verify` once per check (default options).
+    #[cfg(test)]
+    pub(crate) fn stats(&self) -> BTreeMap<&'static str, usize> {
+        self.lower(&Options::default()).jets
+    }
+
+    /// The program as a DAG of combinators (default options).
+    #[cfg(test)]
     pub(crate) fn to_term(&self) -> Term {
-        Lowering::new(self).run()
+        Lowering::new(self, &Options::default()).run()
     }
 
     /// The number of steps the program runs (values read several times or by nobody, checks).
+    #[cfg(test)]
     pub(crate) fn step_count(&self) -> usize {
-        Lowering::new(self).steps()
+        Lowering::new(self, &Options::default()).steps()
     }
 
     /// Steps that store a value for later steps.
+    #[cfg(test)]
     pub(crate) fn stored_count(&self) -> usize {
-        let l = Lowering::new(self);
-        l.order.iter().filter(|&&r| !matches!(self.ops[r], Op::Assert(_)) && l.last_use[r] > l.pos[r]).count()
+        self.lower(&Options::default()).stored
     }
 
     /// Diagnostic: stored values by operation, with their count, Σ bits × steps alive and Σ
     /// readers' executions.
     #[cfg(test)]
     pub(crate) fn stored_report(&self) -> BTreeMap<String, (usize, u64, u64)> {
-        let l = Lowering::new(self);
+        let l = Lowering::new(self, &Options::default());
         let mut m = BTreeMap::new();
         for &r in &l.order {
             if matches!(self.ops[r], Op::Assert(_)) || l.last_use[r] <= l.pos[r] {
@@ -232,8 +243,9 @@ impl Prog {
     }
 
     /// The scheduler's measure: Σ over steps of the bits live after the step.
+    #[cfg(test)]
     pub(crate) fn live_bits(&self) -> u64 {
-        Lowering::new(self).live_bits
+        Lowering::new(self, &Options::default()).live_bits
     }
 
     /// The program in the human-readable encoding (an artifact of [`Prog::to_term`]).
@@ -285,7 +297,7 @@ struct Lowering<'a> {
 }
 
 impl<'a> Lowering<'a> {
-    fn new(p: &'a Prog) -> Self {
+    fn new(p: &'a Prog, opts: &Options) -> Self {
         let n = p.ops.len();
         // every reader, with multiplicity (mul(x, x) reads x twice)
         let mut readers: Vec<Vec<usize>> = vec![Vec::new(); n];
@@ -301,21 +313,72 @@ impl<'a> Lowering<'a> {
                 in_branch[y.0 as usize] = true;
             }
         }
-        // what recomputing a value costs: itself and the arguments only it reads (they run
-        // wherever it runs)
+        // Roles are decided, the roots scheduled, and then (`role_passes` > 1) decided again with
+        // what the previous pass found: the arguments actually inlined and the steps that
+        // actually run each value.
+        let mut prev: Option<(Vec<Role>, Vec<usize>, Vec<usize>)> = None;
+        let mut out = None;
+        let passes = opts.role_passes.max(1);
+        for pass in 0..passes {
+            let (role, exec) = Self::decide(p, &readers, &in_branch, prev.as_ref().map(|(r, lo, hi)| (r.as_slice(), lo.as_slice(), hi.as_slice())));
+            let sched = Self::schedule_roots(p, &role);
+            if pass + 1 < passes {
+                // the first and last step (position) running each value
+                let (lo, hi) = Self::owner_span(p, &readers, &role, &sched.3);
+                prev = Some((role.clone(), lo, hi));
+            }
+            out = Some((role, exec, sched));
+        }
+        let (role, exec, (roots, reads, live_bits, pos, order)) = out.expect("a pass");
+        // a stored value lives until the last step whose expression reads it
+        let mut last_use: Vec<usize> = (0..n).map(|i| pos[i]).collect();
+        for (k, &r) in roots.iter().enumerate() {
+            for &a in &reads[k] {
+                last_use[a] = last_use[a].max(pos[r]);
+            }
+        }
+        // the most values alive at once: the number of slots
+        let mut deaths = vec![0usize; order.len() + 1];
+        for &r in &order {
+            if !matches!(p.ops[r], Op::Assert(_)) && last_use[r] > pos[r] {
+                deaths[last_use[r]] += 1;
+            }
+        }
+        let mut alive = 0usize;
+        let mut most = 1usize;
+        for (k, &r) in order.iter().enumerate() {
+            alive -= deaths[k];
+            if !matches!(p.ops[r], Op::Assert(_)) && last_use[r] > k {
+                alive += 1;
+            }
+            most = most.max(alive);
+        }
+        let height = (usize::BITS - (most - 1).leading_zeros()) as usize;
+        Lowering { p, role, exec, pos, last_use, order, live_bits, slot: vec![usize::MAX; n], occupant: vec![None; 1 << height], height, consts: HashMap::new(), witnesses: HashMap::new(), cache: HashMap::new() }
+    }
+
+    /// Roles from the last operation back: a value's readers are decided before it, so the
+    /// times it runs are known. `prev`: the roles and the first and last step running each
+    /// value, from a previous pass.
+    fn decide(p: &Prog, readers: &[Vec<usize>], in_branch: &[bool], prev: Option<(&[Role], &[usize], &[usize])>) -> (Vec<Role>, Vec<u64>) {
+        let n = p.ops.len();
+        // what recomputing a value costs: itself and the arguments that run wherever it runs
+        // (read only by it; or, after a pass, inlined)
         let mut tree_cost = vec![0u64; n];
         for i in 0..n {
             let own: u64 = p.ops[i]
                 .args()
                 .iter()
                 .map(|a| a.0 as usize)
-                .filter(|&a| readers[a].len() == 1 && !matches!(p.ops[a], Op::Const(..) | Op::Witness(..)))
+                .filter(|&a| !matches!(p.ops[a], Op::Const(..) | Op::Witness(..)))
+                .filter(|&a| match prev {
+                    Some((r, _, _)) => r[a] == Role::Inline,
+                    None => readers[a].len() == 1,
+                })
                 .map(|a| tree_cost[a])
                 .fold(0u64, |x, y| x.saturating_add(y));
             tree_cost[i] = local_cost(p, i).saturating_add(own);
         }
-        // decided from the last operation back: a value's readers are decided before it, so
-        // the times it runs are known
         let mut role = vec![Role::Root; n];
         let mut exec = vec![0u64; n];
         // the last root (in program order) that runs each value: itself if a root, else the
@@ -363,6 +426,14 @@ impl<'a> Lowering<'a> {
                 last_owner[i] = o;
             }
         }
+        (role, exec)
+    }
+
+    /// The roots, the stored values each root's expression reads, the scheduler's live bits,
+    /// each root's position, and the roots in order.
+    #[allow(clippy::type_complexity)]
+    fn schedule_roots(p: &Prog, role: &[Role]) -> (Vec<usize>, Vec<Vec<usize>>, u64, Vec<usize>, Vec<usize>) {
+        let n = p.ops.len();
         let roots: Vec<usize> = (0..n).filter(|i| role[*i] == Role::Root).collect();
         let mut index = vec![usize::MAX; n];
         for (k, r) in roots.iter().enumerate() {
@@ -396,31 +467,31 @@ impl<'a> Lowering<'a> {
         for (k, r) in order.iter().enumerate() {
             pos[*r] = k;
         }
-        // a stored value lives until the last step whose expression reads it
-        let mut last_use: Vec<usize> = (0..n).map(|i| pos[i]).collect();
-        for (k, &r) in roots.iter().enumerate() {
-            for &a in &reads[k] {
-                last_use[a] = last_use[a].max(pos[r]);
+        (roots, reads, live_bits, pos, order)
+    }
+
+    /// The first and last step (position in the order) that runs each value: a root runs in
+    /// its own step and is read in its readers'; an inlined value runs where its readers run.
+    fn owner_span(p: &Prog, readers: &[Vec<usize>], role: &[Role], pos: &[usize]) -> (Vec<usize>, Vec<usize>) {
+        let n = p.ops.len();
+        let (mut lo, mut hi) = (vec![usize::MAX; n], vec![0usize; n]);
+        for i in (0..n).rev() {
+            if role[i] == Role::Root {
+                lo[i] = pos[i];
+                hi[i] = pos[i];
+            }
+            for &r in &readers[i] {
+                let (rl, rh) = if role[r] == Role::Root { (pos[r], pos[r]) } else { (lo[r], hi[r]) };
+                if rl != usize::MAX {
+                    lo[i] = lo[i].min(rl);
+                    hi[i] = hi[i].max(rh);
+                }
+            }
+            if lo[i] == usize::MAX {
+                lo[i] = 0;
             }
         }
-        // the most values alive at once: the number of slots
-        let mut deaths = vec![0usize; order.len() + 1];
-        for &r in &order {
-            if !matches!(p.ops[r], Op::Assert(_)) && last_use[r] > pos[r] {
-                deaths[last_use[r]] += 1;
-            }
-        }
-        let mut alive = 0usize;
-        let mut most = 1usize;
-        for (k, &r) in order.iter().enumerate() {
-            alive -= deaths[k];
-            if !matches!(p.ops[r], Op::Assert(_)) && last_use[r] > k {
-                alive += 1;
-            }
-            most = most.max(alive);
-        }
-        let height = (usize::BITS - (most - 1).leading_zeros()) as usize;
-        Lowering { p, role, exec, pos, last_use, order, live_bits, slot: vec![usize::MAX; n], occupant: vec![None; 1 << height], height, consts: HashMap::new(), witnesses: HashMap::new(), cache: HashMap::new() }
+        (lo, hi)
     }
 
     /// The number of steps (roots).
@@ -616,6 +687,30 @@ pub(crate) fn bits_of(t: &Ty) -> u64 {
 const NODE: u64 = 100;
 /// The environment's height assumed when deciding what to store.
 const ASSUMED_HEIGHT: u64 = 6;
+/// How a program is lowered; the compiler tries several and keeps the lightest program.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Options {
+    /// Passes deciding the roles: each after the first counts the arguments the previous one
+    /// inlined in the cost of recomputing a value (fewer recomputations, more stored values:
+    /// less cost, more bytes).
+    pub(crate) role_passes: usize,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options { role_passes: 1 }
+    }
+}
+
+/// A lowered program and what it runs.
+pub(crate) struct Lowered {
+    pub(crate) term: Term,
+    /// Jets by name, as run.
+    pub(crate) jets: BTreeMap<&'static str, usize>,
+    pub(crate) steps: usize,
+    pub(crate) stored: usize,
+    pub(crate) live_bits: u64,
+}
 
 /// A jet's fixed cost (simplicity-lang 0.9), mWU.
 fn jet_cost(name: &str) -> u64 {

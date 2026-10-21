@@ -234,6 +234,18 @@ pub(crate) fn breakdown(root: &Arc<RedeemNode>) -> std::collections::BTreeMap<St
     go(root, &mut HashMap::new())
 }
 
+/// The weight a program puts on its input, in mWU: the larger of its budget (1000 · (stack +
+/// 50), the stack holding `witness`'s encoding) and its static cost, unpruned (no execution:
+/// any witness of the right types will do).
+pub(crate) fn weight_of(t: &crate::simplicity::term::Term, witness: &HashMap<Arc<str>, Value>) -> Result<u64, ExecError> {
+    types::Context::with_context(|ctx| {
+        let node = t.to_node(&ctx, Some(witness)).map_err(|e| ExecError::Finalize(e.to_string()))?;
+        let program = node.finalize_unpruned().map_err(|e| ExecError::Finalize(e.to_string()))?;
+        let (p, w) = program.to_vec_with_witness();
+        Ok(budget(p.len(), w.len()).max(cost_of(&program)))
+    })
+}
+
 fn cost_of(n: &RedeemNode) -> u64 {
     n.bounds().cost.to_string().parse().expect("cost as an integer")
 }

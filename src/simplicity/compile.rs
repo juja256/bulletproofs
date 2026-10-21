@@ -15,9 +15,9 @@ use crate::curve::{Curve, Field, PointEncoding, Secp256k1, Secp256k1Compressed};
 use crate::errors::R1CSError;
 use crate::generators::{BulletproofGens, PedersenGens};
 use crate::r1cs::R1CSProof;
-use crate::simplicity::ir::{Op, Prog, Ty, Val};
+use crate::simplicity::ir::{Lowered, Op, Options, Prog, Ty, Val};
 use crate::simplicity::point::{assert_infinity, const_gej, ge_to_gej, msm, witness_point, witness_scalar, WitPoint};
-use crate::simplicity::run::{bit_value, execute_term, word_value, Env, ExecError, Report};
+use crate::simplicity::run::{bit_value, execute_term, weight_of, word_value, Env, ExecError, Report};
 use crate::simplicity::term::Term;
 use crate::simplicity::sha::{lower_log, ChallengeVals, Part, Rec};
 use crate::simplicity::trace::{register_witness_point, register_witness_scalar, with_tape, NodeId, PointSrc, TOp, Tape, Traced, TracedCurve, TracedPoint};
@@ -96,26 +96,32 @@ impl SimplicityVerifier {
         if (n_lin, n_mm) != (self.n_lin, self.n_mm) {
             return Err(gadget_err("a proof of other dimensions"));
         }
-        let mut w = HashMap::new();
-        for (i, c) in proof_points(cp).iter().enumerate() {
-            let pt = Secp256k1::decompress(c).ok_or(R1CSError::VerificationError)?;
-            let e = pt.to_affine().to_encoded_point(false);
-            let (x, y) = match (e.x(), e.y()) {
-                (Some(x), Some(y)) => (x.to_vec(), y.to_vec()),
-                _ => return Err(gadget_err("the identity in a proof (not supported by the program)")),
-            };
-            w.insert(Arc::from(format!("p{}", i)), ::simplicity::Value::product(bit_value(y[31] & 1 == 1), word_value(&x)));
-        }
-        for (i, s) in cp.wnla.l.iter().chain(&cp.wnla.n).enumerate() {
-            w.insert(Arc::from(format!("s{}", i)), word_value(&s.to_repr()));
-        }
-        Ok(SimplicityWitness(w))
+        let scalars: Vec<K> = cp.wnla.l.iter().chain(&cp.wnla.n).copied().collect();
+        Ok(SimplicityWitness(witness_map(&proof_points(cp), &scalars)?))
     }
 
     /// Run the program with `w` in the transaction `env`, as a node would.
     pub fn execute(&self, w: &SimplicityWitness, env: &Env) -> Result<Report, ExecError> {
         execute_term(&self.term, &w.0, env, true)
     }
+}
+
+/// The witness of a proof's points (as parity and x) and final scalars, by witness name.
+fn witness_map(points: &[Secp256k1Compressed], scalars: &[K]) -> Result<HashMap<Arc<str>, ::simplicity::Value>, R1CSError> {
+    let mut w = HashMap::new();
+    for (i, c) in points.iter().enumerate() {
+        let pt = Secp256k1::decompress(c).ok_or(R1CSError::VerificationError)?;
+        let e = pt.to_affine().to_encoded_point(false);
+        let (x, y) = match (e.x(), e.y()) {
+            (Some(x), Some(y)) => (x.to_vec(), y.to_vec()),
+            _ => return Err(gadget_err("the identity in a proof (not supported by the program)")),
+        };
+        w.insert(Arc::from(format!("p{}", i)), ::simplicity::Value::product(bit_value(y[31] & 1 == 1), word_value(&x)));
+    }
+    for (i, s) in scalars.iter().enumerate() {
+        w.insert(Arc::from(format!("s{}", i)), word_value(&s.to_repr()));
+    }
+    Ok(w)
 }
 
 /// The proof's points in the order of its bytes: `C_L, C_R, C_O, C_S`, then `(X_r, R_r)` per round.
@@ -138,6 +144,9 @@ pub(crate) fn dummy_proof<R: rand_core::RngCore + rand_core::CryptoRng>(c: &Reci
     let scalars = (0..af + bf).map(|_| K::random(&mut *rng)).collect();
     (points, scalars)
 }
+
+/// The lowerings the compiler tries; it keeps the lightest program (ties to the first).
+const LOWERINGS: [Options; 2] = [Options { role_passes: 1 }, Options { role_passes: 2 }];
 
 /// The transcript domain of R1CS proofs on the BP++ backend (as `Verifier::verify_bppp`).
 const BPPP_DOMAIN: &[u8] = b"bppp-r1cs v2";
@@ -286,10 +295,22 @@ pub(crate) fn compile_with<R: rand_core::RngCore + rand_core::CryptoRng>(
     let p = crate::simplicity::opt::optimize(&p);
     #[cfg(test)]
     LAST_STORED.with(|k| *k.borrow_mut() = Some(p.stored_report()));
-    let term = p.to_term();
+    // the lightest of the lowerings (their weights from the dummy proof's witness: the same
+    // types, so the same program bytes and cost)
+    let dummy = witness_map(&points, &scalars)?;
+    let mut best: Option<(u64, Lowered)> = None;
+    for opts in LOWERINGS {
+        let l = p.lower(&opts);
+        let w = weight_of(&l.term, &dummy).map_err(|e| gadget_err(&format!("the generated program does not type: {:?}", e)))?;
+        if best.as_ref().map_or(true, |(b, _)| w < *b) {
+            best = Some((w, l));
+        }
+    }
+    let (_, low) = best.expect("a lowering");
+    let term = low.term;
     let commit = term.commit().map_err(|e| gadget_err(&format!("the generated program does not type: {}", e)))?;
     let cmr = commit.cmr();
-    let stats = Stats { jets: p.stats(), tape_ops: live.iter().filter(|x| **x).count(), msm_terms: msm_terms.len(), witness_points: n_points, witness_scalars: n_scalars, steps: p.step_count(), stored: p.stored_count(), live_bits: p.live_bits() };
+    let stats = Stats { jets: low.jets, tape_ops: live.iter().filter(|x| **x).count(), msm_terms: msm_terms.len(), witness_points: n_points, witness_scalars: n_scalars, steps: low.steps, stored: low.stored, live_bits: low.live_bits };
     Ok(SimplicityVerifier { term, text: std::sync::OnceLock::new(), cmr, n_lin, n_mm, stats })
 }
 

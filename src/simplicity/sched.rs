@@ -53,10 +53,72 @@ pub(crate) fn live_bits(g: &Graph, order: &[usize]) -> u64 {
     total
 }
 
+/// The order of the three below with the fewest live bits (ties to the earlier candidate):
+/// on demand, greedy, the program's own.
+pub(crate) fn schedule(g: &Graph) -> Vec<usize> {
+    let program: Vec<usize> = (0..g.len()).collect();
+    let mut best = program;
+    let mut best_bits = live_bits(g, &best);
+    for order in [on_demand(g), greedy(g)] {
+        let b = live_bits(g, &order);
+        if b < best_bits {
+            best = order;
+            best_bits = b;
+        }
+    }
+    best
+}
+
+/// Scheduling on demand: from each sink (a root nobody reads: a check, the last term of a sum)
+/// in program order, the roots it needs depth first (deepest first), then the sink. A term of a sum is computed
+/// right after its own inputs, so vectors built in loops die term by term.
+fn on_demand(g: &Graph) -> Vec<usize> {
+    let n = g.len();
+    // the deepest dependency first (Sethi–Ullman): a chain of terms before the small values
+    // a term reads, so that those are computed right before it
+    let mut height = vec![0usize; n];
+    for r in 0..n {
+        height[r] = g.deps[r].iter().map(|d| height[*d] + 1).max().unwrap_or(0);
+    }
+    let by_depth: Vec<Vec<usize>> = g
+        .deps
+        .iter()
+        .map(|ds| {
+            let mut v = ds.clone();
+            v.sort_by(|a, b| height[*b].cmp(&height[*a]).then(a.cmp(b)));
+            v
+        })
+        .collect();
+    let mut done = vec![false; n];
+    let mut order = Vec::with_capacity(n);
+    for sink in (0..n).filter(|r| g.readers[*r].is_empty()) {
+        // iterative depth-first post-order (chains of terms are long)
+        let mut stack: Vec<(usize, usize)> = vec![(sink, 0)];
+        while let Some(&mut (r, ref mut next)) = stack.last_mut() {
+            if done[r] {
+                stack.pop();
+                continue;
+            }
+            if *next < by_depth[r].len() {
+                let d = by_depth[r][*next];
+                *next += 1;
+                if !done[d] {
+                    stack.push((d, 0));
+                }
+            } else {
+                done[r] = true;
+                order.push(r);
+                stack.pop();
+            }
+        }
+    }
+    order
+}
+
 /// Greedy list scheduling: of the ready roots, the one whose step changes the live bits least
 /// (bits it adds, if read later, minus bits of the values it reads for the last time); ties to
-/// the earlier root. The program order is kept if the greedy order is not better.
-pub(crate) fn schedule(g: &Graph) -> Vec<usize> {
+/// the earlier root.
+fn greedy(g: &Graph) -> Vec<usize> {
     let n = g.len();
     let mut pending: Vec<usize> = g.deps.iter().map(|d| d.len()).collect();
     let mut left: Vec<usize> = g.readers.iter().map(|r| r.len()).collect();
@@ -85,12 +147,7 @@ pub(crate) fn schedule(g: &Graph) -> Vec<usize> {
             }
         }
     }
-    let program: Vec<usize> = (0..n).collect();
-    if live_bits(g, &order) <= live_bits(g, &program) {
-        order
-    } else {
-        program
-    }
+    order
 }
 
 #[cfg(test)]
@@ -127,6 +184,28 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Vectors computed in loops, then combined term by term: `a_i` (roots 0..n), `b_i`
+    /// (n..2n), term `t_i` reads `a_i`, `b_i` and `t_{i-1}`. The program order keeps every
+    /// `a_i` alive until its term; scheduling on demand computes `a_i, b_i, t_i` together.
+    #[test]
+    fn schedule_fuses_vectors_with_their_terms() {
+        let n = 30;
+        let mut deps: Vec<Vec<usize>> = vec![vec![]; 2 * n];
+        let mut bits = vec![256u64; 2 * n];
+        for i in 0..n {
+            let mut d = vec![i, n + i];
+            if i > 0 {
+                d.push(2 * n + i - 1);
+            }
+            deps.push(d);
+            bits.push(768);
+        }
+        let g = Graph::new(deps, bits);
+        let order = schedule(&g);
+        let program: Vec<usize> = (0..g.len()).collect();
+        assert!(live_bits(&g, &order) * 5 < live_bits(&g, &program), "{} vs {}", live_bits(&g, &order), live_bits(&g, &program));
     }
 
     #[test]

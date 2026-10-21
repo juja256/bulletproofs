@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use ::simplicity::elements::taproot::ControlBlock;
 use ::simplicity::elements::{self, confidential, AssetIssuance, BlockHash};
+#[cfg(test)]
 use ::simplicity::human_encoding::Forest;
 use ::simplicity::jet::elements::{ElementsEnv, ElementsUtxo};
 use ::simplicity::jet::Elements;
@@ -157,6 +158,7 @@ fn cost_of(n: &RedeemNode) -> u64 {
 
 /// Parse `program` (human-readable encoding), prune it against `env` with `witness`, run it,
 /// encode and decode it, check the CMR, run it again, and check its cost against the budget.
+#[cfg(test)]
 pub(crate) fn execute_text(program: &str, witness: &HashMap<Arc<str>, Value>, env: &Env) -> Result<Report, ExecError> {
     let forest = Forest::parse::<Elements>(program).map_err(|e| ExecError::Parse(e.to_string()))?;
     execute_forest(&forest, witness, env, true)
@@ -170,9 +172,24 @@ pub(crate) fn execute_text_unbudgeted(program: &str, witness: &HashMap<Arc<str>,
     execute_forest(&forest, witness, env, false)
 }
 
+/// Run a program given as a combinator DAG, as a node would ([`execute_text`]'s checks).
+pub(crate) fn execute_term(t: &crate::simplicity::term::Term, witness: &HashMap<Arc<str>, Value>, env: &Env, budgeted: bool) -> Result<Report, ExecError> {
+    types::Context::with_context(|ctx| {
+        let node = t.to_node(&ctx, Some(witness)).map_err(|e| ExecError::Finalize(e.to_string()))?;
+        run_node(node, env, budgeted)
+    })
+}
+
+#[cfg(test)]
 pub(crate) fn execute_forest(forest: &Forest, witness: &HashMap<Arc<str>, Value>, env: &Env, budgeted: bool) -> Result<Report, ExecError> {
     types::Context::with_context(|ctx| {
         let node = forest.to_witness_node(&ctx, witness).ok_or_else(|| ExecError::Parse("no main".into()))?;
+        run_node(node, env, budgeted)
+    })
+}
+
+fn run_node(node: Arc<::simplicity::ConstructNode<'_>>, env: &Env, budgeted: bool) -> Result<Report, ExecError> {
+    {
         let program = node.finalize_pruned(env).map_err(|e| ExecError::Finalize(e.to_string()))?;
         let mut mac = BitMachine::for_program(&program).map_err(|e| ExecError::Machine(e.to_string()))?;
         mac.exec(&program, env).map_err(|e| ExecError::Exec(e.to_string()))?;
@@ -202,7 +219,7 @@ pub(crate) fn execute_forest(forest: &Forest, witness: &HashMap<Arc<str>, Value>
             frames: bounds.extra_frames,
             cmr: program.cmr(),
         })
-    })
+    }
 }
 
 #[cfg(test)]

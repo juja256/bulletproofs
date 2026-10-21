@@ -8,8 +8,11 @@
 //! read where they are used, never stored (a witness node may be reached by one path only).
 
 use std::collections::{BTreeMap, HashMap};
+#[cfg(test)]
 use std::fmt::Write as _;
 use std::sync::Arc;
+
+use crate::simplicity::term::Term;
 
 /// The type of a value.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -52,6 +55,7 @@ impl Ty {
     }
 
     /// The type in the human-readable encoding (`None` for a context: left to inference).
+    #[cfg(test)]
     fn text(&self) -> Option<String> {
         Some(match self {
             Ty::Bit => "2".into(),
@@ -160,6 +164,7 @@ impl Prog {
     }
 
     /// The witness names and types, in program order.
+    #[cfg(test)]
     pub(crate) fn witness_types(&self) -> Vec<(Arc<str>, Ty)> {
         self.ops.iter().filter_map(|o| if let Op::Witness(n, t) = o { Some((n.clone(), t.clone())) } else { None }).collect()
     }
@@ -177,9 +182,21 @@ impl Prog {
         m
     }
 
-    /// The program in the human-readable encoding, with `main`.
-    pub(crate) fn to_text(&self) -> String {
+    /// The program as a DAG of combinators.
+    pub(crate) fn to_term(&self) -> Term {
         Lowering::new(self).run()
+    }
+
+    /// The program in the human-readable encoding (an artifact of [`Prog::to_term`]).
+    #[cfg(test)]
+    pub(crate) fn to_text(&self) -> String {
+        self.to_term().text().expect("the program types")
+    }
+
+    /// The program as stage 1 wrote it (the equivalence test of the two lowerings).
+    #[cfg(test)]
+    pub(crate) fn to_text_legacy(&self) -> String {
+        TextLowering::new(self).run()
     }
 }
 
@@ -196,8 +213,8 @@ struct Lowering<'a> {
     p: &'a Prog,
     kind: Vec<Kind>,
     last_use: Vec<usize>,
-    out: String,
-    consts: HashMap<(Ty, Vec<u8>), String>,
+    consts: HashMap<(Ty, Vec<u8>), Term>,
+    witnesses: HashMap<Arc<str>, Term>,
 }
 
 impl<'a> Lowering<'a> {
@@ -221,7 +238,195 @@ impl<'a> Lowering<'a> {
                 _ => Kind::Stored,
             })
             .collect();
-        Lowering { p, kind, last_use, out: String::new(), consts: HashMap::new() }
+        Lowering { p, kind, last_use, consts: HashMap::new(), witnesses: HashMap::new() }
+    }
+
+    /// A constant, read from any environment: the constant itself (`1 -> T`) is one shared
+    /// node, the `comp unit` that reads it is per use.
+    fn constant(&mut self, t: &Ty, bytes: &[u8]) -> Term {
+        let k = self.consts.entry((t.clone(), bytes.to_vec())).or_insert_with(|| const_term(t, bytes)).clone();
+        Term::comp(&Term::unit(), &k)
+    }
+
+    /// The expression for value `v` given the environment `env` (stored values, in order).
+    fn read(&mut self, v: Val, env: &[Val]) -> Term {
+        let i = v.0 as usize;
+        match (&self.p.ops[i], self.kind[i]) {
+            (Op::Const(t, b), _) => {
+                let (t, b) = (t.clone(), b.clone());
+                self.constant(&t, &b)
+            }
+            (Op::Witness(name, _), Kind::Inline) => self.witness(name),
+            _ => {
+                // paths are written out per use: a shared path would have one type for every
+                // environment it is used in
+                let pos = env.iter().position(|x| *x == v).expect("a value read after it was dropped");
+                let mut path = Term::take(&Term::iden());
+                for _ in 0..pos {
+                    path = Term::drop_(&path);
+                }
+                path
+            }
+        }
+    }
+
+    fn witness(&mut self, name: &Arc<str>) -> Term {
+        self.witnesses.entry(name.clone()).or_insert_with(|| Term::witness(name)).clone()
+    }
+
+    /// The expression computing op `i`'s value from `env`.
+    fn expr(&mut self, i: usize, env: &[Val]) -> Term {
+        let op = self.p.ops[i].clone();
+        match op {
+            Op::Const(..) => unreachable!("constants are inline"),
+            Op::Witness(name, _) => self.witness(&name),
+            Op::Jet(name, args, _) => {
+                if args.is_empty() {
+                    return Term::comp(&Term::unit(), &Term::jet(name));
+                }
+                let tuple = self.tuple(&args, env);
+                Term::comp(&tuple, &Term::jet(name))
+            }
+            Op::Unwrap(v, _) => {
+                let x = self.read(v, env);
+                Term::comp(&Term::pair(&x, &Term::unit()), &Term::assertr(&Term::take(&Term::iden())))
+            }
+            Op::Pair(a, b, _) => {
+                let (x, y) = (self.read(a, env), self.read(b, env));
+                Term::pair(&x, &y)
+            }
+            Op::Fst(v, _) => Term::comp(&self.read(v, env), &Term::take(&Term::iden())),
+            Op::Snd(v, _) => Term::comp(&self.read(v, env), &Term::drop_(&Term::iden())),
+            Op::Select(c, a, b, _) => {
+                let (bit, x, y) = (self.read(c, env), self.read(a, env), self.read(b, env));
+                Term::comp(&Term::pair(&bit, &Term::iden()), &Term::case(&Term::drop_(&y), &Term::drop_(&x)))
+            }
+            Op::Assert(_) => unreachable!("assertions are steps of their own"),
+        }
+    }
+
+    /// Arguments paired right-nested.
+    fn tuple(&mut self, args: &[Val], env: &[Val]) -> Term {
+        let first = self.read(args[0], env);
+        if args.len() == 1 {
+            first
+        } else {
+            let rest = self.tuple(&args[1..], env);
+            Term::pair(&first, &rest)
+        }
+    }
+
+    /// `drop^k iden`: the environment from position `k` on (its unit terminator included).
+    fn suffix(k: usize) -> Term {
+        let mut s = Term::iden();
+        for _ in 0..k {
+            s = Term::drop_(&s);
+        }
+        s
+    }
+
+    fn run(mut self) -> Term {
+        // The environment is ordered by last use (then value number): the values read for the
+        // last time at a step are a prefix of it, and a new value goes where its last use puts
+        // it, so a step rebuilds only the front and passes the rest on as one path.
+        let key = |l: &Lowering, v: Val| (l.last_use[v.0 as usize], v);
+        let mut env: Vec<Val> = Vec::new();
+        let mut steps = Vec::new();
+        for i in 0..self.p.ops.len() {
+            if self.kind[i] == Kind::Inline {
+                continue;
+            }
+            let v = Val(i as u32);
+            let dead = env.iter().take_while(|x| self.last_use[x.0 as usize] <= i).count();
+            let rest: Vec<Val> = env[dead..].to_vec();
+            let (step, next) = match &self.p.ops[i] {
+                Op::Assert(b) => {
+                    let bit = self.read(*b, &env);
+                    let verify = Term::comp(&bit, &Term::jet("verify"));
+                    (Term::comp(&Term::pair(&verify, &Self::suffix(dead)), &Term::drop_(&Term::iden())), rest)
+                }
+                _ => {
+                    let e = self.expr(i, &env);
+                    if self.last_use[i] > i {
+                        let pos = rest.iter().take_while(|x| key(&self, **x) < key(&self, v)).count();
+                        let mut s = Term::pair(&e, &Self::suffix(dead + pos));
+                        for x in rest[..pos].iter().rev() {
+                            let r = self.read(*x, &env);
+                            s = Term::pair(&r, &s);
+                        }
+                        let mut next = rest[..pos].to_vec();
+                        next.push(v);
+                        next.extend_from_slice(&rest[pos..]);
+                        (s, next)
+                    } else {
+                        // a value nobody reads: computed and discarded
+                        (Term::comp(&Term::pair(&e, &Self::suffix(dead)), &Term::drop_(&Term::iden())), rest)
+                    }
+                }
+            };
+            steps.push(step);
+            env = next;
+        }
+        // composition is associative: a balanced tree of `comp` keeps the program shallow
+        steps.push(Term::unit());
+        balanced(&steps)
+    }
+}
+
+/// `s_0 ; s_1 ; ... ; s_n` as a balanced tree of `comp`.
+fn balanced(steps: &[Term]) -> Term {
+    if steps.len() == 1 {
+        return steps[0].clone();
+    }
+    let h = steps.len() / 2;
+    Term::comp(&balanced(&steps[..h]), &balanced(&steps[h..]))
+}
+
+/// A constant of type `t` from its bytes (`1 -> T`).
+fn const_term(t: &Ty, bytes: &[u8]) -> Term {
+    match t {
+        Ty::Bit => Term::bit(bytes[0] & 1 == 1),
+        Ty::Word(_) => Term::word(bytes),
+        Ty::Prod(a, b) => {
+            let n = a.const_bytes();
+            Term::pair(&const_term(a, &bytes[..n]), &const_term(b, &bytes[n..]))
+        }
+        Ty::Opt(_) | Ty::Ctx | Ty::CtxBuf => unreachable!(),
+    }
+}
+
+#[cfg(test)]
+struct TextLowering<'a> {
+    p: &'a Prog,
+    kind: Vec<Kind>,
+    last_use: Vec<usize>,
+    out: String,
+    consts: HashMap<(Ty, Vec<u8>), String>,
+}
+
+#[cfg(test)]
+impl<'a> TextLowering<'a> {
+    fn new(p: &'a Prog) -> Self {
+        let n = p.ops.len();
+        let mut uses = vec![0usize; n];
+        let mut last_use = vec![0usize; n];
+        for (i, o) in p.ops.iter().enumerate() {
+            for a in o.args() {
+                uses[a.0 as usize] += 1;
+                last_use[a.0 as usize] = i;
+            }
+        }
+        let kind = p
+            .ops
+            .iter()
+            .enumerate()
+            .map(|(i, o)| match o {
+                Op::Const(..) => Kind::Inline,
+                Op::Witness(..) if uses[i] <= 1 => Kind::Inline,
+                _ => Kind::Stored,
+            })
+            .collect();
+        TextLowering { p, kind, last_use, out: String::new(), consts: HashMap::new() }
     }
 
     /// The name of a constant's definition (emitted once).
@@ -318,7 +523,7 @@ impl<'a> Lowering<'a> {
         // The environment is ordered by last use (then value number): the values read for the
         // last time at a step are a prefix of it, and a new value goes where its last use puts
         // it, so a step rebuilds only the front and passes the rest on as one path.
-        let key = |l: &Lowering, v: Val| (l.last_use[v.0 as usize], v);
+        let key = |l: &TextLowering, v: Val| (l.last_use[v.0 as usize], v);
         let mut env: Vec<Val> = Vec::new();
         let mut steps = Vec::new();
         for i in 0..self.p.ops.len() {
@@ -365,6 +570,7 @@ impl<'a> Lowering<'a> {
 }
 
 /// `s_0 ; s_1 ; ... ; s_n` as a balanced tree of `comp`.
+#[cfg(test)]
 fn balanced_comp(steps: &[String]) -> String {
     if steps.len() == 1 {
         return steps[0].clone();
@@ -374,6 +580,7 @@ fn balanced_comp(steps: &[String]) -> String {
 }
 
 /// A constant of type `t` from its bytes.
+#[cfg(test)]
 fn const_expr(t: &Ty, bytes: &[u8]) -> String {
     match t {
         Ty::Bit => format!("const 0b{}", bytes[0] & 1),
@@ -392,10 +599,48 @@ fn const_expr(t: &Ty, bytes: &[u8]) -> String {
     }
 }
 
+/// Programs shared by the tests of several modules.
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use super::*;
+    use crate::simplicity::run::word_value;
+    use k256::elliptic_curve::ff::PrimeField as _;
+
+    fn be(s: &k256::Scalar) -> Vec<u8> {
+        s.to_repr().to_vec()
+    }
+
+    /// `inv(a b + c) = expected` with witnesses a, b, c.
+    pub(crate) fn arithmetic_prog() -> Prog {
+        let (a, b, c) = (k256::Scalar::from(11u64), k256::Scalar::from(13u64), k256::Scalar::from(17u64));
+        let expected = (a * b + c).invert().unwrap();
+        let mut p = Prog::new();
+        let wa = p.push(Op::Witness("a".into(), Ty::word()));
+        let wb = p.push(Op::Witness("b".into(), Ty::word()));
+        let wc = p.push(Op::Witness("c".into(), Ty::word()));
+        let m = p.push(Op::Jet("scalar_multiply", vec![wa, wb], Ty::word()));
+        let s = p.push(Op::Jet("scalar_add", vec![m, wc], Ty::word()));
+        let i = p.push(Op::Jet("scalar_invert", vec![s], Ty::word()));
+        let k = p.push(Op::Const(Ty::word(), be(&expected)));
+        let e = p.push(Op::Jet("eq_256", vec![i, k], Ty::Bit));
+        p.push(Op::Assert(e));
+        p
+    }
+
+    /// Its witness, with `c` off by `c_off`.
+    pub(crate) fn arithmetic_witness(c_off: u64) -> HashMap<Arc<str>, ::simplicity::Value> {
+        let mut w = HashMap::new();
+        w.insert(Arc::<str>::from("a"), word_value(&be(&k256::Scalar::from(11u64))));
+        w.insert(Arc::<str>::from("b"), word_value(&be(&k256::Scalar::from(13u64))));
+        w.insert(Arc::<str>::from("c"), word_value(&be(&k256::Scalar::from(17 + c_off))));
+        w
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::simplicity::run::{dummy_env, execute_text_unbudgeted as execute_text, word_value};
+    use crate::simplicity::run::{dummy_env, execute_term, word_value};
     use k256::elliptic_curve::ff::PrimeField as _;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -426,7 +671,7 @@ mod tests {
         w.insert(Arc::<str>::from("a"), word_value(&be(&a)));
         w.insert(Arc::<str>::from("b"), word_value(&be(&b)));
         w.insert(Arc::<str>::from("c"), word_value(&be(&(c + sc(c_off)))));
-        execute_text(&p.to_text(), &w, &dummy_env())
+        execute_term(&p.to_term(), &w, &dummy_env(), false)
     }
 
     #[test]
@@ -457,7 +702,7 @@ mod tests {
         for (n, v) in [("a", a), ("b", b), ("c", c)] {
             w.insert(Arc::<str>::from(n), word_value(&be(&v)));
         }
-        let rep = execute_text(&p.to_text(), &w, &dummy_env()).unwrap();
+        let rep = execute_term(&p.to_term(), &w, &dummy_env(), false).unwrap();
         assert!(rep.cost_mwu > 0);
     }
 
@@ -488,7 +733,7 @@ mod tests {
             let gx2 = p.push(Op::Fst(ge, Ty::word()));
             let e = p.push(Op::Jet("eq_256", vec![gx2, xv], Ty::Bit));
             p.push(Op::Assert(e));
-            execute_text(&p.to_text(), &HashMap::new(), &dummy_env())
+            execute_term(&p.to_term(), &HashMap::new(), &dummy_env(), false)
         };
         assert!(run(gx).is_ok());
         assert!(run(vec![0u8; 32]).is_err());

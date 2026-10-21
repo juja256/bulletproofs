@@ -333,7 +333,7 @@ fn add(p: &mut Prog, ctx: Val, v: Val, n: usize) -> Val {
 mod tests {
     use super::*;
     use crate::simplicity::ir::{Op, Prog, Ty};
-    use crate::simplicity::run::{dummy_env, execute_text_unbudgeted, sighash_of};
+    use crate::simplicity::run::{dummy_env, execute_term, sighash_of};
     use crate::{Sha256Transcript, TranscriptBackend};
     use std::collections::HashMap;
 
@@ -383,7 +383,7 @@ mod tests {
                 p.push(Op::Assert(e));
             }
         }
-        execute_text_unbudgeted(&p.to_text(), &HashMap::new(), &dummy_env()).is_ok()
+        execute_term(&p.to_term(), &HashMap::new(), &dummy_env(), false).is_ok()
     }
 
     /// The KATs of `tests/vectors/transcript/sha256.json`, hashed in the program (from the

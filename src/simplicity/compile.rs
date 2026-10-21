@@ -147,12 +147,12 @@ pub(crate) fn dummy_proof<R: rand_core::RngCore + rand_core::CryptoRng>(c: &Reci
 
 /// The lowerings the compiler tries; it keeps the lightest program (ties to the first).
 const LOWERINGS: [Options; 6] = [
-    Options { role_passes: 1, hot_cold: false, small_words: false },
-    Options { role_passes: 2, hot_cold: false, small_words: false },
-    Options { role_passes: 3, hot_cold: false, small_words: false },
-    Options { role_passes: 1, hot_cold: true, small_words: false },
-    Options { role_passes: 2, hot_cold: true, small_words: false },
-    Options { role_passes: 3, hot_cold: true, small_words: false },
+    Options { role_passes: 1, hot_cold: false, small_words: false, shared_funcs: false },
+    Options { role_passes: 2, hot_cold: false, small_words: false, shared_funcs: false },
+    Options { role_passes: 3, hot_cold: false, small_words: false, shared_funcs: false },
+    Options { role_passes: 1, hot_cold: true, small_words: false, shared_funcs: false },
+    Options { role_passes: 2, hot_cold: true, small_words: false, shared_funcs: false },
+    Options { role_passes: 3, hot_cold: true, small_words: false, shared_funcs: false },
 ];
 
 /// The transcript domain of R1CS proofs on the BP++ backend (as `Verifier::verify_bppp`).
@@ -329,13 +329,17 @@ pub(crate) fn compile_with<R: rand_core::RngCore + rand_core::CryptoRng>(
                 here = Some((w, l, opts));
             }
         }
-        // small constant words on this generator mode's best lowering only (they trade a few
-        // nodes run for bytes)
+        // small constant words and shared functions on this generator mode's best lowering only
+        // (they trade a little cost for bytes)
         let (mut w0, mut l0, opts) = here.expect("a lowering");
-        let (w, l) = weigh(&Options { small_words: true, ..opts })?;
-        if w < w0 {
-            (w0, l0) = (w, l);
+        let mut opts = opts;
+        for alt in [Options { small_words: true, ..opts }, Options { shared_funcs: true, ..opts }, Options { small_words: true, shared_funcs: true, ..opts }] {
+            let (w, l) = weigh(&alt)?;
+            if w < w0 {
+                (w0, l0, opts) = (w, l, alt);
+            }
         }
+        let _ = opts;
         if best.as_ref().map_or(true, |(b, _)| w0 < *b) {
             best = Some((w0, l0));
         }

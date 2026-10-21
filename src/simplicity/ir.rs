@@ -191,7 +191,8 @@ impl Prog {
         let steps = l.steps();
         let stored = l.order.iter().filter(|&&r| !matches!(self.ops[r], Op::Assert(_)) && l.last_use[r] > l.pos[r]).count();
         let live_bits = l.live_bits;
-        Lowered { term: l.run(), jets, steps, stored, live_bits }
+        let (term, funcs) = l.run_counting();
+        Lowered { term, jets, steps, stored, live_bits, funcs }
     }
 
     /// Jets by name: how many times the program runs each (a recomputed value runs at each
@@ -298,6 +299,16 @@ struct Lowering<'a> {
     hot: Vec<bool>,
     /// Words with a zero half built as pairs ([`Options::small_words`]).
     small_words: bool,
+    /// [`Options::shared_funcs`].
+    shared_funcs: bool,
+    /// The steps each inlined value is built in.
+    steps_of: Vec<u32>,
+    /// The shared function of an inlined value, and its inputs (stored values, in order).
+    funcs: HashMap<usize, (Term, Vec<usize>)>,
+    /// Whether an inlined value gets a shared function: its inputs if so.
+    shareable: HashMap<usize, Option<Vec<usize>>>,
+    /// While building a shared function: the path to each input in its input tuple.
+    local: Option<HashMap<usize, Term>>,
     consts: HashMap<(Ty, Vec<u8>), Term>,
     witnesses: HashMap<Arc<str>, Term>,
     /// The expressions of inlined values built in the current step (they read its slots).
@@ -337,7 +348,7 @@ impl<'a> Lowering<'a> {
             }
             out = Some((role, exec, sched));
         }
-        let (role, exec, (roots, reads, live_bits, pos, order)) = out.expect("a pass");
+        let (role, exec, (roots, reads, live_bits, pos, order, steps_of)) = out.expect("a pass");
         // a stored value lives until the last step whose expression reads it
         let mut last_use: Vec<usize> = (0..n).map(|i| pos[i]).collect();
         for (k, &r) in roots.iter().enumerate() {
@@ -405,6 +416,11 @@ impl<'a> Lowering<'a> {
             hot_size,
             hot,
             small_words: opts.small_words,
+            shared_funcs: opts.shared_funcs,
+            steps_of,
+            funcs: HashMap::new(),
+            shareable: HashMap::new(),
+            local: None,
             consts: HashMap::new(),
             witnesses: HashMap::new(),
             cache: HashMap::new(),
@@ -486,7 +502,7 @@ impl<'a> Lowering<'a> {
     /// The roots, the stored values each root's expression reads, the scheduler's live bits,
     /// each root's position, and the roots in order.
     #[allow(clippy::type_complexity)]
-    fn schedule_roots(p: &Prog, role: &[Role]) -> (Vec<usize>, Vec<Vec<usize>>, u64, Vec<usize>, Vec<usize>) {
+    fn schedule_roots(p: &Prog, role: &[Role]) -> (Vec<usize>, Vec<Vec<usize>>, u64, Vec<usize>, Vec<usize>, Vec<u32>) {
         let n = p.ops.len();
         let roots: Vec<usize> = (0..n).filter(|i| role[*i] == Role::Root).collect();
         let mut index = vec![usize::MAX; n];
@@ -496,6 +512,8 @@ impl<'a> Lowering<'a> {
         // the stored values each root's expression reads, through its inlined arguments
         let mut stamp = vec![usize::MAX; n];
         let mut reads: Vec<Vec<usize>> = vec![Vec::new(); roots.len()];
+        // the steps each inlined value is built in
+        let mut steps_of = vec![0u32; n];
         for (k, &r) in roots.iter().enumerate() {
             let mut stack: Vec<usize> = p.ops[r].args().iter().map(|a| a.0 as usize).collect();
             while let Some(a) = stack.pop() {
@@ -505,7 +523,10 @@ impl<'a> Lowering<'a> {
                 stamp[a] = k;
                 match role[a] {
                     Role::Root => reads[k].push(a),
-                    Role::Inline | Role::InlineWitness => stack.extend(p.ops[a].args().iter().map(|x| x.0 as usize)),
+                    Role::Inline | Role::InlineWitness => {
+                        steps_of[a] += 1;
+                        stack.extend(p.ops[a].args().iter().map(|x| x.0 as usize))
+                    }
                     Role::Const => {}
                 }
             }
@@ -521,7 +542,7 @@ impl<'a> Lowering<'a> {
         for (k, r) in order.iter().enumerate() {
             pos[*r] = k;
         }
-        (roots, reads, live_bits, pos, order)
+        (roots, reads, live_bits, pos, order, steps_of)
     }
 
     /// The first and last step (position in the order) that runs each value: a root runs in
@@ -603,11 +624,17 @@ impl<'a> Lowering<'a> {
                 if let Some(t) = self.cache.get(&i) {
                     return t.clone();
                 }
-                let t = self.expr(i);
+                let t = match self.inputs_if_shared(i) {
+                    Some(inputs) => self.call(i, &inputs),
+                    None => self.expr(i),
+                };
                 self.cache.insert(i, t.clone());
                 t
             }
             _ => {
+                if let Some(local) = &self.local {
+                    return local.get(&i).expect("an input of the shared function").clone();
+                }
                 let slot = self.slot[i];
                 assert!(slot != usize::MAX && self.occupant[slot] == Some(i), "a value read after it was dropped");
                 #[cfg(test)]
@@ -619,6 +646,71 @@ impl<'a> Lowering<'a> {
                 self.path_of(slot, &Term::iden())
             }
         }
+    }
+
+    /// With [`Options::shared_funcs`], the inputs of inlined value `i` if it is built in several
+    /// steps by a shared function: at most 8 stored inputs, at least 4 operations, no witness
+    /// read on the way (outside a shared function's own body).
+    fn inputs_if_shared(&mut self, i: usize) -> Option<Vec<usize>> {
+        if !self.shared_funcs || self.local.is_some() || self.steps_of[i] < 2 {
+            return None;
+        }
+        if let Some(x) = self.shareable.get(&i) {
+            return x.clone();
+        }
+        let (mut inputs, mut size, mut ok) = (Vec::new(), 0usize, true);
+        let mut seen = std::collections::HashSet::new();
+        let mut stack = vec![i];
+        while let Some(a) = stack.pop() {
+            if !seen.insert(a) {
+                continue;
+            }
+            match self.role[a] {
+                Role::Root => inputs.push(a),
+                Role::Inline => {
+                    size += 1;
+                    stack.extend(self.p.ops[a].args().iter().map(|x| x.0 as usize));
+                }
+                Role::InlineWitness => ok = false,
+                Role::Const => {}
+            }
+        }
+        inputs.sort();
+        let r = (ok && size >= 4 && !inputs.is_empty() && inputs.len() <= 8).then_some(inputs);
+        self.shareable.insert(i, r.clone());
+        r
+    }
+
+    /// Inlined value `i` by its shared function (built on first use) applied to its inputs
+    /// read from the step's environment: `(x_1, (x_2, ... x_k))`.
+    fn call(&mut self, i: usize, inputs: &[usize]) -> Term {
+        if !self.funcs.contains_key(&i) {
+            let k = inputs.len();
+            let local: HashMap<usize, Term> = inputs
+                .iter()
+                .enumerate()
+                .map(|(j, &x)| {
+                    let mut t = if j + 1 == k { Term::iden() } else { Term::take(&Term::iden()) };
+                    for _ in 0..j {
+                        t = Term::drop_(&t);
+                    }
+                    (x, t)
+                })
+                .collect();
+            let saved_cache = std::mem::take(&mut self.cache);
+            self.local = Some(local);
+            let body = self.expr(i);
+            self.local = None;
+            self.cache = saved_cache;
+            self.funcs.insert(i, (body, inputs.to_vec()));
+        }
+        let f = self.funcs[&i].0.clone();
+        let mut tuple = self.read(Val(inputs[inputs.len() - 1] as u32));
+        for &x in inputs[..inputs.len() - 1].iter().rev() {
+            let t = self.read(Val(x as u32));
+            tuple = Term::pair(&t, &tuple);
+        }
+        Term::comp(&tuple, &f)
     }
 
     /// The path from the root of the environment tree (height `h`) to the node at `prefix`
@@ -678,7 +770,19 @@ impl<'a> Lowering<'a> {
         }
     }
 
-    fn run(mut self) -> Term {
+    /// The program and the number of shared functions it builds.
+    fn run_counting(self) -> (Term, usize) {
+        let funcs = std::rc::Rc::new(std::cell::Cell::new(0));
+        let f2 = funcs.clone();
+        let t = self.run_with(move |n| f2.set(n));
+        (t, funcs.get())
+    }
+
+    fn run(self) -> Term {
+        self.run_with(|_| {})
+    }
+
+    fn run_with(mut self, report_funcs: impl FnOnce(usize)) -> Term {
         // The environment is a binary tree of `2^height` slots (an empty subtree is `1`): a
         // value lives in a slot from its step to its last reader's step, a read is a path of
         // `height` selectors, and a step rebuilds only the paths to the slots it changes,
@@ -725,6 +829,7 @@ impl<'a> Lowering<'a> {
             };
             steps.push(step);
         }
+        report_funcs(self.funcs.len());
         // composition is associative: a balanced tree of `comp` keeps the program shallow
         steps.push(Term::unit());
         balanced(&steps)
@@ -800,11 +905,14 @@ pub(crate) struct Options {
     /// Constant words with a zero half as the pair of their halves: fewer bytes for small
     /// scalars, a few more nodes run per read.
     pub(crate) small_words: bool,
+    /// An inlined value built in several steps as one shared function of its stored inputs:
+    /// fewer bytes, its inputs copied at each use.
+    pub(crate) shared_funcs: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { role_passes: 1, hot_cold: false, small_words: false }
+        Options { role_passes: 1, hot_cold: false, small_words: false, shared_funcs: false }
     }
 }
 
@@ -816,6 +924,8 @@ pub(crate) struct Lowered {
     pub(crate) steps: usize,
     pub(crate) stored: usize,
     pub(crate) live_bits: u64,
+    /// Shared functions built ([`Options::shared_funcs`]).
+    pub(crate) funcs: usize,
 }
 
 /// A jet's fixed cost (simplicity-lang 0.9), mWU.
@@ -1237,7 +1347,7 @@ mod tests {
         let kt = p.push(Op::Const(Ty::word(), be(&total)));
         let e = p.push(Op::Jet("eq_256", vec![acc, kt], Ty::Bit));
         p.push(Op::Assert(e));
-        let opts = Options { role_passes: 1, hot_cold: true, small_words: false };
+        let opts = Options { role_passes: 1, hot_cold: true, small_words: false, shared_funcs: false };
         let mut w = HashMap::new();
         w.insert(Arc::<str>::from("x"), word_value(&be(&sc(5))));
         for i in 0..20u64 {
@@ -1251,6 +1361,7 @@ mod tests {
         w.insert(Arc::<str>::from("x"), word_value(&be(&sc(6))));
         assert!(execute_term(&p.lower(&opts).term, &w, &dummy_env(), false).is_err());
     }
+
 }
 
 /// Random programs (suggested by the stage 2 review): every check must run after inlining,
@@ -1340,14 +1451,17 @@ pub(crate) mod random_programs {
     #[test]
     fn random_programs_accept_and_every_check_runs() {
         let mut total = 0;
+        let mut funcs = 0;
         // every lowering the compiler may pick
-        let all = [(1, false, false), (2, false, false), (1, true, false), (2, true, true)].map(|(role_passes, hot_cold, small_words)| Options { role_passes, hot_cold, small_words });
+        let all = [(1, false, false), (2, false, false), (1, true, false), (2, true, true)].map(|(role_passes, hot_cold, small_words)| Options { role_passes, hot_cold, small_words, shared_funcs: small_words });
         for (k, opts) in all.iter().enumerate() {
             // the default lowering on every seed, the others on a share of them
             for seed in (1..60u64).filter(|s| k == 0 || s % 3 == k as u64 % 3) {
                 for n in [5usize, 20, 60] {
                     let (p, w, checks) = build(seed, n, None);
-                    let r = execute_term(&p.lower(opts).term, &w, &dummy_env(), false);
+                    let low = p.lower(opts);
+                    funcs += low.funcs;
+                    let r = execute_term(&low.term, &w, &dummy_env(), false);
                     assert!(r.is_ok(), "{:?} seed {} n {}: {:?}", opts, seed, n, r.err());
                     for c in 0..checks {
                         let (p, w, _) = build(seed, n, Some(c));
@@ -1357,7 +1471,8 @@ pub(crate) mod random_programs {
                 }
             }
         }
-        println!("{} perturbed checks rejected", total);
+        println!("{} perturbed checks rejected, {} shared functions", total, funcs);
+        assert!(funcs > 0, "the shared-function lowering was exercised");
     }
 
     /// Unwraps read by nobody, by a selection arm, by a selection condition's input.

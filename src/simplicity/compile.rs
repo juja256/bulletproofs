@@ -223,6 +223,17 @@ pub(crate) fn compile_with<R: rand_core::RngCore + rand_core::CryptoRng>(
         .filter_map(|t| t.node)
         .collect();
     let live = tape.live(&roots);
+    #[cfg(test)]
+    LAST_TAPE_KINDS.with(|k| {
+        let mut m = std::collections::BTreeMap::new();
+        for (i, op) in tape.ops.iter().enumerate() {
+            if live[i] {
+                let name = format!("{:?}", op);
+                *m.entry(name.split('(').next().unwrap().to_string()).or_insert(0usize) += 1;
+            }
+        }
+        *k.borrow_mut() = Some(m);
+    });
     let mut lw = TapeLowering { tape: &tape, live: &live, vals: HashMap::new(), ws: &ws };
     let challenges = {
         let mut parts = |p: &mut Prog, part: &Part, ch: &[ChallengeVals]| match part {
@@ -275,6 +286,12 @@ pub(crate) fn compile_with<R: rand_core::RngCore + rand_core::CryptoRng>(
     let cmr = commit.cmr();
     let stats = Stats { jets: p.stats(), tape_ops: live.iter().filter(|x| **x).count(), msm_terms: msm_terms.len(), witness_points: n_points, witness_scalars: n_scalars, steps: p.step_count(), live_bits: p.live_bits() };
     Ok(SimplicityVerifier { term, text: std::sync::OnceLock::new(), cmr, n_lin, n_mm, stats })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Diagnostic: live tape operations by kind, of the last compile.
+    pub(crate) static LAST_TAPE_KINDS: std::cell::RefCell<Option<std::collections::BTreeMap<String, usize>>> = std::cell::RefCell::new(None);
 }
 
 /// Tape nodes as IR values, lowered on demand (a node's arguments come before it).
@@ -499,7 +516,23 @@ mod tests {
             let (reads, depth) = crate::simplicity::ir::PATH_STATS.with(|c| *c.borrow());
             let r = crate::simplicity::run::execute_term(&sv.term, &sv.witness(&proof).unwrap().0, &env, false);
             let st = sv.stats();
-            println!("n {}: steps {}, live bits {} ({:.0} per step), reads {} depth sum {} (~{} mWU of path overhead), cost {:?}", n, st.steps, st.live_bits, st.live_bits as f64 / st.steps as f64, reads, depth, 100 * (depth + reads), r.map(|r| r.cost_mwu));
+            if let Some(kinds) = crate::simplicity::compile::LAST_TAPE_KINDS.with(|k| k.borrow().clone()) {
+                println!("n {}: tape kinds {:?}", n, kinds);
+            }
+            if let Some(b) = crate::simplicity::run::LAST_BREAKDOWN.with(|b| b.borrow().clone()) {
+                for (k, c) in b.iter().filter(|(k, _)| k.starts_with('#')) {
+                    println!("    {:>24} {:>10}", k, c);
+                }
+                let b: std::collections::BTreeMap<_, _> = b.into_iter().filter(|(k, _)| !k.starts_with('#')).collect();
+                let total: u64 = b.values().sum();
+                println!("n {}: breakdown total {}", n, total);
+                let mut v: Vec<_> = b.into_iter().collect();
+                v.sort_by_key(|(_, c)| std::cmp::Reverse(*c));
+                for (k, c) in v {
+                    println!("    {:>24} {:>10} {:5.1}%", k, c, 100.0 * c as f64 / total as f64);
+                }
+            }
+            println!("n {}: steps {}, live bits {} ({:.0} per step), reads {} depth sum {} (~{} mWU of path overhead), cost {:?}", n, st.steps, st.live_bits, st.live_bits as f64 / st.steps as f64, reads, depth, 100 * (depth + reads), r.map(|r| (r.cost_mwu, r.program_bytes, r.witness_bytes, r.cells)));
         }
     }
 

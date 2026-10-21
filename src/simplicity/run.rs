@@ -26,6 +26,9 @@ pub type Env = ElementsEnv<Arc<elements::Transaction>>;
 pub struct Report {
     /// The static cost bound of the decoded (pruned) program, in milliweight units.
     pub cost_mwu: u64,
+    /// The part of the cost that copies data: the middle types of `comp` and the targets of
+    /// `iden` (the rest is jets and 100 mWU per node).
+    pub data_mwu: u64,
     /// The budget the input's witness stack pays for: 1000 · (stack bytes + 50), the stack
     /// being the witness data, the program, the CMR and the control block (one leaf).
     pub budget_mwu: u64,
@@ -152,6 +155,85 @@ pub(crate) fn budget(program_bytes: usize, witness_bytes: usize) -> u64 {
     1000 * (stack as u64 + 50)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Diagnostic: the cost of the last run program by kind of node.
+    pub(crate) static LAST_BREAKDOWN: std::cell::RefCell<Option<std::collections::BTreeMap<String, u64>>> = std::cell::RefCell::new(None);
+}
+
+/// The static cost split by kind of node, following `NodeBounds` (a shared node counts once per
+/// use, a `case` counts its costlier branch).
+pub(crate) fn breakdown(root: &Arc<RedeemNode>) -> std::collections::BTreeMap<String, u64> {
+    use ::simplicity::node::Inner;
+    use std::collections::BTreeMap;
+    type B = BTreeMap<String, u64>;
+    fn add(a: &mut B, b: &B) {
+        for (k, v) in b {
+            *a.entry(k.clone()).or_insert(0) += v;
+        }
+    }
+    fn go(n: &Arc<RedeemNode>, memo: &mut HashMap<*const RedeemNode, B>) -> B {
+        let key = Arc::as_ptr(n);
+        if let Some(b) = memo.get(&key) {
+            return b.clone();
+        }
+        let mut b = B::new();
+        let put = |b: &mut B, k: &str, v: u64| *b.entry(k.to_string()).or_insert(0) += v;
+        let kind = match n.inner() {
+            Inner::Iden => "iden",
+            Inner::Unit => "unit",
+            Inner::InjL(_) | Inner::InjR(_) => "inj",
+            Inner::Take(_) => "take",
+            Inner::Drop(_) => "drop",
+            Inner::Comp(..) => "comp",
+            Inner::Case(..) => "case",
+            Inner::AssertL(..) | Inner::AssertR(..) => "assert",
+            Inner::Pair(..) => "pair",
+            Inner::Disconnect(..) => "disconnect",
+            Inner::Witness(_) => "witness",
+            Inner::Fail(_) => "fail",
+            Inner::Jet(_) => "jet",
+            Inner::Word(_) => "word",
+        };
+        if kind != "unit" {
+            put(&mut b, &format!("overhead {}", kind), 100);
+        }
+        match n.inner() {
+            Inner::Iden => put(&mut b, "bits iden", n.arrow().target.bit_width() as u64),
+            Inner::Witness(_) => put(&mut b, "bits witness", n.arrow().target.bit_width() as u64),
+            Inner::Word(w) => put(&mut b, "bits word", w.len() as u64),
+            Inner::Jet(j) => {
+                let c: u64 = j.cost().to_string().parse().unwrap();
+                put(&mut b, &format!("jet {}", j), c)
+            }
+            Inner::Comp(l, r) => {
+                put(&mut b, "bits comp", l.arrow().target.bit_width() as u64);
+                let (bl, br) = (go(l, memo), go(r, memo));
+                add(&mut b, &bl);
+                add(&mut b, &br);
+            }
+            Inner::Case(l, r) => {
+                let (bl, br) = (go(l, memo), go(r, memo));
+                let (sl, sr): (u64, u64) = (bl.values().sum(), br.values().sum());
+                add(&mut b, if sl >= sr { &bl } else { &br });
+            }
+            Inner::Pair(l, r) => {
+                let (bl, br) = (go(l, memo), go(r, memo));
+                add(&mut b, &bl);
+                add(&mut b, &br);
+            }
+            Inner::InjL(c) | Inner::InjR(c) | Inner::Take(c) | Inner::Drop(c) | Inner::AssertL(c, _) | Inner::AssertR(_, c) => {
+                let bc = go(c, memo);
+                add(&mut b, &bc);
+            }
+            Inner::Disconnect(..) | Inner::Fail(_) | Inner::Unit => {}
+        }
+        memo.insert(key, b.clone());
+        b
+    }
+    go(root, &mut HashMap::new())
+}
+
 fn cost_of(n: &RedeemNode) -> u64 {
     n.bounds().cost.to_string().parse().expect("cost as an integer")
 }
@@ -195,6 +277,29 @@ fn run_node(node: Arc<::simplicity::ConstructNode<'_>>, env: &Env, budgeted: boo
         mac.exec(&decoded, env).map_err(|e| ExecError::Exec(e.to_string()))?;
         let bounds = decoded.bounds();
         let cost_mwu = cost_of(&decoded);
+        let parts = breakdown(&decoded);
+        let data_mwu = parts.get("bits comp").copied().unwrap_or(0) + parts.get("bits iden").copied().unwrap_or(0);
+        #[cfg(test)]
+        LAST_BREAKDOWN.with(|b| {
+            let mut m = parts.clone();
+            // unique nodes by kind and the bits of constant words, for the program size
+            let mut words = 0u64;
+            for n in ::simplicity::dag::DagLike::post_order_iter::<::simplicity::dag::InternalSharing>(&*decoded) {
+                let k = match n.node.inner() {
+                    ::simplicity::node::Inner::Word(w) => { words += w.len() as u64; "word" }
+                    ::simplicity::node::Inner::Jet(_) => "jet",
+                    ::simplicity::node::Inner::Take(_) => "take",
+                    ::simplicity::node::Inner::Drop(_) => "drop",
+                    ::simplicity::node::Inner::Comp(..) => "comp",
+                    ::simplicity::node::Inner::Pair(..) => "pair",
+                    ::simplicity::node::Inner::Iden => "iden",
+                    _ => "other",
+                };
+                *m.entry(format!("#nodes {}", k)).or_insert(0) += 1;
+            }
+            m.insert("#word bits (unique)".into(), words);
+            *b.borrow_mut() = Some(m)
+        });
         let budget_mwu = budget(p.len(), w.len());
         if bounds.extra_cells > MAX_CELLS {
             return Err(ExecError::Cells(bounds.extra_cells));
@@ -204,6 +309,7 @@ fn run_node(node: Arc<::simplicity::ConstructNode<'_>>, env: &Env, budgeted: boo
         }
         Ok(Report {
             cost_mwu,
+            data_mwu,
             budget_mwu,
             program_bytes: p.len(),
             witness_bytes: w.len(),

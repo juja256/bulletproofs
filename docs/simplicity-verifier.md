@@ -105,7 +105,8 @@ limit (5 242 880).
 ## Measurements
 
 Chains of `n` multiplications from one committed value
-(`cargo run --release --example simplicity_costs --features simplicity [log2 max]`; Apple M4 Pro). The
+(`cargo run --release --example simplicity_costs --features simplicity [log2 max, default 10]`; Apple
+M4 Pro). The
 transaction weight of the input is its witness stack, or the cost (in WU) if that is larger
 (padding).
 
@@ -119,6 +120,8 @@ transaction weight of the input is its witness stack, or the cost (in WU) if tha
 | 64 | 86 | 519 | 50 551 736 | 51 066 000 | 16% | 50 400 B | 546 B | 663 416 | 51.0 k | 62 ms | 256 ms |
 | 128 | 152 | 946 | 153 699 950 | 102 131 000 | | | | | ≈ 154 k (padded) | 130 ms | 0.7 s |
 | 256 | 282 | 1 789 | 522 822 464 | 213 543 000 | | | | | ≈ 523 k (padded) | 283 ms | 2.4 s |
+| 512 | 540 | 3 464 | over the cell limit (6 097 624 cells) | | | | | | | 0.65 s | 8.9 s |
+| 1 024 | 1 054 | 6 803 | over the cell limit (13 109 338 cells) | | | | | | | 1.5 s | 34 s |
 
 Stage 1 against stage 2:
 
@@ -136,7 +139,9 @@ about 80 000 scalar operations) cost about 370 M mWU, plus about 267 kB of gener
 **What this says.**
 
 - Up to about 64 gates the program fits a standard transaction with no padding (51 kWU at 64
-  gates). With padding, it fits to about 180 gates (the 400 kWU standard limit).
+  gates). With padding, it fits to about 200–220 gates (the 400 kWU standard limit, interpolated
+  between the measured 128 and 256). From 512 gates the Bit Machine's cell limit (5 242 880)
+  binds as well.
 - The cost still grows faster than the circuit, now because of the live data itself. The
   verifier's matrix–vector products keep about `min(rows, columns)` values alive, and every step
   copies them (Σ live bits: 17.3 M at 64 gates).

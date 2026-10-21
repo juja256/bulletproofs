@@ -758,3 +758,130 @@ mod tests {
     }
 
 }
+
+/// Random programs (suggested by the stage 2 review): every check must run after inlining,
+/// scheduling and the slot tree.
+#[cfg(test)]
+mod random_programs {
+    use super::*;
+    use crate::simplicity::run::{dummy_env, execute_term, word_value};
+    use k256::elliptic_curve::ff::PrimeField as _;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn be(s: &k256::Scalar) -> Vec<u8> {
+        s.to_repr().to_vec()
+    }
+
+    /// Random scalar programs with checks at random nodes (and random selections between
+    /// values); every check must run: perturbing any one of them must fail.
+    fn build(seed: u64, n: usize, bad: Option<usize>) -> (Prog, HashMap<Arc<str>, ::simplicity::Value>, usize) {
+        let mut x = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+        let mut rnd = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let mut p = Prog::new();
+        let mut w = HashMap::new();
+        let mut vals: Vec<(Val, k256::Scalar)> = Vec::new();
+        let mut checks = 0usize;
+        for i in 0..4 {
+            let s = k256::Scalar::from(rnd() % 1000 + 2);
+            let name = format!("w{}", i);
+            let v = p.push(Op::Witness(name.as_str().into(), Ty::word()));
+            w.insert(Arc::<str>::from(name.as_str()), word_value(&be(&s)));
+            vals.push((v, s));
+        }
+        for _ in 0..n {
+            let r = rnd() % 10;
+            // prefer recent values (single readers), sometimes old ones (shared, long-lived)
+            let pick = |rnd: &mut dyn FnMut() -> u64, len: usize| if rnd() % 3 == 0 { (rnd() as usize) % len } else { len - 1 - (rnd() as usize) % len.min(3) };
+            let a = vals[pick(&mut rnd, vals.len())];
+            let b = vals[pick(&mut rnd, vals.len())];
+            match r {
+                0..=2 => { let v = p.push(Op::Jet("scalar_add", vec![a.0, b.0], Ty::word())); vals.push((v, a.1 + b.1)); }
+                3..=4 => { let v = p.push(Op::Jet("scalar_multiply", vec![a.0, b.0], Ty::word())); vals.push((v, a.1 * b.1)); }
+                5 => { let v = p.push(Op::Jet("scalar_negate", vec![a.0], Ty::word())); vals.push((v, -a.1)); }
+                6 => {
+                    // select between two values on a computed bit
+                    let z = p.push(Op::Jet("scalar_is_zero", vec![a.0], Ty::Bit));
+                    let v = p.push(Op::Select(z, a.0, b.0, Ty::word()));
+                    vals.push((v, if bool::from(a.1.is_zero()) { a.1 } else { b.1 }));
+                }
+                7 => {
+                    // a pair and its halves
+                    let pr = p.push(Op::Pair(a.0, b.0, Ty::prod(Ty::word(), Ty::word())));
+                    let f = p.push(Op::Fst(pr, Ty::word()));
+                    let s = p.push(Op::Snd(pr, Ty::word()));
+                    let v = p.push(Op::Jet("scalar_add", vec![f, s], Ty::word()));
+                    vals.push((v, a.1 + b.1));
+                }
+                _ => {
+                    let mut e = a.1;
+                    if bad == Some(checks) { e += k256::Scalar::ONE; }
+                    checks += 1;
+                    let k = p.push(Op::Const(Ty::word(), be(&e)));
+                    let q = p.push(Op::Jet("eq_256", vec![a.0, k], Ty::Bit));
+                    p.push(Op::Assert(q));
+                }
+            }
+        }
+        // every witness read at least once
+        let mut acc = vals[0];
+        for j in 1..4 { let v = p.push(Op::Jet("scalar_add", vec![acc.0, vals[j].0], Ty::word())); acc = (v, acc.1 + vals[j].1); }
+        let last = *vals.last().unwrap();
+        let v = p.push(Op::Jet("scalar_add", vec![acc.0, last.0], Ty::word()));
+        let (v, s) = (v, acc.1 + last.1);
+        let mut e = s;
+        if bad == Some(checks) { e += k256::Scalar::ONE; }
+        checks += 1;
+        let k = p.push(Op::Const(Ty::word(), be(&e)));
+        let q = p.push(Op::Jet("eq_256", vec![v, k], Ty::Bit));
+        p.push(Op::Assert(q));
+        (p, w, checks)
+    }
+
+    #[test]
+    fn random_programs_accept_and_every_check_runs() {
+        let mut total = 0;
+        for seed in 1..60u64 {
+            for n in [5usize, 20, 60] {
+                let (p, w, checks) = build(seed, n, None);
+                let r = execute_term(&p.to_term(), &w, &dummy_env(), false);
+                assert!(r.is_ok(), "seed {} n {}: {:?}", seed, n, r.err());
+                for c in 0..checks {
+                    let (p, w, _) = build(seed, n, Some(c));
+                    assert!(execute_term(&p.to_term(), &w, &dummy_env(), false).is_err(), "seed {} n {} check {} skipped", seed, n, c);
+                    total += 1;
+                }
+            }
+        }
+        println!("{} perturbed checks rejected", total);
+    }
+
+    /// Unwraps read by nobody, by a selection arm, by a selection condition's input.
+    #[test]
+    fn unwrap_in_select_arm_still_runs() {
+        let gx = (0..64).step_by(2).map(|i| u8::from_str_radix(&"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"[i..i + 2], 16).unwrap()).collect::<Vec<u8>>();
+        let run = |x: Vec<u8>, cond: u8| {
+            let mut p = Prog::new();
+            let bit = p.push(Op::Const(Ty::Bit, vec![0]));
+            let xv = p.push(Op::Const(Ty::word(), x));
+            let opt = p.push(Op::Jet("decompress", vec![bit, xv], Ty::opt(Ty::ge())));
+            let ge = p.push(Op::Unwrap(opt, Ty::ge()));
+            let gx2 = p.push(Op::Fst(ge, Ty::word()));
+            let other = p.push(Op::Const(Ty::word(), vec![5u8; 32]));
+            let c = p.push(Op::Const(Ty::Bit, vec![cond]));
+            let s = p.push(Op::Select(c, gx2, other, Ty::word()));
+            let e = p.push(Op::Jet("eq_256", vec![s, s], Ty::Bit));
+            p.push(Op::Assert(e));
+            execute_term(&p.to_term(), &HashMap::new(), &dummy_env(), false)
+        };
+        assert!(run(gx.clone(), 0).is_ok());
+        assert!(run(gx, 1).is_ok());
+        assert!(run(vec![0u8; 32], 1).is_err());
+        assert!(run(vec![0u8; 32], 0).is_err(), "the unwrap in the untaken arm must still run");
+    }
+}

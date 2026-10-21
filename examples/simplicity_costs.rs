@@ -24,7 +24,7 @@ fn chain<CS: ConstraintSystem<Scalar>>(cs: &mut CS, x: Variable, n: usize, last:
 }
 
 fn main() {
-    let max: u32 = std::env::args().nth(1).and_then(|a| a.parse().ok()).unwrap_or(8);
+    let max: u32 = std::env::args().nth(1).and_then(|a| a.parse().ok()).unwrap_or(10);
     let env = dummy_env();
     let x = Scalar::from(3u64);
     println!("| gates | tape ops | MSM terms | steps | cost (mWU) | budget (mWU) | jets | program B | B/gate | witness B | cells | tx WU | compile | run |");

@@ -143,16 +143,6 @@ mod tests {
     use crate::simplicity::run::{dummy_env, execute_term};
     use std::collections::HashMap;
 
-    /// The term lowering and the stage 1 text lowering give the same program.
-    #[test]
-    fn term_and_text_have_the_same_cmr() {
-        let p = arithmetic_prog();
-        let text = p.to_text_legacy();
-        let forest = ::simplicity::human_encoding::Forest::parse::<::simplicity::jet::Elements>(&text).unwrap();
-        let from_text = forest.roots().get("main").unwrap().cmr();
-        assert_eq!(p.to_term().commit().unwrap().cmr(), from_text);
-    }
-
     #[test]
     fn term_executes_with_witness() {
         let p = arithmetic_prog();

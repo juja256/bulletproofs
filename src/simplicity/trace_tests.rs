@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 use super::*;
 use crate::bppp::BpppGens;
 use crate::curve::Secp256k1Compressed;

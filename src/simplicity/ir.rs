@@ -8,8 +8,6 @@
 //! read where they are used, never stored (a witness node may be reached by one path only).
 
 use std::collections::{BTreeMap, HashMap};
-#[cfg(test)]
-use std::fmt::Write as _;
 use std::sync::Arc;
 
 use crate::simplicity::term::Term;
@@ -52,18 +50,6 @@ impl Ty {
     /// A Jacobian point `((x, y), z)`.
     pub(crate) fn gej() -> Ty {
         Ty::prod(Ty::ge(), Ty::word())
-    }
-
-    /// The type in the human-readable encoding (`None` for a context: left to inference).
-    #[cfg(test)]
-    fn text(&self) -> Option<String> {
-        Some(match self {
-            Ty::Bit => "2".into(),
-            Ty::Word(n) => format!("2^{}", n),
-            Ty::Prod(a, b) => format!("({} * {})", a.text()?, b.text()?),
-            Ty::Opt(t) => format!("(1 + {})", t.text()?),
-            Ty::Ctx | Ty::CtxBuf => return None,
-        })
     }
 
     /// The bytes a constant of this type takes (a bit takes one byte, 0 or 1).
@@ -163,12 +149,6 @@ impl Prog {
         self.tys[v.0 as usize].as_ref().expect("an assertion has no value")
     }
 
-    /// The witness names and types, in program order.
-    #[cfg(test)]
-    pub(crate) fn witness_types(&self) -> Vec<(Arc<str>, Ty)> {
-        self.ops.iter().filter_map(|o| if let Op::Witness(n, t) = o { Some((n.clone(), t.clone())) } else { None }).collect()
-    }
-
     /// Jets by name: how many times the program calls each.
     pub(crate) fn stats(&self) -> BTreeMap<&'static str, usize> {
         let mut m = BTreeMap::new();
@@ -187,31 +167,39 @@ impl Prog {
         Lowering::new(self).run()
     }
 
+    /// The number of steps the program runs (values read several times or by nobody, checks).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn step_count(&self) -> usize {
+        Lowering::new(self).steps()
+    }
+
     /// The program in the human-readable encoding (an artifact of [`Prog::to_term`]).
     #[cfg(test)]
     pub(crate) fn to_text(&self) -> String {
         self.to_term().text().expect("the program types")
     }
 
-    /// The program as stage 1 wrote it (the equivalence test of the two lowerings).
-    #[cfg(test)]
-    pub(crate) fn to_text_legacy(&self) -> String {
-        TextLowering::new(self).run()
-    }
 }
 
-/// How an operation's value is reached.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Kind {
-    /// A definition read where used (constants; witnesses used once).
+/// How an operation is lowered (expression trees).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Role {
+    /// A constant, read where used.
+    Const,
+    /// A witness read once: the witness node at its reader.
+    InlineWitness,
+    /// A value read once (and not in a branch of a selection): built inside its reader's
+    /// expression, so it is written once, straight into its reader's input.
     Inline,
-    /// Stored in the environment from its step to its last use.
-    Stored,
+    /// A step of its own: a value read several times (stored while it has readers left), a
+    /// value read by nobody (computed and discarded: it may contain a check), an assertion.
+    Root,
 }
 
 struct Lowering<'a> {
     p: &'a Prog,
-    kind: Vec<Kind>,
+    role: Vec<Role>,
+    /// For a root, the last step that reads it (its own step if none).
     last_use: Vec<usize>,
     consts: HashMap<(Ty, Vec<u8>), Term>,
     witnesses: HashMap<Arc<str>, Term>,
@@ -221,24 +209,53 @@ impl<'a> Lowering<'a> {
     fn new(p: &'a Prog) -> Self {
         let n = p.ops.len();
         let mut uses = vec![0usize; n];
-        let mut last_use = vec![0usize; n];
+        let mut reader = vec![usize::MAX; n];
+        let mut in_branch = vec![false; n];
         for (i, o) in p.ops.iter().enumerate() {
             for a in o.args() {
                 uses[a.0 as usize] += 1;
-                last_use[a.0 as usize] = i;
+                reader[a.0 as usize] = i;
+            }
+            // the arms of a selection run in one branch only: never inline into them (a check
+            // there would run only when its branch is taken)
+            if let Op::Select(_, x, y, _) = o {
+                in_branch[x.0 as usize] = true;
+                in_branch[y.0 as usize] = true;
             }
         }
-        let kind = p
+        let role: Vec<Role> = p
             .ops
             .iter()
             .enumerate()
             .map(|(i, o)| match o {
-                Op::Const(..) => Kind::Inline,
-                Op::Witness(..) if uses[i] <= 1 => Kind::Inline,
-                _ => Kind::Stored,
+                Op::Const(..) => Role::Const,
+                Op::Assert(_) => Role::Root,
+                Op::Witness(..) if uses[i] <= 1 && !in_branch[i] => Role::InlineWitness,
+                _ if uses[i] == 1 && !in_branch[i] => Role::Inline,
+                _ => Role::Root,
             })
             .collect();
-        Lowering { p, kind, last_use, consts: HashMap::new(), witnesses: HashMap::new() }
+        // the step an operation runs at: its own for a root, its reader's for an inline one
+        let mut step = vec![0usize; n];
+        for i in (0..n).rev() {
+            step[i] = match role[i] {
+                Role::Root | Role::Const => i,
+                Role::Inline | Role::InlineWitness => step[reader[i]],
+            };
+        }
+        let mut last_use: Vec<usize> = (0..n).collect();
+        for (i, o) in p.ops.iter().enumerate() {
+            for a in o.args() {
+                let a = a.0 as usize;
+                last_use[a] = last_use[a].max(step[i]);
+            }
+        }
+        Lowering { p, role, last_use, consts: HashMap::new(), witnesses: HashMap::new() }
+    }
+
+    /// The number of steps (roots).
+    fn steps(&self) -> usize {
+        self.role.iter().filter(|r| **r == Role::Root).count()
     }
 
     /// A constant, read from any environment: the constant itself (`1 -> T`) is one shared
@@ -251,12 +268,13 @@ impl<'a> Lowering<'a> {
     /// The expression for value `v` given the environment `env` (stored values, in order).
     fn read(&mut self, v: Val, env: &[Val]) -> Term {
         let i = v.0 as usize;
-        match (&self.p.ops[i], self.kind[i]) {
+        match (&self.p.ops[i], self.role[i]) {
             (Op::Const(t, b), _) => {
                 let (t, b) = (t.clone(), b.clone());
                 self.constant(&t, &b)
             }
-            (Op::Witness(name, _), Kind::Inline) => self.witness(name),
+            (Op::Witness(name, _), Role::InlineWitness) => self.witness(name),
+            (_, Role::Inline) => self.expr(i, env),
             _ => {
                 // paths are written out per use: a shared path would have one type for every
                 // environment it is used in
@@ -333,7 +351,7 @@ impl<'a> Lowering<'a> {
         let mut env: Vec<Val> = Vec::new();
         let mut steps = Vec::new();
         for i in 0..self.p.ops.len() {
-            if self.kind[i] == Kind::Inline {
+            if self.role[i] != Role::Root {
                 continue;
             }
             let v = Val(i as u32);
@@ -390,210 +408,6 @@ fn const_term(t: &Ty, bytes: &[u8]) -> Term {
         Ty::Prod(a, b) => {
             let n = a.const_bytes();
             Term::pair(&const_term(a, &bytes[..n]), &const_term(b, &bytes[n..]))
-        }
-        Ty::Opt(_) | Ty::Ctx | Ty::CtxBuf => unreachable!(),
-    }
-}
-
-#[cfg(test)]
-struct TextLowering<'a> {
-    p: &'a Prog,
-    kind: Vec<Kind>,
-    last_use: Vec<usize>,
-    out: String,
-    consts: HashMap<(Ty, Vec<u8>), String>,
-}
-
-#[cfg(test)]
-impl<'a> TextLowering<'a> {
-    fn new(p: &'a Prog) -> Self {
-        let n = p.ops.len();
-        let mut uses = vec![0usize; n];
-        let mut last_use = vec![0usize; n];
-        for (i, o) in p.ops.iter().enumerate() {
-            for a in o.args() {
-                uses[a.0 as usize] += 1;
-                last_use[a.0 as usize] = i;
-            }
-        }
-        let kind = p
-            .ops
-            .iter()
-            .enumerate()
-            .map(|(i, o)| match o {
-                Op::Const(..) => Kind::Inline,
-                Op::Witness(..) if uses[i] <= 1 => Kind::Inline,
-                _ => Kind::Stored,
-            })
-            .collect();
-        TextLowering { p, kind, last_use, out: String::new(), consts: HashMap::new() }
-    }
-
-    /// The name of a constant's definition (emitted once).
-    fn constant(&mut self, t: &Ty, bytes: &[u8]) -> String {
-        if let Some(n) = self.consts.get(&(t.clone(), bytes.to_vec())) {
-            return n.clone();
-        }
-        // a definition is one node with one type: the constant itself (1 -> T) is shared, the
-        // `comp unit` that reads it from any environment is per use
-        let name = format!("k{}", self.consts.len());
-        let expr = const_expr(t, bytes);
-        let _ = writeln!(self.out, "{} := {}", name, expr);
-        let read = format!("(comp unit {})", name);
-        self.consts.insert((t.clone(), bytes.to_vec()), read.clone());
-        read
-    }
-
-    /// The expression for value `v` given the environment `env` (stored values, in order).
-    fn read(&mut self, v: Val, env: &[Val]) -> String {
-        let i = v.0 as usize;
-        match (&self.p.ops[i], self.kind[i]) {
-            (Op::Const(t, b), _) => {
-                let (t, b) = (t.clone(), b.clone());
-                self.constant(&t, &b)
-            }
-            (Op::Witness(name, _), Kind::Inline) => name.to_string(),
-            _ => {
-                // paths are written out: a shared definition would have one type for every
-                // environment it is used in
-                let pos = env.iter().position(|x| *x == v).expect("a value read after it was dropped");
-                let mut path = String::from("(take iden)");
-                for _ in 0..pos {
-                    path = format!("(drop {})", path);
-                }
-                path
-            }
-        }
-    }
-
-    /// The expression computing op `i`'s value from `env`.
-    fn expr(&mut self, i: usize, env: &[Val]) -> String {
-        let op = self.p.ops[i].clone();
-        match op {
-            Op::Const(..) => unreachable!("constants are inline"),
-            Op::Witness(name, _) => name.to_string(),
-            Op::Jet(name, args, _) => {
-                if args.is_empty() {
-                    return format!("comp unit jet_{}", name);
-                }
-                let tuple = self.tuple(&args, env);
-                format!("comp ({}) jet_{}", tuple, name)
-            }
-            Op::Unwrap(v, _) => {
-                let x = self.read(v, env);
-                format!("comp (pair {} unit) (assertr #{{unit}} (take iden))", x)
-            }
-            Op::Pair(a, b, _) => {
-                let (x, y) = (self.read(a, env), self.read(b, env));
-                format!("pair {} {}", x, y)
-            }
-            Op::Fst(v, _) => format!("comp {} (take iden)", self.read(v, env)),
-            Op::Snd(v, _) => format!("comp {} (drop iden)", self.read(v, env)),
-            Op::Select(c, a, b, _) => {
-                let (bit, x, y) = (self.read(c, env), self.read(a, env), self.read(b, env));
-                format!("comp (pair {} iden) (case (drop {}) (drop {}))", bit, y, x)
-            }
-            Op::Assert(_) => unreachable!("assertions are steps of their own"),
-        }
-    }
-
-    /// Arguments paired right-nested.
-    fn tuple(&mut self, args: &[Val], env: &[Val]) -> String {
-        let first = self.read(args[0], env);
-        if args.len() == 1 {
-            first
-        } else {
-            format!("pair {} ({})", first, self.tuple(&args[1..], env))
-        }
-    }
-
-    /// `drop^k iden`: the environment from position `k` on (its unit terminator included).
-    fn suffix(k: usize) -> String {
-        let mut s = String::from("iden");
-        for _ in 0..k {
-            s = format!("drop ({})", s);
-        }
-        s
-    }
-
-    fn run(mut self) -> String {
-        for (name, t) in self.p.witness_types() {
-            let _ = writeln!(self.out, "{} := witness : _ -> {}", name, t.text().expect("witness types are written"));
-        }
-        // The environment is ordered by last use (then value number): the values read for the
-        // last time at a step are a prefix of it, and a new value goes where its last use puts
-        // it, so a step rebuilds only the front and passes the rest on as one path.
-        let key = |l: &TextLowering, v: Val| (l.last_use[v.0 as usize], v);
-        let mut env: Vec<Val> = Vec::new();
-        let mut steps = Vec::new();
-        for i in 0..self.p.ops.len() {
-            if self.kind[i] == Kind::Inline {
-                continue;
-            }
-            let v = Val(i as u32);
-            let dead = env.iter().take_while(|x| self.last_use[x.0 as usize] <= i).count();
-            let rest: Vec<Val> = env[dead..].to_vec();
-            let (step, next) = match &self.p.ops[i] {
-                Op::Assert(b) => {
-                    let bit = self.read(*b, &env);
-                    (format!("comp (pair (comp ({}) jet_verify) ({})) (drop iden)", bit, Self::suffix(dead)), rest)
-                }
-                _ => {
-                    let e = self.expr(i, &env);
-                    if self.last_use[i] > i {
-                        let pos = rest.iter().take_while(|x| key(&self, **x) < key(&self, v)).count();
-                        let mut s = format!("pair ({}) ({})", e, Self::suffix(dead + pos));
-                        for x in rest[..pos].iter().rev() {
-                            s = format!("pair ({}) ({})", self.read(*x, &env), s);
-                        }
-                        let mut next = rest[..pos].to_vec();
-                        next.push(v);
-                        next.extend_from_slice(&rest[pos..]);
-                        (s, next)
-                    } else {
-                        // a value nobody reads: computed and discarded
-                        (format!("comp (pair ({}) ({})) (drop iden)", e, Self::suffix(dead)), rest)
-                    }
-                }
-            };
-            let name = format!("st{}", steps.len());
-            let _ = writeln!(self.out, "{} := {}", name, step);
-            steps.push(name);
-            env = next;
-        }
-        // composition is associative: a balanced tree of `comp` keeps the program shallow
-        // (rust-simplicity walks programs recursively)
-        steps.push("unit".into());
-        let main = balanced_comp(&steps);
-        format!("{}main := {}\n", self.out, main)
-    }
-}
-
-/// `s_0 ; s_1 ; ... ; s_n` as a balanced tree of `comp`.
-#[cfg(test)]
-fn balanced_comp(steps: &[String]) -> String {
-    if steps.len() == 1 {
-        return steps[0].clone();
-    }
-    let h = steps.len() / 2;
-    format!("comp ({}) ({})", balanced_comp(&steps[..h]), balanced_comp(&steps[h..]))
-}
-
-/// A constant of type `t` from its bytes.
-#[cfg(test)]
-fn const_expr(t: &Ty, bytes: &[u8]) -> String {
-    match t {
-        Ty::Bit => format!("const 0b{}", bytes[0] & 1),
-        Ty::Word(_) => {
-            let mut s = String::from("const 0x");
-            for b in bytes {
-                let _ = write!(s, "{:02x}", b);
-            }
-            s
-        }
-        Ty::Prod(a, b) => {
-            let n = a.const_bytes();
-            format!("pair ({}) ({})", const_expr(a, &bytes[..n]), const_expr(b, &bytes[n..]))
         }
         Ty::Opt(_) | Ty::Ctx | Ty::CtxBuf => unreachable!(),
     }
@@ -742,4 +556,92 @@ mod tests {
     fn hex_literal(s: &str) -> Vec<u8> {
         (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
     }
+
+    /// A check nobody reads (decompress of x = 0, unwrapped) still runs once values read
+    /// once are inlined.
+    #[test]
+    fn inlining_keeps_unread_effects() {
+        let gx = hex_literal("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798");
+        let run = |x: Vec<u8>| {
+            let mut p = Prog::new();
+            let bit = p.push(Op::Const(Ty::Bit, vec![0]));
+            let xv = p.push(Op::Const(Ty::word(), x));
+            let opt = p.push(Op::Jet("decompress", vec![bit, xv], Ty::opt(Ty::ge())));
+            p.push(Op::Unwrap(opt, Ty::ge())); // read by nobody
+            let one = p.push(Op::Const(Ty::word(), be(&sc(1))));
+            let e = p.push(Op::Jet("eq_256", vec![one, one], Ty::Bit));
+            p.push(Op::Assert(e));
+            execute_term(&p.to_term(), &HashMap::new(), &dummy_env(), false)
+        };
+        assert!(run(gx).is_ok());
+        assert!(run(vec![0u8; 32]).is_err());
+    }
+
+    /// A witness read once, deep in an inlined tree.
+    #[test]
+    fn inline_witness_read_once_deep() {
+        let a = sc(9);
+        let mut p = Prog::new();
+        let wa = p.push(Op::Witness("a".into(), Ty::word()));
+        let mut v = wa;
+        for _ in 0..5 {
+            v = p.push(Op::Jet("scalar_negate", vec![v], Ty::word()));
+        }
+        let k = p.push(Op::Const(Ty::word(), be(&(-a))));
+        let e = p.push(Op::Jet("eq_256", vec![v, k], Ty::Bit));
+        p.push(Op::Assert(e));
+        let mut w = HashMap::new();
+        w.insert(Arc::<str>::from("a"), word_value(&be(&a)));
+        assert!(execute_term(&p.to_term(), &w, &dummy_env(), false).is_ok());
+        assert_eq!(p.step_count(), 1, "the whole tree is one step");
+    }
+
+    /// A value read by three later operations is a step of its own (stored, computed once);
+    /// read once, it is inlined into its reader.
+    #[test]
+    fn shared_value_is_stored() {
+        let x = sc(5);
+        let build = |readers: usize| {
+            let mut p = Prog::new();
+            let wx = p.push(Op::Witness("x".into(), Ty::word()));
+            let inv = p.push(Op::Jet("scalar_invert", vec![wx], Ty::word()));
+            let k = p.push(Op::Const(Ty::word(), be(&x.invert().unwrap())));
+            for _ in 0..readers {
+                let e = p.push(Op::Jet("eq_256", vec![inv, k], Ty::Bit));
+                p.push(Op::Assert(e));
+            }
+            let mut w = HashMap::new();
+            w.insert(Arc::<str>::from("x"), word_value(&be(&x)));
+            assert!(execute_term(&p.to_term(), &w, &dummy_env(), false).is_ok());
+            p.step_count()
+        };
+        // one reader: the assertion is the only step; three: the inversion and three assertions
+        assert_eq!(build(1), 1);
+        assert_eq!(build(3), 4);
+    }
+
+    /// Most operations of a transcript are read once: far fewer steps than operations.
+    #[test]
+    fn fewer_steps_than_ops() {
+        use crate::simplicity::sha::{lower_log, CompileTranscript};
+        use crate::TranscriptBackend;
+        let mut t = CompileTranscript::new(b"steps");
+        for i in 0..8u64 {
+            t.append_u64(b"i", i);
+            let mut d = [0u8; 64];
+            t.challenge_bytes(b"c", &mut d);
+        }
+        let mut p = Prog::new();
+        let ch = lower_log(&mut p, t.log(), 0, &mut |_, _, _| unreachable!());
+        let mut acc = ch[0].scalar.unwrap();
+        for c in &ch[1..] {
+            acc = p.push(Op::Jet("scalar_add", vec![acc, c.scalar.unwrap()], Ty::word()));
+        }
+        let z = p.push(Op::Jet("scalar_is_zero", vec![acc], Ty::Bit));
+        let nz = p.push(Op::Jet("complement_1", vec![z], Ty::Bit));
+        p.push(Op::Assert(nz));
+        assert!(p.step_count() * 2 < p.ops.len(), "{} steps for {} operations", p.step_count(), p.ops.len());
+        assert!(execute_term(&p.to_term(), &HashMap::new(), &dummy_env(), false).is_ok());
+    }
+
 }

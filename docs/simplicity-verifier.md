@@ -4,7 +4,8 @@ Feature `simplicity` (implies `secp256k1`, `bppp`, `yoloproofs`). An R1CS circui
 backend over secp256k1, with the [SHA-256 transcript](sha256-transcript.md), compiles into a
 [Simplicity](https://github.com/BlockstreamResearch/simplicity) program that verifies its proofs
 and is bound to the spending transaction. The program runs as a Liquid node would run it. Stage 1
-made this work end to end; stage 2 made it several times cheaper (see [Measurements](#measurements)). The design
+made this work end to end; stage 2 made it several times cheaper; stage 3 recomputes instead of
+storing and fits about 950 gates in a standard transaction (see [Measurements](#measurements)). The design
 follows [simple-groth16](https://github.com/BlockstreamResearch/simple-groth16), which generates a
 Groth16 verifier for Simplicity.
 
@@ -149,12 +150,16 @@ Where the cost of 64 gates went (rust-simplicity's static bound split by kind of
 spent 73% copying the environment between steps (Σ live bits 17.3 M); stage 3 spends 35% (Σ
 live bits 1.3 M), 31% on `scale` and 10% on recomputed products.
 
-**bpvm's fib on secp256k1** (bpvm feature `simplicity`, `examples/simplicity_fib.rs`): 78 steps,
+**bpvm's fib on secp256k1** (bpvm feature `simplicity`, `examples/simplicity.rs`): 78 steps,
 2 450 BP++ gates, 1 683 linear slots, 4 165 MSM terms and 81 613 traced operations. Stage 2
 needed 37 M cells. Stage 3 compiles it in 4 s and runs it as a node in 18 s: 1.46 M cells (within
 the limit), 2.8 G mWU (26% data), and a 3.55 MB program. Running it for the first time found a bug
 in bpvm, not here: `vm::simplicity::prove` bound the statement to the transcript twice and
-`compile` once, so its honest proofs were rejected (measured with the fix applied locally).
+`compile` once, so its honest proofs were rejected (fixed in bpvm `da59f07`, with a test that runs
+the verifier). bpvm's `mul` guest (c = a · b with private a, b; 18 steps, 776 gates, 852 linear
+slots, 1 660 MSM terms) runs too: 1.04 M cells, 1.55 G mWU, a 2.17 MB program. The VM's fixed
+tables and dense linear constraints, not the multiplication, make it large; the same statement
+as a direct R1CS circuit (`x · y = 15` in the tests) is about 5 kWU.
 
 **What this says.**
 
@@ -162,6 +167,9 @@ in bpvm, not here: `vm::simplicity::prove` bound the statement to the transcript
   larger than the cost in WU), and the program fits a standard transaction (400 kWU) with no
   padding (209 kWU at 512 gates). At 1 024 gates the cost (429.5 M mWU) passes the budget, so the
   input needs padding to about 430 kWU: the limit is about 950 gates.
+- The jets of the multiscalar multiplication (`scale` and `gej_add`, about 77 WU per term with a
+  minimal coefficient) put the ceiling of a standard transaction near 5 000 gates; at 512 gates
+  both the cost (390 WU per gate) and the bytes (406 B per gate) are about 5× above that floor.
 - Recomputation trades copying for computation; on dense circuits (fib) the same value
   recomputed in many steps is written as code in each, since its paths differ step by step.
 - **Comparison with [simple-groth16](https://github.com/BlockstreamResearch/simple-groth16):** its

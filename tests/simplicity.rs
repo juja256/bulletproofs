@@ -231,3 +231,59 @@ fn chains_verify() {
     }
     assert!(built[1].1.witness(&built[0].0).is_err());
 }
+
+/// `x · y = c`.
+fn product_eq<CS: ConstraintSystem<Scalar>>(cs: &mut CS, x: Variable, y: Variable, c: u64) {
+    let (_, _, o) = cs.multiply(lc(x), lc(y));
+    cs.constrain(lc(o) - Scalar::from(c));
+}
+
+fn prove_eq(env: &bulletproofs::simplicity::Env, x: u64, y: u64, c: u64, blind_x: Option<Scalar>, seed: u64) -> (R1CSProof<Secp256k1>, Vec<Compressed>) {
+    let (pc, bp) = gens();
+    let mut rng = ChaCha20Rng::seed_from_u64(seed);
+    let mut t = Sha256Transcript::new(b"test");
+    t.append_message(SIGHASH_LABEL, &sighash_of(env));
+    let mut p = Prover::new(&pc, &mut t);
+    p.set_backend(Backend::Bppp);
+    let r = |rng: &mut ChaCha20Rng| <Scalar as bulletproofs::curve::ff::Field>::random(rng);
+    let bx = blind_x.unwrap_or_else(|| r(&mut rng));
+    let (cx, xv) = p.commit(Scalar::from(x), bx);
+    let (cy, yv) = p.commit(Scalar::from(y), r(&mut rng));
+    product_eq(&mut p, xv, yv, c);
+    (p.prove_with_rng(&bp, &mut rng).unwrap(), vec![cx, cy])
+}
+
+fn compile_eq(V: &[Compressed], c: u64) -> SimplicityVerifier {
+    let (pc, bp) = gens();
+    let mut ct = CompileTranscript::new(b"test");
+    ct.append_message(SIGHASH_LABEL, &[0u8; 32]);
+    let mut v = Verifier::<_, Secp256k1>::for_curve(&mut ct);
+    v.set_backend(Backend::Bppp);
+    let (x, y) = (v.commit(V[0]), v.commit(V[1]));
+    product_eq(&mut v, x, y, c);
+    v.compile_to_simplicity(&pc, &bp).unwrap()
+}
+
+/// A commitment to zero with a zero blinding is the identity (a valid statement point):
+/// the compiler handles it and the program verifies the proof.
+#[test]
+fn identity_commitment_compiles_and_verifies() {
+    let env = dummy_env();
+    let (proof, V) = prove_eq(&env, 0, 5, 0, Some(<Scalar as bulletproofs::curve::ff::Field>::ZERO), 8);
+    assert_eq!(V[0], Compressed::default());
+    let sv = compile_eq(&V, 0);
+    sv.execute(&sv.witness(&proof).unwrap(), &env).unwrap();
+}
+
+/// A proof of another circuit with the same dimensions (`x · y = 16` against `x · y = 15`,
+/// the same commitments' structure) is rejected by the program.
+#[test]
+fn proof_of_another_circuit_is_rejected() {
+    let env = dummy_env();
+    let (proof16, V16) = prove_eq(&env, 4, 4, 16, None, 9);
+    let sv15 = compile_eq(&V16, 15);
+    let w = sv15.witness(&proof16).unwrap();
+    assert!(sv15.execute(&w, &env).is_err());
+    let sv16 = compile_eq(&V16, 16);
+    sv16.execute(&sv16.witness(&proof16).unwrap(), &env).unwrap();
+}

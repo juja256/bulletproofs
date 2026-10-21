@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use k256::elliptic_curve::ff::PrimeField as _;
+use k256::elliptic_curve::ff::{Field as _, PrimeField as _};
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 
 use crate::bppp::{BpppGens, BpppTranscript, CircuitProof, ReciprocalCircuit};
@@ -113,15 +113,15 @@ fn proof_points<C: Curve>(cp: &CircuitProof<C>) -> Vec<C::Compressed> {
     v
 }
 
-/// A deterministic pseudo-random scalar (the dummy proof the verifier is traced on).
-fn dummy_scalar(i: usize) -> K {
-    use sha2::{Digest, Sha256};
-    let mut wide = [0u8; 64];
-    for (j, half) in wide.chunks_mut(32).enumerate() {
-        let h = Sha256::new().chain_update(b"bulletproofs/simplicity/dummy-proof").chain_update((i as u64).to_le_bytes()).chain_update([j as u8]).finalize();
-        half.copy_from_slice(&h);
-    }
-    <K as Field>::from_wide(&wide)
+/// A dummy proof of the circuit's dimensions: random points (multiples of `G`) and scalars.
+/// Random, so that no statement can be crafted to equal one of its points or scalars (the
+/// tracer tells proof data from constants by their bytes); the program does not depend on it.
+pub(crate) fn dummy_proof<R: rand_core::RngCore + rand_core::CryptoRng>(c: &ReciprocalCircuit<K>, rng: &mut R) -> (Vec<Secp256k1Compressed>, Vec<K>) {
+    let (n_lin, n_mm) = (c.n_lin, c.n_p + c.n_m);
+    let (k, af, bf) = crate::bppp::wnla::rounds(n_lin + crate::bppp::gens::H_FIXED, n_mm);
+    let points = (0..4 + 2 * k).map(|_| Secp256k1::compress(&(k256::ProjectivePoint::GENERATOR * K::random(&mut *rng)))).collect();
+    let scalars = (0..af + bf).map(|_| K::random(&mut *rng)).collect();
+    (points, scalars)
 }
 
 /// The transcript domain of R1CS proofs on the BP++ backend (as `Verifier::verify_bppp`).
@@ -135,17 +135,34 @@ pub(crate) fn compile(
     pc: &PedersenGens<Secp256k1>,
     bp: &BulletproofGens<Secp256k1>,
 ) -> Result<SimplicityVerifier, R1CSError> {
+    compile_with(c, V, t, pc, bp, &mut rand::rngs::OsRng)
+}
+
+/// [`compile`] with the randomness of the dummy proof.
+pub(crate) fn compile_with<R: rand_core::RngCore + rand_core::CryptoRng>(
+    c: &ReciprocalCircuit<K>,
+    V: &[Secp256k1Compressed],
+    t: &CompileTranscript,
+    pc: &PedersenGens<Secp256k1>,
+    bp: &BulletproofGens<Secp256k1>,
+    rng: &mut R,
+) -> Result<SimplicityVerifier, R1CSError> {
     if !t.log().iter().any(|r| matches!(r, Rec::Bytes(ps) if ps.contains(&Part::Sighash))) {
         return Err(gadget_err("the transcript has no sighash record (SIGHASH_LABEL)"));
     }
     let (n_lin, n_mm) = (c.n_lin, c.n_p + c.n_m);
     let gens = BpppGens::new(pc, bp, n_lin, n_mm).map_err(|_| R1CSError::InvalidGeneratorsLength)?;
 
-    // a dummy proof of the circuit's dimensions: random points and scalars
-    let (k, af, bf) = crate::bppp::wnla::rounds(n_lin + crate::bppp::gens::H_FIXED, n_mm);
-    let n_points = 4 + 2 * k;
-    let points: Vec<Secp256k1Compressed> = (0..n_points).map(|i| Secp256k1::compress(&(k256::ProjectivePoint::GENERATOR * dummy_scalar(i)))).collect();
-    let scalars: Vec<K> = (0..af + bf).map(|i| dummy_scalar(n_points + i)).collect();
+    // a dummy proof of the circuit's dimensions; a constant point equal to one of its points
+    // would be taken for proof data (negligible for random points unless crafted for them)
+    let (points, scalars) = dummy_proof(c, rng);
+    let (n_points, n_scalars) = (points.len(), scalars.len());
+    let constants = V.iter().copied().chain(std::iter::once(gens.g).chain(gens.h.iter().copied()).chain(gens.n.iter().copied()).map(|p| Secp256k1::compress(&p)));
+    for k in constants {
+        if points.contains(&k) {
+            return Err(gadget_err("a statement point equals a point of the dummy proof"));
+        }
+    }
     let mut bytes = Vec::new();
     for p in &points {
         bytes.extend_from_slice(p.as_bytes());
@@ -185,7 +202,7 @@ pub(crate) fn compile(
     // the program
     let mut p = Prog::new();
     let wp: Vec<WitPoint> = (0..n_points).map(|i| witness_point(&mut p, &format!("p{}", i))).collect();
-    let ws: Vec<Val> = (0..af + bf).map(|i| witness_scalar(&mut p, &format!("s{}", i))).collect();
+    let ws: Vec<Val> = (0..n_scalars).map(|i| witness_scalar(&mut p, &format!("s{}", i))).collect();
     let roots: Vec<NodeId> = std::iter::once(&terms.g)
         .chain(&terms.h)
         .chain(&terms.n)
@@ -225,6 +242,10 @@ pub(crate) fn compile(
         }
     }
     for (k, pt) in &terms.points {
+        // a constant identity (a commitment to zero with a zero blinding) adds nothing
+        if pt.src == PointSrc::Const && bool::from(group::Group::is_identity(&pt.value)) {
+            continue;
+        }
         if let Some(kv) = scalar(&mut p, &mut lw, k) {
             let g = match pt.src {
                 PointSrc::Witness(i) => ge_to_gej(&mut p, wp[i].ge),
@@ -240,7 +261,7 @@ pub(crate) fn compile(
     let forest = ::simplicity::human_encoding::Forest::parse::<::simplicity::jet::Elements>(&text)
         .map_err(|e| gadget_err(&format!("the generated program does not parse: {}", e)))?;
     let cmr = forest.roots().get("main").expect("main").cmr();
-    let stats = Stats { jets: p.stats(), tape_ops: live.iter().filter(|x| **x).count(), msm_terms: msm_terms.len(), witness_points: n_points, witness_scalars: af + bf };
+    let stats = Stats { jets: p.stats(), tape_ops: live.iter().filter(|x| **x).count(), msm_terms: msm_terms.len(), witness_points: n_points, witness_scalars: n_scalars };
     Ok(SimplicityVerifier { text, cmr, n_lin, n_mm, stats })
 }
 
@@ -306,5 +327,99 @@ impl<'a> TapeLowering<'a> {
         };
         self.vals.insert(n, v);
         v
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::r1cs::{lc, Backend, ConstraintSystem, Prover, Variable, Verifier};
+    use crate::simplicity::run::{dummy_env, sighash_of};
+    use crate::simplicity::SIGHASH_LABEL;
+    use crate::{Sha256Transcript, TranscriptBackend};
+
+    use rand_chacha::rand_core::SeedableRng;
+
+    fn product<CS: ConstraintSystem<K>>(cs: &mut CS, x: Variable, y: Variable) {
+        let (_, _, o) = cs.multiply(lc(x), lc(y));
+        cs.constrain(lc(o) - K::from(15u64));
+    }
+
+    fn gens() -> (PedersenGens<Secp256k1>, BulletproofGens<Secp256k1>) {
+        (PedersenGens::for_curve(), BulletproofGens::for_curve(64, 1))
+    }
+
+    /// The circuit and the compile transcript for statement `V`.
+    fn lowered(V: &[Secp256k1Compressed]) -> (ReciprocalCircuit<K>, CompileTranscript) {
+        let mut ct = CompileTranscript::new(b"test");
+        TranscriptBackend::append_message(&mut ct, SIGHASH_LABEL, &[0u8; 32]);
+        let c = {
+            let mut v = Verifier::<_, Secp256k1>::for_curve(&mut ct);
+            v.set_backend(Backend::Bppp);
+            let (x, y) = (v.commit(V[0]), v.commit(V[1]));
+            product(&mut v, x, y);
+            v.lower_builder_bppp().unwrap()
+        };
+        (c, ct)
+    }
+
+    /// A statement point equal to a point of the dummy proof would be taken for a witness
+    /// point (provenance is by bytes): the compiler refuses it.
+    #[test]
+    fn statement_point_equal_to_a_dummy_point_is_refused() {
+        let (pc, bp) = gens();
+        let seed = 9;
+        let (c0, _) = lowered(&[Secp256k1::compress(&k256::ProjectivePoint::GENERATOR), Secp256k1::compress(&k256::ProjectivePoint::GENERATOR)]);
+        let (points, _) = dummy_proof(&c0, &mut rand_chacha::ChaCha20Rng::seed_from_u64(seed));
+        let V = [points[0], Secp256k1::compress(&k256::ProjectivePoint::GENERATOR)];
+        let (c, ct) = lowered(&V);
+        let r = compile_with(&c, &V, &ct, &pc, &bp, &mut rand_chacha::ChaCha20Rng::seed_from_u64(seed));
+        assert!(r.is_err(), "a statement point equal to a dummy point compiled");
+    }
+
+    /// The dummy proof is random, the program is not.
+    #[test]
+    fn program_does_not_depend_on_the_dummy_proof() {
+        let (pc, bp) = gens();
+        let g = Secp256k1::compress(&(k256::ProjectivePoint::GENERATOR * K::from(5u64)));
+        let V = [g, Secp256k1::compress(&k256::ProjectivePoint::GENERATOR)];
+        let (c, ct) = lowered(&V);
+        let a = compile_with(&c, &V, &ct, &pc, &bp, &mut rand_chacha::ChaCha20Rng::seed_from_u64(1)).unwrap();
+        let b = compile_with(&c, &V, &ct, &pc, &bp, &mut rand_chacha::ChaCha20Rng::seed_from_u64(2)).unwrap();
+        assert_eq!(a.to_text(), b.to_text());
+    }
+
+    /// The program's own checks, not the witness builder's: a point not on the curve and a
+    /// scalar not below the group order make it fail.
+    #[test]
+    fn program_rejects_bad_witness_values() {
+        let env = dummy_env();
+        let (pc, bp) = gens();
+        let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(3);
+        let mut t = Sha256Transcript::new(b"test");
+        t.append_message(SIGHASH_LABEL, &sighash_of(&env));
+        let mut p = Prover::new(&pc, &mut t);
+        p.set_backend(Backend::Bppp);
+        let (cx, x) = p.commit(K::from(3u64), K::random(&mut rng));
+        let (cy, y) = p.commit(K::from(5u64), K::random(&mut rng));
+        product(&mut p, x, y);
+        let proof = p.prove_with_rng(&bp, &mut rng).unwrap();
+        let V = [cx, cy];
+        let (c, ct) = lowered(&V);
+        let sv = compile(&c, &V, &ct, &pc, &bp).unwrap();
+        let w = sv.witness(&proof).unwrap();
+        assert!(sv.execute(&w, &env).is_ok());
+        // x = 0 is on no point of secp256k1
+        let mut bad = w.clone();
+        bad.0.insert(Arc::from("p0"), ::simplicity::Value::product(bit_value(false), word_value(&[0u8; 32])));
+        assert!(sv.execute(&bad, &env).is_err());
+        // the group order itself
+        let n = [
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe, 0xba, 0xae, 0xdc, 0xe6, 0xaf, 0x48, 0xa0, 0x3b, 0xbf,
+            0xd2, 0x5e, 0x8c, 0xd0, 0x36, 0x41, 0x41,
+        ];
+        let mut bad = w.clone();
+        bad.0.insert(Arc::from("s0"), word_value(&n));
+        assert!(sv.execute(&bad, &env).is_err());
     }
 }

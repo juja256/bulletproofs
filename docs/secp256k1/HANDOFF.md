@@ -120,3 +120,9 @@ tasks are numbered 1.1–3.4 there, Task 1–14 in the ledger.
   Measurements: 2/4/8-gate chains cost 8.5/13.4/22.3M mWU within budget (program bytes pay),
   cells far under the limit once `main` is a balanced tree of `comp`; data movement ≈ 85–90% of
   the cost, program ≈ 3.7 kB per gate: stage 2 optimizes.
+- 2026-10-21 — Simplicity verifier, stage 2 (plan: the owner's knowledge base,
+  `research/2026-10-21-simplicity-verifier-stage2-plan.md`): a DAG of combinators built straight
+  into nodes (compile and run of 16 gates: 506 s + 545 s → 19 ms + 66 ms), expression trees,
+  on-demand scheduling, the environment as a binary tree of slots. 16 gates: 61.4M → 9.7M mWU,
+  104 kB → 15.7 kB; 64 gates within budget (50.6M mWU, 51 kWU). bpvm's fib (2 450 gates, 4 165
+  MSM terms) exceeds the cell limit; its jets and generators alone are about 400 kWU.

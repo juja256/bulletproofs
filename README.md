@@ -351,9 +351,9 @@ backend (secp256k1, `Sha256Transcript`) into a [Simplicity](https://github.com/B
 program that verifies its proofs and is bound to the spending transaction. The program runs as a
 Liquid node would run it (`SimplicityVerifier::execute`).
 
-The compiler traces the crate's own verifier into a straight-line program. Stage 1 is a correct
-baseline: small circuits fit their budget, but the cost is mostly data movement and grows with the
-circuit. See [docs/simplicity-verifier.md](docs/simplicity-verifier.md) for the flow, the witness
+The compiler traces the crate's own verifier into a straight-line program. Circuits up to about
+64 gates fit a standard Liquid transaction (51 kWU at 64 gates), and the cost still grows faster
+than the circuit. See [docs/simplicity-verifier.md](docs/simplicity-verifier.md) for the flow, the witness
 format and the measurements.
 
 ## Bulletproofs++ (experimental)

@@ -16,6 +16,12 @@ Entries are listed in reverse chronological order.
   * `ConstraintSystem::transcript()` returns `&mut dyn TranscriptBackend`; calling its methods
     needs `use bulletproofs::TranscriptBackend;`;
   * the BP range-proof provers and the MPC dealer require `Clone` of the transcript.
+* Simplicity verifier (feature `simplicity`, experimental; `docs/simplicity-verifier.md`):
+  `Verifier::compile_to_simplicity` writes a Simplicity program that verifies BP++ R1CS proofs
+  over secp256k1 with the SHA-256 transcript. Stage 3: IR passes (products of squares, balanced
+  sums, CSE, DCE), values recomputed where read when cheaper than storing them, the final
+  multiscalar multiplication as a balanced tree; new `Stats.stored` and `Report.data_mwu`, and
+  `Stats.jets` counts executions.
 * Earlier fork changes (Bulletproofs++, the circuit builder, the secp256k1 curve, Elements
   commitments) are described in the README.
 

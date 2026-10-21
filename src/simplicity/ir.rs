@@ -208,6 +208,29 @@ impl Prog {
         l.order.iter().filter(|&&r| !matches!(self.ops[r], Op::Assert(_)) && l.last_use[r] > l.pos[r]).count()
     }
 
+    /// Diagnostic: stored values by operation, with their count, Σ bits × steps alive and Σ
+    /// readers' executions.
+    #[cfg(test)]
+    pub(crate) fn stored_report(&self) -> BTreeMap<String, (usize, u64, u64)> {
+        let l = Lowering::new(self);
+        let mut m = BTreeMap::new();
+        for &r in &l.order {
+            if matches!(self.ops[r], Op::Assert(_)) || l.last_use[r] <= l.pos[r] {
+                continue;
+            }
+            let name = match &self.ops[r] {
+                Op::Jet(n, ..) => format!("jet {}", n),
+                o => format!("{:?}", o).split('(').next().unwrap().to_string(),
+            };
+            let bits = self.tys[r].as_ref().map_or(0, bits_of);
+            let e = m.entry(name).or_insert((0usize, 0u64, 0u64));
+            e.0 += 1;
+            e.1 += bits * (l.last_use[r] - l.pos[r]) as u64;
+            e.2 += l.exec[r];
+        }
+        m
+    }
+
     /// The scheduler's measure: Σ over steps of the bits live after the step.
     pub(crate) fn live_bits(&self) -> u64 {
         Lowering::new(self).live_bits
@@ -267,7 +290,6 @@ impl<'a> Lowering<'a> {
         // every reader, with multiplicity (mul(x, x) reads x twice)
         let mut readers: Vec<Vec<usize>> = vec![Vec::new(); n];
         let mut in_branch = vec![false; n];
-        let mut acc_arg = vec![false; n];
         for (i, o) in p.ops.iter().enumerate() {
             for a in o.args() {
                 readers[a.0 as usize].push(i);
@@ -278,25 +300,39 @@ impl<'a> Lowering<'a> {
                 in_branch[x.0 as usize] = true;
                 in_branch[y.0 as usize] = true;
             }
-            // stage 2's accumulator rule, kept while the sum is a chain
-            if let Op::Jet("gej_add", args, _) = o {
-                acc_arg[args[0].0 as usize] = true;
-            }
+        }
+        // what recomputing a value costs: itself and the arguments only it reads (they run
+        // wherever it runs)
+        let mut tree_cost = vec![0u64; n];
+        for i in 0..n {
+            let own: u64 = p.ops[i]
+                .args()
+                .iter()
+                .map(|a| a.0 as usize)
+                .filter(|&a| readers[a].len() == 1 && !matches!(p.ops[a], Op::Const(..) | Op::Witness(..)))
+                .map(|a| tree_cost[a])
+                .fold(0u64, |x, y| x.saturating_add(y));
+            tree_cost[i] = local_cost(p, i).saturating_add(own);
         }
         // decided from the last operation back: a value's readers are decided before it, so
         // the times it runs are known
         let mut role = vec![Role::Root; n];
         let mut exec = vec![0u64; n];
+        // the last root (in program order) that runs each value: itself if a root, else the
+        // last root running one of its readers
+        let mut last_owner: Vec<usize> = (0..n).collect();
         let mut roots_at = Fenwick::new(n);
         for i in (0..n).rev() {
             exec[i] = readers[i].iter().map(|&r| if role[r] == Role::Root { 1 } else { exec[r] }).fold(0u64, |a, b| a.saturating_add(b));
+            let owner = readers[i].iter().map(|&r| if role[r] == Role::Root { r } else { last_owner[r] }).max();
             let ty = p.tys[i].clone();
             role[i] = match &p.ops[i] {
                 Op::Const(..) => Role::Const,
                 Op::Assert(_) => Role::Root,
                 _ if readers[i].is_empty() || in_branch[i] => Role::Root,
-                Op::Jet("gej_add", ..) => Role::Root,
-                _ if acc_arg[i] => Role::Root,
+                // a value read from a transcript state (a hash) is stored: inlined into a late
+                // step, it would keep the state (838 bits) alive until then
+                _ if !matches!(ty, Some(Ty::Ctx) | Some(Ty::CtxBuf)) && p.ops[i].args().iter().any(|a| matches!(p.tys[a.0 as usize], Some(Ty::Ctx) | Some(Ty::CtxBuf))) => Role::Root,
                 Op::Witness(..) => {
                     if exec[i] == 1 {
                         Role::InlineWitness
@@ -309,10 +345,11 @@ impl<'a> Lowering<'a> {
                 _ if matches!(ty, Some(Ty::Ctx) | Some(Ty::CtxBuf)) => Role::Root,
                 _ => {
                     let bits = ty.as_ref().map_or(0, bits_of);
-                    let last = *readers[i].iter().max().expect("readers");
+                    // it lives until the last step that reads it, not its last reader's position
+                    let last = owner.expect("readers");
                     let life = (roots_at.prefix(last + 1) - roots_at.prefix(i + 1)).max(1);
                     let store = (2 * bits * life).saturating_add(exec[i].saturating_mul(read_cost(bits)));
-                    let recompute = exec[i].saturating_mul(local_cost(p, i));
+                    let recompute = exec[i].saturating_mul(tree_cost[i]);
                     if recompute > store {
                         Role::Root
                     } else {
@@ -322,6 +359,8 @@ impl<'a> Lowering<'a> {
             };
             if role[i] == Role::Root {
                 roots_at.add(i);
+            } else if let Some(o) = owner {
+                last_owner[i] = o;
             }
         }
         let roots: Vec<usize> = (0..n).filter(|i| role[*i] == Role::Root).collect();

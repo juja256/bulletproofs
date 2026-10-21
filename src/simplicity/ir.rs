@@ -176,12 +176,15 @@ impl Prog {
         self.tys[v.0 as usize].as_ref().expect("an assertion has no value")
     }
 
-    /// Jets by name: how many times the program calls each.
+    /// Jets by name: how many times the program runs each (a recomputed value runs at each
+    /// of its readers); `verify` once per check.
     pub(crate) fn stats(&self) -> BTreeMap<&'static str, usize> {
+        let l = Lowering::new(self);
         let mut m = BTreeMap::new();
-        for o in &self.ops {
+        for (i, o) in self.ops.iter().enumerate() {
+            let times = if l.role[i] == Role::Root { 1 } else { l.exec[i] as usize };
             match o {
-                Op::Jet(n, _, _) => *m.entry(*n).or_insert(0) += 1,
+                Op::Jet(n, _, _) => *m.entry(*n).or_insert(0) += times,
                 Op::Assert(_) => *m.entry("verify").or_insert(0) += 1,
                 _ => {}
             }
@@ -197,6 +200,12 @@ impl Prog {
     /// The number of steps the program runs (values read several times or by nobody, checks).
     pub(crate) fn step_count(&self) -> usize {
         Lowering::new(self).steps()
+    }
+
+    /// Steps that store a value for later steps.
+    pub(crate) fn stored_count(&self) -> usize {
+        let l = Lowering::new(self);
+        l.order.iter().filter(|&&r| !matches!(self.ops[r], Op::Assert(_)) && l.last_use[r] > l.pos[r]).count()
     }
 
     /// The scheduler's measure: Σ over steps of the bits live after the step.
@@ -230,6 +239,10 @@ enum Role {
 struct Lowering<'a> {
     p: &'a Prog,
     role: Vec<Role>,
+    /// How many times each operation runs (a value recomputed at each reader runs at each).
+    exec: Vec<u64>,
+    /// The position of each root in `order`.
+    pos: Vec<usize>,
     /// For a root, the last position (in `order`) that reads it (its own if none).
     last_use: Vec<usize>,
     /// The roots in the order they run.
@@ -244,18 +257,20 @@ struct Lowering<'a> {
     height: usize,
     consts: HashMap<(Ty, Vec<u8>), Term>,
     witnesses: HashMap<Arc<str>, Term>,
+    /// The expressions of inlined values built in the current step (they read its slots).
+    cache: HashMap<usize, Term>,
 }
 
 impl<'a> Lowering<'a> {
     fn new(p: &'a Prog) -> Self {
         let n = p.ops.len();
-        let mut uses = vec![0usize; n];
-        let mut reader = vec![usize::MAX; n];
+        // every reader, with multiplicity (mul(x, x) reads x twice)
+        let mut readers: Vec<Vec<usize>> = vec![Vec::new(); n];
         let mut in_branch = vec![false; n];
+        let mut acc_arg = vec![false; n];
         for (i, o) in p.ops.iter().enumerate() {
             for a in o.args() {
-                uses[a.0 as usize] += 1;
-                reader[a.0 as usize] = i;
+                readers[a.0 as usize].push(i);
             }
             // the arms of a selection run in one branch only: never inline into them (a check
             // there would run only when its branch is taken)
@@ -263,71 +278,90 @@ impl<'a> Lowering<'a> {
                 in_branch[x.0 as usize] = true;
                 in_branch[y.0 as usize] = true;
             }
+            // stage 2's accumulator rule, kept while the sum is a chain
+            if let Op::Jet("gej_add", args, _) = o {
+                acc_arg[args[0].0 as usize] = true;
+            }
         }
-        let mut role: Vec<Role> = p
-            .ops
-            .iter()
-            .enumerate()
-            .map(|(i, o)| match o {
+        // decided from the last operation back: a value's readers are decided before it, so
+        // the times it runs are known
+        let mut role = vec![Role::Root; n];
+        let mut exec = vec![0u64; n];
+        let mut roots_at = Fenwick::new(n);
+        for i in (0..n).rev() {
+            exec[i] = readers[i].iter().map(|&r| if role[r] == Role::Root { 1 } else { exec[r] }).fold(0u64, |a, b| a.saturating_add(b));
+            let ty = p.tys[i].clone();
+            role[i] = match &p.ops[i] {
                 Op::Const(..) => Role::Const,
                 Op::Assert(_) => Role::Root,
-                Op::Witness(..) if uses[i] == 1 && !in_branch[i] => Role::InlineWitness,
-                _ if uses[i] == 1 && !in_branch[i] => Role::Inline,
-                _ => Role::Root,
-            })
-            .collect();
-        // the accumulator of a multiscalar multiplication is a step per term, so that the
-        // scheduler can put each term right after its coefficient (inlined, the whole sum would
-        // be one expression at the end, keeping every coefficient's inputs alive until then)
-        for (i, o) in p.ops.iter().enumerate() {
-            if let Op::Jet("gej_add", args, _) = o {
-                role[i] = Role::Root;
-                if role[args[0].0 as usize] == Role::Inline {
-                    role[args[0].0 as usize] = Role::Root;
+                _ if readers[i].is_empty() || in_branch[i] => Role::Root,
+                Op::Jet("gej_add", ..) => Role::Root,
+                _ if acc_arg[i] => Role::Root,
+                Op::Witness(..) => {
+                    if exec[i] == 1 {
+                        Role::InlineWitness
+                    } else {
+                        Role::Root
+                    }
                 }
+                _ if exec[i] == 1 => Role::Inline,
+                // a transcript state is never recomputed
+                _ if matches!(ty, Some(Ty::Ctx) | Some(Ty::CtxBuf)) => Role::Root,
+                _ => {
+                    let bits = ty.as_ref().map_or(0, bits_of);
+                    let last = *readers[i].iter().max().expect("readers");
+                    let life = (roots_at.prefix(last + 1) - roots_at.prefix(i + 1)).max(1);
+                    let store = (2 * bits * life).saturating_add(exec[i].saturating_mul(read_cost(bits)));
+                    let recompute = exec[i].saturating_mul(local_cost(p, i));
+                    if recompute > store {
+                        Role::Root
+                    } else {
+                        Role::Inline
+                    }
+                }
+            };
+            if role[i] == Role::Root {
+                roots_at.add(i);
             }
         }
-        // the root each operation runs in: itself for a root, its reader's for an inline one
-        let mut owner: Vec<usize> = (0..n).collect();
-        for i in (0..n).rev() {
-            if matches!(role[i], Role::Inline | Role::InlineWitness) {
-                owner[i] = owner[reader[i]];
-            }
-        }
-        // the roots' graph: each root reads the roots its expression (with its inlined
-        // arguments) reads
         let roots: Vec<usize> = (0..n).filter(|i| role[*i] == Role::Root).collect();
         let mut index = vec![usize::MAX; n];
         for (k, r) in roots.iter().enumerate() {
             index[*r] = k;
         }
-        let mut deps: Vec<Vec<usize>> = vec![Vec::new(); roots.len()];
-        for (i, o) in p.ops.iter().enumerate() {
-            if role[i] == Role::Const {
-                continue;
-            }
-            for a in o.args() {
-                let a = a.0 as usize;
-                if role[a] == Role::Root {
-                    deps[index[owner[i]]].push(index[a]);
+        // the stored values each root's expression reads, through its inlined arguments
+        let mut stamp = vec![usize::MAX; n];
+        let mut reads: Vec<Vec<usize>> = vec![Vec::new(); roots.len()];
+        for (k, &r) in roots.iter().enumerate() {
+            let mut stack: Vec<usize> = p.ops[r].args().iter().map(|a| a.0 as usize).collect();
+            while let Some(a) = stack.pop() {
+                if stamp[a] == k {
+                    continue;
+                }
+                stamp[a] = k;
+                match role[a] {
+                    Role::Root => reads[k].push(a),
+                    Role::Inline | Role::InlineWitness => stack.extend(p.ops[a].args().iter().map(|x| x.0 as usize)),
+                    Role::Const => {}
                 }
             }
+            reads[k].sort();
         }
+        let deps: Vec<Vec<usize>> = reads.iter().map(|rs| rs.iter().map(|a| index[*a]).collect()).collect();
         let bits: Vec<u64> = roots.iter().map(|r| p.tys[*r].as_ref().map_or(0, bits_of)).collect();
         let graph = crate::simplicity::sched::Graph::new(deps, bits);
         let sched = crate::simplicity::sched::schedule(&graph);
         let live_bits = crate::simplicity::sched::live_bits(&graph, &sched);
-        let order: Vec<usize> = sched.into_iter().map(|k| roots[k]).collect();
-        // positions in that order; a root's last use is the last position reading it
+        let order: Vec<usize> = sched.iter().map(|k| roots[*k]).collect();
         let mut pos = vec![0usize; n];
         for (k, r) in order.iter().enumerate() {
             pos[*r] = k;
         }
-        let mut last_use: Vec<usize> = (0..n).map(|i| pos[owner[i]]).collect();
-        for (i, o) in p.ops.iter().enumerate() {
-            for a in o.args() {
-                let a = a.0 as usize;
-                last_use[a] = last_use[a].max(pos[owner[i]]);
+        // a stored value lives until the last step whose expression reads it
+        let mut last_use: Vec<usize> = (0..n).map(|i| pos[i]).collect();
+        for (k, &r) in roots.iter().enumerate() {
+            for &a in &reads[k] {
+                last_use[a] = last_use[a].max(pos[r]);
             }
         }
         // the most values alive at once: the number of slots
@@ -347,7 +381,7 @@ impl<'a> Lowering<'a> {
             most = most.max(alive);
         }
         let height = (usize::BITS - (most - 1).leading_zeros()) as usize;
-        Lowering { p, role, last_use, order, live_bits, slot: vec![usize::MAX; n], occupant: vec![None; 1 << height], height, consts: HashMap::new(), witnesses: HashMap::new() }
+        Lowering { p, role, exec, pos, last_use, order, live_bits, slot: vec![usize::MAX; n], occupant: vec![None; 1 << height], height, consts: HashMap::new(), witnesses: HashMap::new(), cache: HashMap::new() }
     }
 
     /// The number of steps (roots).
@@ -371,7 +405,14 @@ impl<'a> Lowering<'a> {
                 self.constant(&t, &b)
             }
             (Op::Witness(name, _), Role::InlineWitness) => self.witness(name),
-            (_, Role::Inline) => self.expr(i),
+            (_, Role::Inline) => {
+                if let Some(t) = self.cache.get(&i) {
+                    return t.clone();
+                }
+                let t = self.expr(i);
+                self.cache.insert(i, t.clone());
+                t
+            }
             _ => {
                 let slot = self.slot[i];
                 assert!(slot != usize::MAX && self.occupant[slot] == Some(i), "a value read after it was dropped");
@@ -451,6 +492,7 @@ impl<'a> Lowering<'a> {
         let mut steps = Vec::new();
         let order = self.order.clone();
         for (k, &i) in order.iter().enumerate() {
+            self.cache.clear();
             // values read for the last time at this step leave after it
             let dying: Vec<usize> = self.occupant.iter().enumerate().filter_map(|(s, o)| o.filter(|v| self.last_use[*v] <= k).map(|_| s)).collect();
             let keep = !matches!(self.p.ops[i], Op::Assert(_)) && self.last_use[i] > k;
@@ -528,6 +570,63 @@ pub(crate) fn bits_of(t: &Ty) -> u64 {
         Ty::Opt(t) => 1 + bits_of(t),
         Ty::Ctx => 838,
         Ty::CtxBuf => 518,
+    }
+}
+
+/// 100 mWU per executed node (simplicity-lang 0.9 `Cost::OVERHEAD`).
+const NODE: u64 = 100;
+/// The environment's height assumed when deciding what to store.
+const ASSUMED_HEIGHT: u64 = 6;
+
+/// A jet's fixed cost (simplicity-lang 0.9), mWU.
+fn jet_cost(name: &str) -> u64 {
+    use ::simplicity::jet::Jet as _;
+    let j: ::simplicity::jet::Elements = name.parse().unwrap_or_else(|_| panic!("unknown jet {}", name));
+    j.cost().to_string().parse().expect("a cost as an integer")
+}
+
+/// Computing op `i` once its arguments are at hand: the jet, its `comp` (which copies the
+/// arguments) and the pairs that build them; or the selectors of a projection.
+fn local_cost(p: &Prog, i: usize) -> u64 {
+    let args = p.ops[i].args();
+    let arg_bits: u64 = args.iter().map(|a| p.tys[a.0 as usize].as_ref().map_or(0, bits_of)).sum();
+    let pairs = args.len().saturating_sub(1) as u64;
+    match &p.ops[i] {
+        Op::Jet(n, ..) => jet_cost(n) + 2 * NODE + arg_bits + pairs * NODE,
+        Op::Pair(..) => NODE,
+        Op::Fst(..) | Op::Snd(..) => 3 * NODE + arg_bits,
+        Op::Unwrap(..) | Op::Select(..) => 5 * NODE + arg_bits,
+        Op::Const(..) | Op::Witness(..) | Op::Assert(_) => 0,
+    }
+}
+
+/// Reading a stored value: its path of selectors and the `iden` that copies it.
+fn read_cost(bits: u64) -> u64 {
+    NODE * (ASSUMED_HEIGHT + 1) + bits
+}
+
+/// Prefix sums with updates (roots decided so far, by position).
+struct Fenwick(Vec<u64>);
+
+impl Fenwick {
+    fn new(n: usize) -> Self {
+        Fenwick(vec![0; n + 1])
+    }
+    fn add(&mut self, i: usize) {
+        let mut i = i + 1;
+        while i < self.0.len() {
+            self.0[i] += 1;
+            i += i & i.wrapping_neg();
+        }
+    }
+    /// Σ over positions `< i`.
+    fn prefix(&self, i: usize) -> u64 {
+        let (mut i, mut s) = (i, 0);
+        while i > 0 {
+            s += self.0[i];
+            i -= i & i.wrapping_neg();
+        }
+        s
     }
 }
 
@@ -784,6 +883,74 @@ mod tests {
         assert!(execute_term(&p.to_term(), &HashMap::new(), &dummy_env(), false).is_ok());
     }
 
+
+    /// A cheap value read by checks far apart is recomputed at each, not stored: the steps are
+    /// the 43 checks and the two witnesses read several times.
+    #[test]
+    fn cheap_shared_value_is_recomputed() {
+        let (x, y) = (sc(5), sc(9));
+        let build = |bad: bool| {
+            let mut p = Prog::new();
+            let wx = p.push(Op::Witness("x".into(), Ty::word()));
+            let wy = p.push(Op::Witness("y".into(), Ty::word()));
+            let one = p.push(Op::Const(Ty::word(), be(&sc(1))));
+            let s = p.push(Op::Jet("scalar_add", vec![wx, one], Ty::word()));
+            let ks = p.push(Op::Const(Ty::word(), be(&(x + sc(1) + if bad { sc(1) } else { sc(0) }))));
+            let ky = p.push(Op::Const(Ty::word(), be(&y)));
+            for i in 0..43 {
+                let e = if i % 20 == 0 { p.push(Op::Jet("eq_256", vec![s, ks], Ty::Bit)) } else { p.push(Op::Jet("eq_256", vec![wy, ky], Ty::Bit)) };
+                p.push(Op::Assert(e));
+            }
+            p
+        };
+        let mut w = HashMap::new();
+        w.insert(Arc::<str>::from("x"), word_value(&be(&x)));
+        w.insert(Arc::<str>::from("y"), word_value(&be(&y)));
+        let p = build(false);
+        assert!(execute_term(&p.to_term(), &w, &dummy_env(), false).is_ok());
+        assert_eq!(p.step_count(), 45);
+        assert_eq!(p.stats()["scalar_add"], 3, "executed at each of its three readers");
+        assert!(execute_term(&build(true).to_term(), &w, &dummy_env(), false).is_err());
+    }
+
+    /// A witness read through a value recomputed in several steps is stored (one path).
+    #[test]
+    fn witness_under_shared_inline_value_is_stored() {
+        let x = sc(4);
+        let mut p = Prog::new();
+        let wx = p.push(Op::Witness("x".into(), Ty::word()));
+        let n = p.push(Op::Jet("scalar_negate", vec![wx], Ty::word()));
+        let k = p.push(Op::Const(Ty::word(), be(&(-x))));
+        for _ in 0..3 {
+            let e = p.push(Op::Jet("eq_256", vec![n, k], Ty::Bit));
+            p.push(Op::Assert(e));
+        }
+        let mut w = HashMap::new();
+        w.insert(Arc::<str>::from("x"), word_value(&be(&x)));
+        assert!(execute_term(&p.to_term(), &w, &dummy_env(), false).is_ok());
+        assert_eq!(p.stored_count(), 1, "the witness, not the negation");
+    }
+
+    /// A check inside a value recomputed in two steps runs (decompress of x = 0 fails).
+    #[test]
+    fn check_inside_shared_inline_value_runs() {
+        let gx = hex_literal("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798");
+        let run = |x: Vec<u8>| {
+            let mut p = Prog::new();
+            let bit = p.push(Op::Const(Ty::Bit, vec![0]));
+            let xv = p.push(Op::Const(Ty::word(), x));
+            let opt = p.push(Op::Jet("decompress", vec![bit, xv], Ty::opt(Ty::ge())));
+            let ge = p.push(Op::Unwrap(opt, Ty::ge()));
+            let gx2 = p.push(Op::Fst(ge, Ty::word()));
+            for _ in 0..2 {
+                let e = p.push(Op::Jet("eq_256", vec![gx2, xv], Ty::Bit));
+                p.push(Op::Assert(e));
+            }
+            execute_term(&p.to_term(), &HashMap::new(), &dummy_env(), false)
+        };
+        assert!(run(gx).is_ok());
+        assert!(run(vec![0u8; 32]).is_err());
+    }
 }
 
 /// Random programs (suggested by the stage 2 review): every check must run after inlining,

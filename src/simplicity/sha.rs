@@ -168,8 +168,8 @@ enum State {
 /// Lower a log into the program: the constant prefix up to its last 64-byte boundary (or up to
 /// `force_from`, whichever is first) becomes a constant context, the rest is added with
 /// `sha_256_ctx_8_add_*`. `parts` gives the values of a non-constant part (each with its byte
-/// length, 1 or 32). Challenges inside the constant prefix are computed here, as constants.
-pub(crate) fn lower_log(p: &mut Prog, log: &[Rec], force_from: usize, parts: &mut dyn FnMut(&mut Prog, &Part) -> Vec<(Val, usize)>) -> Vec<ChallengeVals> {
+/// length, 1 or 32), given the challenges lowered so far. Challenges inside the constant prefix are computed here, as constants.
+pub(crate) fn lower_log(p: &mut Prog, log: &[Rec], force_from: usize, parts: &mut dyn FnMut(&mut Prog, &Part, &[ChallengeVals]) -> Vec<(Val, usize)>) -> Vec<ChallengeVals> {
     let mut state = State::Const(Sha256::new(), 0);
     let mut prefix: Vec<u8> = Vec::new();
     let mut out = Vec::new();
@@ -209,7 +209,7 @@ pub(crate) fn lower_log(p: &mut Prog, log: &[Rec], force_from: usize, parts: &mu
                             if let State::Const(..) = state {
                                 state = to_prog(p, &prefix);
                             }
-                            let vals = parts(p, other);
+                            let vals = parts(p, other, &out);
                             debug_assert_eq!(vals.iter().map(|v| v.1).sum::<usize>(), other.len());
                             if let State::Prog(ctx, pend) = &mut state {
                                 let mut c = flush(p, *ctx, pend);
@@ -361,7 +361,7 @@ mod tests {
     /// (hex of the challenge bytes), and the scalar of 64-byte challenges equals `scalars`.
     fn check_log(log: &[Rec], force_from: usize, expected: &[Vec<u8>], scalars: &[Option<Vec<u8>>]) -> bool {
         let mut p = Prog::new();
-        let mut parts = |p: &mut Prog, part: &Part| match part {
+        let mut parts = |p: &mut Prog, part: &Part, _: &[ChallengeVals]| match part {
             Part::Sighash => vec![(p.push(Op::Jet("sig_all_hash", vec![], Ty::word())), 32)],
             _ => unreachable!(),
         };

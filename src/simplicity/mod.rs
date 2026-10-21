@@ -2,6 +2,7 @@
 //! BP++ backend over secp256k1 with the SHA-256 transcript compiles into a Simplicity program
 //! that verifies its proofs, bound to the spending transaction (docs/simplicity-verifier.md).
 
+mod compile;
 mod ir;
 mod run;
 mod point;
@@ -16,3 +17,5 @@ pub const SIGHASH_LABEL: &[u8] = b"sighash";
 
 pub use self::sha::CompileTranscript;
 
+pub use self::compile::{SimplicityVerifier, SimplicityWitness, Stats};
+pub(crate) use self::compile::compile;

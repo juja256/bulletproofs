@@ -255,6 +255,26 @@ impl<T: TranscriptRef, C: Curve> RandomizedConstraintSystem<C::Scalar> for Rando
     }
 }
 
+#[cfg(feature = "simplicity")]
+impl<T: TranscriptRef<Backend = crate::simplicity::CompileTranscript>> Verifier<T, crate::curve::Secp256k1> {
+    /// Compile the circuit (backend BP++, no randomized constraints) into a Simplicity program
+    /// that verifies its proofs, bound to the spending transaction: the transcript must hold a
+    /// [`SIGHASH_LABEL`](crate::simplicity::SIGHASH_LABEL) record where the prover's holds
+    /// the transaction's hash (docs/simplicity-verifier.md).
+    pub fn compile_to_simplicity(
+        mut self,
+        pc_gens: &PedersenGens<crate::curve::Secp256k1>,
+        bp_gens: &BulletproofGens<crate::curve::Secp256k1>,
+    ) -> Result<crate::simplicity::SimplicityVerifier, R1CSError> {
+        if self.backend != super::Backend::Bppp {
+            return Err(R1CSError::GadgetError { description: "a Simplicity verifier needs the BP++ backend".into() });
+        }
+        super::backend::refuse_randomized(self.deferred_constraints.len())?;
+        let c = self.lower_builder_bppp()?;
+        crate::simplicity::compile(&c, &self.V, self.transcript.backend_ref(), pc_gens, bp_gens)
+    }
+}
+
 impl<T: TranscriptRef> Verifier<T, Ristretto> {
     /// A verifier over ristretto255: [`Verifier::for_curve`] for the default curve.
     pub fn new(transcript: T) -> Self {

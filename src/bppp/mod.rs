@@ -5,7 +5,7 @@
 
 pub(crate) mod batch;
 pub(crate) mod circuit;
-mod gens;
+pub(crate) mod gens;
 pub(crate) mod mact;
 mod poly;
 pub(crate) mod range;

@@ -13,7 +13,7 @@ use core::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use k256::elliptic_curve::ff::{Field as _, PrimeField as _};
+use k256::elliptic_curve::ff::PrimeField as _;
 use k256::{ProjectivePoint, Scalar as K};
 use rand_core::RngCore;
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq, CtOption};

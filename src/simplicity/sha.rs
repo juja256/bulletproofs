@@ -131,6 +131,7 @@ impl TranscriptRef for CompileTranscript {
 }
 
 /// The constant bytes before the first part that is not constant (all of them if none).
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn prefix_len(log: &[Rec]) -> usize {
     let mut n = 0;
     for r in log {
@@ -152,6 +153,7 @@ pub(crate) fn prefix_len(log: &[Rec]) -> usize {
 /// The values of a challenge in the program.
 pub(crate) struct ChallengeVals {
     /// The 32-byte output blocks `o_i` (the last one possibly longer than what the challenge uses).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub blocks: Vec<Val>,
     /// For a 64-byte challenge: the secp256k1 scalar `normalize(o0) · R + normalize(o1)`.
     pub scalar: Option<Val>,

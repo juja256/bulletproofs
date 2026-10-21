@@ -60,6 +60,7 @@ impl ScalarBytes {
         ScalarBytes(b)
     }
     /// The scalar.
+    #[cfg_attr(not(test), allow(dead_code))] // the numeric model (tests)
     pub(crate) fn scalar(&self) -> K {
         Option::from(K::from_repr(self.0.into())).expect("a canonical constant")
     }
@@ -91,12 +92,14 @@ pub(crate) struct Tape {
 
 impl Tape {
     /// The operations without values: equal for two proofs of one circuit.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn structure(&self) -> Vec<TOp> {
         self.ops.clone()
     }
 
     /// Recompute every node from the proof's scalars and the challenges (the numeric model of
     /// the program); checks evaluate to their input. Panics on a failing check.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn eval(&self, wit: &[K], chal: &[K]) -> Vec<K> {
         let mut v: Vec<K> = Vec::with_capacity(self.ops.len());
         for op in &self.ops {
@@ -799,11 +802,6 @@ impl Curve for TracedCurve {
     fn msm_vt(_: &[Traced], _: &[TracedPoint]) -> TracedPoint {
         panic!("trace: the multiscalar multiplication is lowered separately")
     }
-}
-
-/// A traced scalar's value as a k256 scalar.
-pub(crate) fn k(t: &Traced) -> K {
-    t.value
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 use super::*;
 use crate::bppp::BpppGens;
 use crate::curve::Secp256k1Compressed;
-use crate::r1cs::{lc, Backend, CircuitBuilder, ConstraintSystem, Prover, R1CSProof, Variable, Verifier};
+use crate::r1cs::{lc, Backend, CircuitBuilder, Prover, R1CSProof, Variable, Verifier};
 use crate::simplicity::CompileTranscript;
 use crate::{BulletproofGens, PedersenGens, Sha256Transcript};
 use rand_chacha::rand_core::SeedableRng;

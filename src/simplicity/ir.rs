@@ -154,6 +154,7 @@ impl Prog {
     }
 
     /// The type of a value.
+    #[allow(dead_code)]
     pub(crate) fn ty(&self, v: Val) -> &Ty {
         self.tys[v.0 as usize].as_ref().expect("an assertion has no value")
     }
@@ -355,12 +356,21 @@ impl<'a> Lowering<'a> {
             steps.push(name);
             env = next;
         }
-        let mut main = String::from("unit");
-        for s in steps.iter().rev() {
-            main = format!("comp {} ({})", s, main);
-        }
+        // composition is associative: a balanced tree of `comp` keeps the program shallow
+        // (rust-simplicity walks programs recursively)
+        steps.push("unit".into());
+        let main = balanced_comp(&steps);
         format!("{}main := {}\n", self.out, main)
     }
+}
+
+/// `s_0 ; s_1 ; ... ; s_n` as a balanced tree of `comp`.
+fn balanced_comp(steps: &[String]) -> String {
+    if steps.len() == 1 {
+        return steps[0].clone();
+    }
+    let h = steps.len() / 2;
+    format!("comp ({}) ({})", balanced_comp(&steps[..h]), balanced_comp(&steps[h..]))
 }
 
 /// A constant of type `t` from its bytes.

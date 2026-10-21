@@ -14,6 +14,9 @@ use ::simplicity::jet::elements::{ElementsEnv, ElementsUtxo};
 use ::simplicity::jet::Elements;
 use ::simplicity::{types, BitIter, BitMachine, Cmr, RedeemNode, Value};
 
+/// The Bit Machine's cell limit of consensus.
+pub const MAX_CELLS: usize = 5_242_880;
+
 /// A transaction environment programs run in.
 pub type Env = ElementsEnv<Arc<elements::Transaction>>;
 
@@ -50,6 +53,8 @@ pub enum ExecError {
     Exec(String),
     /// The encoding did not round-trip.
     Decode(String),
+    /// The Bit Machine needs more cells than consensus allows (5 242 880).
+    Cells(usize),
     /// The cost exceeds what the witness pays for.
     Budget {
         /// The cost bound.
@@ -182,6 +187,9 @@ pub(crate) fn execute_forest(forest: &Forest, witness: &HashMap<Arc<str>, Value>
         let bounds = decoded.bounds();
         let cost_mwu = cost_of(&decoded);
         let budget_mwu = budget(p.len(), w.len());
+        if bounds.extra_cells > MAX_CELLS {
+            return Err(ExecError::Cells(bounds.extra_cells));
+        }
         if budgeted && cost_mwu > budget_mwu {
             return Err(ExecError::Budget { cost_mwu, budget_mwu });
         }

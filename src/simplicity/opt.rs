@@ -12,7 +12,7 @@ type K = k256::Scalar;
 
 /// The rewrites, in order.
 pub(crate) fn optimize(p: &Prog) -> Prog {
-    dce(&monomials(p))
+    dce(&reassociate(&monomials(p)))
 }
 
 /// A product `c · Π a^e` over atoms (values of the program being built).
@@ -175,6 +175,61 @@ fn monomials(p: &Prog) -> Prog {
         built[i] = Some(b.push(op.with_args(&args)));
     }
     b.out
+}
+
+/// Chains of `scalar_add` whose partial sums are read once, by the next addition, as
+/// balanced trees of their terms (in the order of the chain).
+fn reassociate(p: &Prog) -> Prog {
+    let ops = p.ops();
+    let n = ops.len();
+    let mut uses = vec![0usize; n];
+    let mut reader = vec![usize::MAX; n];
+    for (i, o) in ops.iter().enumerate() {
+        for a in o.args() {
+            uses[a.index()] += 1;
+            reader[a.index()] = i;
+        }
+    }
+    let is_add = |i: usize| matches!(ops[i], Op::Jet("scalar_add", ..));
+    // a partial sum read once, by an addition: a part of its reader's chain, never built
+    let absorbed: Vec<bool> = (0..n).map(|i| is_add(i) && uses[i] == 1 && is_add(reader[i])).collect();
+    let mut b = Builder::new();
+    let mut map: Vec<Option<Val>> = vec![None; n];
+    for (i, op) in ops.iter().enumerate() {
+        if absorbed[i] {
+            continue;
+        }
+        if is_add(i) {
+            // the chain's terms, left to right, without recursion (chains are long)
+            let mut terms = Vec::new();
+            let mut stack = vec![i];
+            while let Some(j) = stack.pop() {
+                if j != i && !absorbed[j] {
+                    terms.push(map[j].expect("a term before its sum"));
+                    continue;
+                }
+                let a = ops[j].args();
+                // right argument pushed first: the left one is visited first
+                stack.push(a[1].index());
+                stack.push(a[0].index());
+            }
+            map[i] = Some(balanced_sum(&mut b, &terms));
+            continue;
+        }
+        let args: Vec<Val> = op.args().iter().map(|a| map[a.index()].expect("an argument before its reader")).collect();
+        map[i] = Some(b.push(op.with_args(&args)));
+    }
+    b.out
+}
+
+fn balanced_sum(b: &mut Builder, terms: &[Val]) -> Val {
+    if terms.len() == 1 {
+        return terms[0];
+    }
+    let h = terms.len() / 2;
+    let l = balanced_sum(b, &terms[..h]);
+    let r = balanced_sum(b, &terms[h..]);
+    b.add(l, r)
 }
 
 /// Drop operations nobody needs: an operation is needed if it is a check, an unwrap, a
@@ -414,6 +469,84 @@ mod tests {
                     assert!(execute_term(&optimize(&p).to_term(), &w, &dummy_env(), false).is_err(), "seed {} n {} check {}", seed, n, c);
                 }
             }
+        }
+    }
+
+    /// The longest chain of `scalar_add` ending at each value.
+    fn add_depth(p: &Prog) -> Vec<usize> {
+        let mut d = vec![0usize; p.ops().len()];
+        for (i, o) in p.ops().iter().enumerate() {
+            let m = o.args().iter().map(|a| d[a.index()]).max().unwrap_or(0);
+            d[i] = m + matches!(o, Op::Jet("scalar_add", ..)) as usize;
+        }
+        d
+    }
+
+    /// A sum of 100 witnesses by a chain becomes a balanced tree (depth 7) of the same value.
+    #[test]
+    fn add_chain_becomes_balanced() {
+        let mut p = Prog::new();
+        let mut wit = HashMap::new();
+        let names: Vec<String> = (0..100).map(|i| format!("w{}", i)).collect();
+        let mut acc = None;
+        let mut sum = K::ZERO;
+        for (i, n) in names.iter().enumerate() {
+            let v = p.push(Op::Witness(n.as_str().into(), Ty::word()));
+            let k = K::from(i as u64 + 1);
+            sum += k;
+            acc = Some(match acc {
+                None => v,
+                Some(a) => p.push(Op::Jet("scalar_add", vec![a, v], Ty::word())),
+            });
+        }
+        for (i, n) in names.iter().enumerate() {
+            wit.insert(n.as_str(), K::from(i as u64 + 1));
+        }
+        check(&mut p, acc.unwrap(), sum);
+        let q = optimize(&p);
+        assert!(eval(&q, &wit).is_ok());
+        assert_eq!(*add_depth(&q).iter().max().unwrap(), 7);
+    }
+
+    /// A partial sum read twice ends one chain and is a term of another.
+    #[test]
+    fn shared_partial_sum_is_kept() {
+        let mut p = Prog::new();
+        let w: Vec<Val> = (0..6).map(|i| p.push(Op::Witness(format!("w{}", i).as_str().into(), Ty::word()))).collect();
+        let a = p.push(Op::Jet("scalar_add", vec![w[0], w[1]], Ty::word()));
+        let b = p.push(Op::Jet("scalar_add", vec![a, w[2]], Ty::word())); // read twice
+        let c = p.push(Op::Jet("scalar_add", vec![b, w[3]], Ty::word()));
+        let d = p.push(Op::Jet("scalar_add", vec![b, w[4]], Ty::word()));
+        let e = p.push(Op::Jet("scalar_add", vec![c, d], Ty::word()));
+        let wit: HashMap<&str, K> = (0..6).map(|i| (["w0", "w1", "w2", "w3", "w4", "w5"][i], K::from(i as u64 + 1))).collect();
+        let s = |i: usize| K::from(i as u64 + 1);
+        check(&mut p, e, (s(0) + s(1) + s(2)) * K::from(2u64) + s(3) + s(4));
+        check(&mut p, b, s(0) + s(1) + s(2));
+        assert!(eval(&optimize(&p), &wit).is_ok());
+    }
+
+    /// 20 000 terms: no stack overflow in the passes, depth 15.
+    #[test]
+    fn long_add_chain_is_flattened_iteratively() {
+        let mut p = Prog::new();
+        let w = p.push(Op::Witness("x".into(), Ty::word()));
+        let mut acc = w;
+        for _ in 1..20_000 {
+            acc = p.push(Op::Jet("scalar_add", vec![acc, w], Ty::word()));
+        }
+        check(&mut p, acc, K::from(20_000u64) * K::from(3u64));
+        let q = optimize(&p);
+        assert!(eval(&q, &HashMap::from([("x", K::from(3u64))])).is_ok());
+        assert_eq!(*add_depth(&q).iter().max().unwrap(), 15);
+    }
+
+    /// The same program optimizes to the same operations.
+    #[test]
+    fn optimize_is_deterministic() {
+        use crate::simplicity::ir::random_programs::build;
+        for seed in 1..10u64 {
+            let (p, _, _) = build(seed, 60, None);
+            assert_eq!(format!("{:?}", optimize(&p).ops()), format!("{:?}", optimize(&p).ops()));
         }
     }
 }

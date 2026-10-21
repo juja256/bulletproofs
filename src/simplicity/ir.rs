@@ -4,7 +4,7 @@
 //! A program is a list of operations; each defines a value from earlier ones. The lowering runs
 //! them as a chain of steps over an environment holding the values still needed (liveness):
 //! step `k` computes its value from the environment and rebuilds it as a right-nested list
-//! `(v_1, (v_2, ... (v_m, 1)))`, ordered by value number. Constants and witnesses used once are
+//! `(v_1, (v_2, ... (v_m, 1)))`, ordered by last use. Constants and witnesses used once are
 //! read where they are used, never stored (a witness node may be reached by one path only).
 
 use std::collections::{BTreeMap, HashMap};
@@ -25,6 +25,8 @@ pub(crate) enum Ty {
     /// A SHA-256 context of the `sha_256_ctx_8_*` jets (only ever produced by jets: its type is
     /// inferred, never written).
     Ctx,
+    /// The buffer of a SHA-256 context (inferred, never written).
+    CtxBuf,
 }
 
 impl Ty {
@@ -56,7 +58,7 @@ impl Ty {
             Ty::Word(n) => format!("2^{}", n),
             Ty::Prod(a, b) => format!("({} * {})", a.text()?, b.text()?),
             Ty::Opt(t) => format!("(1 + {})", t.text()?),
-            Ty::Ctx => return None,
+            Ty::Ctx | Ty::CtxBuf => return None,
         })
     }
 
@@ -66,7 +68,7 @@ impl Ty {
             Ty::Bit => 1,
             Ty::Word(n) => (*n as usize) / 8,
             Ty::Prod(a, b) => a.const_bytes() + b.const_bytes(),
-            Ty::Opt(_) | Ty::Ctx => panic!("no constants of this type"),
+            Ty::Opt(_) | Ty::Ctx | Ty::CtxBuf => panic!("no constants of this type"),
         }
     }
 }
@@ -299,16 +301,11 @@ impl<'a> Lowering<'a> {
         }
     }
 
-    /// `(e_1, (e_2, ... (e_m, unit)))` for the environment `next`, where `fresh` (if any) is
-    /// computed by `fresh_expr` and the others are read from `env`.
-    fn rebuild(&mut self, next: &[Val], env: &[Val], fresh: Option<(Val, String)>) -> String {
-        let mut s = String::from("unit");
-        for v in next.iter().rev() {
-            let e = match &fresh {
-                Some((f, e)) if f == v => e.clone(),
-                _ => self.read(*v, env),
-            };
-            s = format!("pair ({}) ({})", e, s);
+    /// `drop^k iden`: the environment from position `k` on (its unit terminator included).
+    fn suffix(k: usize) -> String {
+        let mut s = String::from("iden");
+        for _ in 0..k {
+            s = format!("drop ({})", s);
         }
         s
     }
@@ -317,6 +314,10 @@ impl<'a> Lowering<'a> {
         for (name, t) in self.p.witness_types() {
             let _ = writeln!(self.out, "{} := witness : _ -> {}", name, t.text().expect("witness types are written"));
         }
+        // The environment is ordered by last use (then value number): the values read for the
+        // last time at a step are a prefix of it, and a new value goes where its last use puts
+        // it, so a step rebuilds only the front and passes the rest on as one path.
+        let key = |l: &Lowering, v: Val| (l.last_use[v.0 as usize], v);
         let mut env: Vec<Val> = Vec::new();
         let mut steps = Vec::new();
         for i in 0..self.p.ops.len() {
@@ -324,27 +325,28 @@ impl<'a> Lowering<'a> {
                 continue;
             }
             let v = Val(i as u32);
-            // live after this step: stored values defined so far whose last use is later
-            let mut next: Vec<Val> = env.iter().copied().filter(|x| self.last_use[x.0 as usize] > i).collect();
-            let step = match &self.p.ops[i] {
+            let dead = env.iter().take_while(|x| self.last_use[x.0 as usize] <= i).count();
+            let rest: Vec<Val> = env[dead..].to_vec();
+            let (step, next) = match &self.p.ops[i] {
                 Op::Assert(b) => {
                     let bit = self.read(*b, &env);
-                    let rest = self.rebuild(&next, &env, None);
-                    format!("comp (pair (comp ({}) jet_verify) ({})) (drop iden)", bit, rest)
+                    (format!("comp (pair (comp ({}) jet_verify) ({})) (drop iden)", bit, Self::suffix(dead)), rest)
                 }
                 _ => {
                     let e = self.expr(i, &env);
                     if self.last_use[i] > i {
+                        let pos = rest.iter().take_while(|x| key(&self, **x) < key(&self, v)).count();
+                        let mut s = format!("pair ({}) ({})", e, Self::suffix(dead + pos));
+                        for x in rest[..pos].iter().rev() {
+                            s = format!("pair ({}) ({})", self.read(*x, &env), s);
+                        }
+                        let mut next = rest[..pos].to_vec();
                         next.push(v);
-                        next.sort();
-                    }
-                    let fresh = Some((v, e.clone()));
-                    if next.contains(&v) {
-                        self.rebuild(&next, &env, fresh)
+                        next.extend_from_slice(&rest[pos..]);
+                        (s, next)
                     } else {
-                        // a value nobody reads (e.g. a final check written as a jet): computed
-                        // and discarded
-                        format!("comp (pair ({}) ({})) (drop iden)", e, self.rebuild(&next, &env, None))
+                        // a value nobody reads: computed and discarded
+                        (format!("comp (pair ({}) ({})) (drop iden)", e, Self::suffix(dead)), rest)
                     }
                 }
             };
@@ -376,7 +378,7 @@ fn const_expr(t: &Ty, bytes: &[u8]) -> String {
             let n = a.const_bytes();
             format!("pair ({}) ({})", const_expr(a, &bytes[..n]), const_expr(b, &bytes[n..]))
         }
-        Ty::Opt(_) | Ty::Ctx => unreachable!(),
+        Ty::Opt(_) | Ty::Ctx | Ty::CtxBuf => unreachable!(),
     }
 }
 

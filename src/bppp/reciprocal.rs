@@ -160,6 +160,46 @@ enum Col {
 }
 
 impl<F: Field> ReciprocalCircuit<F> {
+    /// The same circuit over another field, every scalar mapped by `f` (the Simplicity
+    /// compiler traces the verifier over constants of the circuit).
+    #[cfg(feature = "simplicity")]
+    pub(crate) fn map_scalars<G: Field>(&self, f: impl Fn(F) -> G + Copy) -> ReciprocalCircuit<G> {
+        let pole = |p: &Option<Pole<F>>| p.as_ref().map(|p| Pole(p.0.iter().map(|x| f(*x)).collect()));
+        ReciprocalCircuit {
+            n_p: self.n_p,
+            n_m: self.n_m,
+            n_o: self.n_o,
+            n_v: self.n_v,
+            n_lin: self.n_lin,
+            k: self.k,
+            w_n: self.w_n.map(f),
+            a_n: self.a_n.iter().map(|x| f(*x)).collect(),
+            w_m: self.w_m.map(f),
+            a_m: self.a_m.iter().map(|x| f(*x)).collect(),
+            w_l: self.w_l.map(f),
+            a_l: self.a_l.iter().map(|x| f(*x)).collect(),
+            recip: self
+                .recip
+                .iter()
+                .map(|r| ReciprocalRow {
+                    terms: r.terms.iter().map(|(c, v, p)| (*c, f(*v), pole(p))).collect(),
+                    consts: r.consts.iter().map(|(v, p)| (f(*v), pole(p))).collect(),
+                })
+                .collect(),
+            tuples: self
+                .tuples
+                .iter()
+                .map(|t| TuplePole {
+                    pole: t.pole,
+                    components: t.components.iter().map(|c| Component { terms: c.terms.iter().map(|(i, v)| (*i, f(*v))).collect(), constant: f(c.constant) }).collect(),
+                })
+                .collect(),
+            f_l: self.f_l,
+            f_m: self.f_m,
+            partition: self.partition.clone(),
+        }
+    }
+
     fn n_mm(&self) -> usize {
         self.n_p + self.n_m
     }

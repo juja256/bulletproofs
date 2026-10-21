@@ -434,4 +434,33 @@ mod tests {
         bad.0.insert(Arc::from("s0"), word_value(&n));
         assert!(sv.execute(&bad, &env).is_err());
     }
+
+    /// Diagnostic (`-- --ignored --nocapture`): what a small program is made of (reads of
+    /// stored values and their depth, constant bytes).
+    #[test]
+    #[ignore]
+    fn program_composition() {
+        let env = dummy_env();
+        let (pc, bp) = gens();
+        let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(3);
+        let mut t = Sha256Transcript::new(b"test");
+        t.append_message(SIGHASH_LABEL, &sighash_of(&env));
+        let mut p = Prover::new(&pc, &mut t);
+        p.set_backend(Backend::Bppp);
+        let (cx, x) = p.commit(K::from(3u64), K::random(&mut rng));
+        let (cy, y) = p.commit(K::from(5u64), K::random(&mut rng));
+        product(&mut p, x, y);
+        let proof = p.prove_with_rng(&bp, &mut rng).unwrap();
+        let V = [cx, cy];
+        let (c, ct) = lowered(&V);
+        crate::simplicity::ir::PATH_STATS.with(|c| *c.borrow_mut() = (0, 0));
+        let sv = compile(&c, &V, &ct, &pc, &bp).unwrap();
+        let (reads, depth) = crate::simplicity::ir::PATH_STATS.with(|c| *c.borrow());
+        let r = sv.execute(&sv.witness(&proof).unwrap(), &env).unwrap();
+        let text = sv.to_text();
+        let consts: usize = text.lines().filter(|l| l.contains("const 0x")).map(|l| l.split("const 0x").skip(1).map(|h| h.split(|c: char| !c.is_ascii_hexdigit()).next().unwrap().len() / 2).sum::<usize>()).sum();
+        let witness_cmrs = text.matches("witness").count();
+        println!("program {} B, steps {}, reads {} (mean depth {:.1}), constant bytes {}, text lines {}, witness nodes {}", r.program_bytes, sv.stats().steps, reads, depth as f64 / reads as f64, consts, text.lines().count(), witness_cmrs);
+    }
+
 }

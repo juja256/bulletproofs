@@ -326,6 +326,12 @@ impl<'a> Lowering<'a> {
                 // paths are written out per use: a shared path would have one type for every
                 // environment it is used in
                 let pos = env.iter().position(|x| *x == v).expect("a value read after it was dropped");
+                #[cfg(test)]
+                PATH_STATS.with(|c| {
+                    let mut c = c.borrow_mut();
+                    c.0 += 1;
+                    c.1 += pos;
+                });
                 let mut path = Term::take(&Term::iden());
                 for _ in 0..pos {
                     path = Term::drop_(&path);
@@ -434,6 +440,12 @@ impl<'a> Lowering<'a> {
         steps.push(Term::unit());
         balanced(&steps)
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// (reads of stored values, Σ of their depths): how much of the program is paths.
+    pub(crate) static PATH_STATS: std::cell::RefCell<(usize, usize)> = std::cell::RefCell::new((0, 0));
 }
 
 /// The bits a value of type `t` takes in the environment.

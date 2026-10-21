@@ -258,11 +258,6 @@ impl Prog {
         m
     }
 
-    /// The scheduler's measure: Σ over steps of the bits live after the step.
-    #[cfg(test)]
-    pub(crate) fn live_bits(&self) -> u64 {
-        Lowering::new(self, &Options::default()).live_bits
-    }
 
     /// The program in the human-readable encoding (an artifact of [`Prog::to_term`]).
     #[cfg(test)]
@@ -349,19 +344,16 @@ impl<'a> Lowering<'a> {
                 in_branch[y.0 as usize] = true;
             }
         }
-        // Roles are decided, the roots scheduled, and then (`role_passes` > 1) decided again with
-        // what the previous pass found: the arguments actually inlined and the steps that
-        // actually run each value.
-        let mut prev: Option<(Vec<Role>, Vec<usize>, Vec<usize>)> = None;
+        // Roles are decided, the roots scheduled, and then (`role_passes` > 1) decided again
+        // with the arguments the previous pass inlined counted in the cost of recomputing.
+        let mut prev: Option<Vec<Role>> = None;
         let mut out = None;
         let passes = opts.role_passes.max(1);
         for pass in 0..passes {
-            let (role, exec) = Self::decide(p, &readers, &in_branch, prev.as_ref().map(|(r, lo, hi)| (r.as_slice(), lo.as_slice(), hi.as_slice())));
+            let (role, exec) = Self::decide(p, &readers, &in_branch, prev.as_deref());
             let sched = Self::schedule_roots(p, &role);
             if pass + 1 < passes {
-                // the first and last step (position) running each value
-                let (lo, hi) = Self::owner_span(p, &readers, &role, &sched.3);
-                prev = Some((role.clone(), lo, hi));
+                prev = Some(role.clone());
             }
             out = Some((role, exec, sched));
         }
@@ -445,9 +437,8 @@ impl<'a> Lowering<'a> {
     }
 
     /// Roles from the last operation back: a value's readers are decided before it, so the
-    /// times it runs are known. `prev`: the roles and the first and last step running each
-    /// value, from a previous pass.
-    fn decide(p: &Prog, readers: &[Vec<usize>], in_branch: &[bool], prev: Option<(&[Role], &[usize], &[usize])>) -> (Vec<Role>, Vec<u64>) {
+    /// times it runs are known. `prev`: the roles of a previous pass.
+    fn decide(p: &Prog, readers: &[Vec<usize>], in_branch: &[bool], prev: Option<&[Role]>) -> (Vec<Role>, Vec<u64>) {
         let n = p.ops.len();
         // what recomputing a value costs: itself and the arguments that run wherever it runs
         // (read only by it; or, after a pass, inlined)
@@ -459,7 +450,7 @@ impl<'a> Lowering<'a> {
                 .map(|a| a.0 as usize)
                 .filter(|&a| !matches!(p.ops[a], Op::Const(..) | Op::Witness(..)))
                 .filter(|&a| match prev {
-                    Some((r, _, _)) => r[a] == Role::Inline,
+                    Some(r) => r[a] == Role::Inline,
                     None => readers[a].len() == 1,
                 })
                 .map(|a| tree_cost[a])
@@ -560,30 +551,6 @@ impl<'a> Lowering<'a> {
             pos[*r] = k;
         }
         (roots, reads, live_bits, pos, order, steps_of)
-    }
-
-    /// The first and last step (position in the order) that runs each value: a root runs in
-    /// its own step and is read in its readers'; an inlined value runs where its readers run.
-    fn owner_span(p: &Prog, readers: &[Vec<usize>], role: &[Role], pos: &[usize]) -> (Vec<usize>, Vec<usize>) {
-        let n = p.ops.len();
-        let (mut lo, mut hi) = (vec![usize::MAX; n], vec![0usize; n]);
-        for i in (0..n).rev() {
-            if role[i] == Role::Root {
-                lo[i] = pos[i];
-                hi[i] = pos[i];
-            }
-            for &r in &readers[i] {
-                let (rl, rh) = if role[r] == Role::Root { (pos[r], pos[r]) } else { (lo[r], hi[r]) };
-                if rl != usize::MAX {
-                    lo[i] = lo[i].min(rl);
-                    hi[i] = hi[i].max(rh);
-                }
-            }
-            if lo[i] == usize::MAX {
-                lo[i] = 0;
-            }
-        }
-        (lo, hi)
     }
 
     /// The selectors from the environment's root to stored value `i`'s slot.
@@ -1558,5 +1525,225 @@ pub(crate) mod random_programs {
         assert!(run(gx, 1).is_ok());
         assert!(run(vec![0u8; 32], 1).is_err());
         assert!(run(vec![0u8; 32], 0).is_err(), "the unwrap in the untaken arm must still run");
+    }
+}
+
+#[cfg(test)]
+mod lowering_differential {
+    use super::*;
+    use crate::simplicity::opt::{eval, optimize, V};
+    use crate::simplicity::run::{dummy_env, execute_term, word_value};
+    use k256::elliptic_curve::ff::PrimeField as _;
+    use k256::Scalar as K;
+
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+    }
+
+    fn val_of(p: &Prog, wit: &HashMap<&str, K>, v: Val) -> K {
+        match &eval(p, wit).unwrap_or_else(|_| panic!("honest eval failed"))[v.index()] {
+            Some(V::S(k)) => *k,
+            o => panic!("{:?}", o),
+        }
+    }
+
+    /// A random scalar program over `nw` witnesses with long products (past MAX_ATOMS), squares,
+    /// selections, pairs and checks against honest values.
+    fn build(seed: u64, n: usize, nw: usize) -> (Prog, Vec<(String, K)>) {
+        let mut r = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
+        let mut p = Prog::new();
+        let names: Vec<String> = (0..nw).map(|i| format!("w{}", i)).collect();
+        let ws: Vec<(String, K)> = names.iter().map(|n| (n.clone(), K::from(r.next() % 100_000 + 2))).collect();
+        let wit: HashMap<&str, K> = ws.iter().map(|(n, k)| (n.as_str(), *k)).collect();
+        let mut vals: Vec<Val> = names.iter().map(|nm| p.push(Op::Witness(nm.as_str().into(), Ty::word()))).collect();
+        let w = Ty::word();
+        let k = |p: &mut Prog, c: K| p.push(Op::Const(Ty::word(), c.to_repr().to_vec()));
+        for _ in 0..n {
+            let pick = |r: &mut Rng, len: usize| if r.next() % 3 == 0 { r.below(len) } else { len - 1 - r.below(len.min(4)) };
+            let a = vals[pick(&mut r, vals.len())];
+            let b = vals[pick(&mut r, vals.len())];
+            match r.below(14) {
+                0..=1 => vals.push(p.push(Op::Jet("scalar_add", vec![a, b], w.clone()))),
+                2..=3 => vals.push(p.push(Op::Jet("scalar_multiply", vec![a, b], w.clone()))),
+                4 => vals.push(p.push(Op::Jet("scalar_multiply", vec![a, a], w.clone()))),
+                5 => { let c = k(&mut p, K::from(r.next() % 7 + 1)); vals.push(p.push(Op::Jet("scalar_multiply", vec![a, c], w.clone()))) }
+                6 => vals.push(p.push(Op::Jet("scalar_negate", vec![a], w.clone()))),
+                7 => vals.push(p.push(Op::Jet("scalar_invert", vec![a], w.clone()))),
+                8 => {
+                    // a prefix product over many distinct values (a batch inversion)
+                    let len = 6 + r.below(12);
+                    let mut acc = vals[r.below(vals.len())];
+                    let mut prefixes = vec![];
+                    for _ in 0..len {
+                        let x = vals[r.below(vals.len())];
+                        acc = p.push(Op::Jet("scalar_multiply", vec![acc, x], w.clone()));
+                        prefixes.push(acc);
+                    }
+                    let inv = p.push(Op::Jet("scalar_invert", vec![acc], w.clone()));
+                    let back = p.push(Op::Jet("scalar_multiply", vec![inv, prefixes[prefixes.len() / 2]], w.clone()));
+                    vals.push(back);
+                    vals.push(prefixes[r.below(prefixes.len())]);
+                }
+                9 => {
+                    let z = p.push(Op::Jet("scalar_is_zero", vec![a], Ty::Bit));
+                    vals.push(p.push(Op::Select(z, a, b, w.clone())));
+                }
+                10 => {
+                    let pr = p.push(Op::Pair(a, b, Ty::prod(Ty::word(), Ty::word())));
+                    let f = p.push(Op::Fst(pr, w.clone()));
+                    let s = p.push(Op::Snd(pr, w.clone()));
+                    vals.push(p.push(Op::Jet("scalar_add", vec![f, s], w.clone())));
+                }
+                11 if !bool::from(val_of(&p, &wit, a).is_zero()) => {
+                    let z = p.push(Op::Jet("scalar_is_zero", vec![a], Ty::Bit));
+                    let nz = p.push(Op::Jet("complement_1", vec![z], Ty::Bit));
+                    p.push(Op::Assert(nz));
+                }
+                _ => {
+                    let e = val_of(&p, &wit, a);
+                    let c = k(&mut p, e);
+                    let q = p.push(Op::Jet("eq_256", vec![a, c], Ty::Bit));
+                    p.push(Op::Assert(q));
+                }
+            }
+        }
+        // every witness and the last value read by a final check
+        let mut acc = vals[vals.len() - 1];
+        for i in 0..nw {
+            acc = p.push(Op::Jet("scalar_add", vec![acc, vals[i]], w.clone()));
+        }
+        let e = val_of(&p, &wit, acc);
+        let c = k(&mut p, e);
+        let q = p.push(Op::Jet("eq_256", vec![acc, c], Ty::Bit));
+        p.push(Op::Assert(q));
+        (p, ws)
+    }
+
+    fn opts_all() -> Vec<Options> {
+        let mut v = vec![];
+        for role_passes in 1..=3 {
+            for hot_cold in [false, true] {
+                for small_words in [false, true] {
+                    for shared_funcs in [false, true] {
+                        v.push(Options { role_passes, hot_cold, small_words, shared_funcs });
+                    }
+                }
+            }
+        }
+        v
+    }
+
+    fn be_u256(x: &k256::U256) -> Vec<u8> {
+        k256::elliptic_curve::bigint::Encoding::to_be_bytes(x).to_vec()
+    }
+
+    /// Differential (from the stage 4 review; one seed by default, `RV_SEEDS=40` for a long run):
+    /// the unoptimized program under the default lowering decides; the optimized
+    /// program under every lowering must agree on honest, perturbed and non-canonical witnesses.
+    #[test]
+    fn every_lowering_agrees_with_the_reference() {
+        // `RV_SEEDS` set: that many seeds and the largest programs too (long: run in release)
+        let long: Option<u64> = std::env::var("RV_SEEDS").ok().and_then(|s| s.parse().ok());
+        let seeds = long.unwrap_or(1);
+        let sizes: &[(usize, usize)] = if long.is_some() { &[(12, 4), (40, 10), (90, 14)] } else { &[(12, 4), (40, 10)] };
+        let order = k256::U256::from_be_hex("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141");
+        let (mut runs, mut funcs, mut accepted_bad) = (0usize, 0usize, 0usize);
+        for seed in 1..=seeds {
+            for &(n, nw) in sizes {
+                let (p, ws) = build(seed, n, nw);
+                let q = optimize(&p);
+                let honest: HashMap<Arc<str>, ::simplicity::Value> = ws.iter().map(|(n, k)| (Arc::<str>::from(n.as_str()), word_value(&k.to_repr()))).collect();
+                let mut variants = vec![("honest".to_string(), honest.clone())];
+                for (i, (name, k)) in ws.iter().enumerate() {
+                    if i > 3 && seed % 2 == 0 { break; }
+                    let u = k256::U256::from_be_slice(&k.to_repr());
+                    let mut a = honest.clone();
+                    a.insert(Arc::from(name.as_str()), word_value(&be_u256(&u.wrapping_add(&k256::U256::ONE))));
+                    variants.push((format!("{}+1", name), a));
+                    let mut b = honest.clone();
+                    b.insert(Arc::from(name.as_str()), word_value(&be_u256(&u.wrapping_add(&order))));
+                    variants.push((format!("{}+n", name), b));
+                }
+                let reference: Vec<bool> = variants.iter().map(|(_, w)| execute_term(&p.to_term(), w, &dummy_env(), false).is_ok()).collect();
+                assert!(reference[0], "seed {} n {}: the reference rejects the honest witness", seed, n);
+                for o in opts_all() {
+                    let low = q.lower(&o);
+                    funcs += low.funcs;
+                    // the unoptimized program under this lowering too
+                    let low_u = p.lower(&o);
+                    for (j, (what, w)) in variants.iter().enumerate() {
+                        let got = execute_term(&low.term, w, &dummy_env(), false).is_ok();
+                        let got_u = execute_term(&low_u.term, w, &dummy_env(), false).is_ok();
+                        runs += 2;
+                        if got && !reference[j] { accepted_bad += 1; }
+                        assert_eq!(got, reference[j], "seed {} n {} {:?} witness {}: optimized verdict {} vs reference {}", seed, n, o, what, got, reference[j]);
+                        assert_eq!(got_u, reference[j], "seed {} n {} {:?} witness {}: unoptimized verdict {} vs reference {}", seed, n, o, what, got_u, reference[j]);
+                    }
+                }
+            }
+        }
+        println!("{} runs, {} shared functions, {} accepted bad", runs, funcs, accepted_bad);
+        // the small programs of the default run build none (random_programs covers them)
+        assert!(long.is_none() || funcs > 0);
+    }
+}
+
+#[cfg(test)]
+mod unwrap_in_shared_function {
+    use super::*;
+    use crate::simplicity::run::{dummy_env, execute_term, word_value};
+    use k256::elliptic_curve::ff::PrimeField as _;
+
+    fn prog(gap: usize) -> (Prog, Val) {
+        let mut p = Prog::new();
+        let wx = p.push(Op::Witness("x".into(), Ty::word()));
+        let wy = p.push(Op::Witness("y".into(), Ty::word()));
+        let bit = p.push(Op::Const(Ty::Bit, vec![0]));
+        let opt = p.push(Op::Jet("decompress", vec![bit, wx], Ty::opt(Ty::ge())));
+        let ge = p.push(Op::Unwrap(opt, Ty::ge()));
+        let gy = p.push(Op::Snd(ge, Ty::word()));
+        let one = p.push(Op::Const(Ty::word(), k256::Scalar::ONE.to_repr().to_vec()));
+        let u = p.push(Op::Jet("scalar_add", vec![gy, one], Ty::word()));
+        let u2 = p.push(Op::Jet("scalar_multiply", vec![u, u], Ty::word()));
+        let z = p.push(Op::Jet("scalar_is_zero", vec![u2], Ty::Bit));
+        let nz = p.push(Op::Jet("complement_1", vec![z], Ty::Bit));
+        p.push(Op::Assert(nz));
+        let ky = p.push(Op::Const(Ty::word(), k256::Scalar::from(2u64).to_repr().to_vec()));
+        for _ in 0..gap {
+            let q = p.push(Op::Jet("eq_256", vec![wy, ky], Ty::Bit));
+            p.push(Op::Assert(q));
+        }
+        let z2 = p.push(Op::Jet("scalar_is_zero", vec![u2], Ty::Bit));
+        let nz2 = p.push(Op::Jet("complement_1", vec![z2], Ty::Bit));
+        p.push(Op::Assert(nz2));
+        (p, u2)
+    }
+
+    #[test]
+    fn unwrap_inside_a_shared_function_runs_at_every_use() {
+        let gx: Vec<u8> = (0..64).step_by(2).map(|i| u8::from_str_radix(&"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"[i..i + 2], 16).unwrap()).collect();
+        for gap in [10usize, 40, 120] {
+            let (p, u2) = prog(gap);
+            for o in [Options { role_passes: 1, hot_cold: false, small_words: false, shared_funcs: true }, Options { role_passes: 3, hot_cold: true, small_words: true, shared_funcs: true }] {
+                let l = Lowering::new(&p, &o);
+                let low = p.lower(&o);
+                println!("gap {} {:?}: role(u2) {:?} steps_of {} funcs {}", gap, o, l.role[u2.index()], l.steps_of[u2.index()], low.funcs);
+                let mut w = HashMap::new();
+                w.insert(Arc::<str>::from("x"), word_value(&gx));
+                w.insert(Arc::<str>::from("y"), word_value(&k256::Scalar::from(2u64).to_repr()));
+                assert!(execute_term(&low.term, &w, &dummy_env(), false).is_ok());
+                w.insert(Arc::<str>::from("x"), word_value(&[0u8; 32]));
+                assert!(execute_term(&low.term, &w, &dummy_env(), false).is_err());
+            }
+        }
     }
 }

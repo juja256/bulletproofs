@@ -55,10 +55,11 @@ pub(crate) fn const_gej(p: &mut Prog, pt: &k256::AffinePoint) -> Val {
 }
 
 /// A constant point as its x and the parity of its y, decompressed by the program (32 bytes
-/// fewer than [`const_gej`], one `decompress` more).
+/// fewer than [`const_gej`], one `decompress` more); not the identity.
 pub(crate) fn const_gej_compressed(p: &mut Prog, pt: &k256::AffinePoint) -> Val {
     let e = pt.to_encoded_point(true);
     let b = e.as_bytes();
+    assert_eq!(b.len(), 33, "not the identity");
     let parity = p.push(Op::Const(Ty::Bit, vec![b[0] & 1]));
     let x = p.push(Op::Const(Ty::word(), b[1..33].to_vec()));
     let opt = p.push(Op::Jet("decompress", vec![parity, x], Ty::opt(Ty::ge())));

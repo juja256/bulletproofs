@@ -17,7 +17,7 @@ use crate::generators::{BulletproofGens, PedersenGens};
 use crate::r1cs::R1CSProof;
 use crate::simplicity::ir::{Lowered, Op, Options, Prog, Ty, Val};
 use crate::simplicity::point::{assert_infinity, const_gej, const_gej_compressed, ge_to_gej, msm, witness_point, witness_scalar, WitPoint};
-use crate::simplicity::run::{bit_value, execute_term, weight_of, word_value, Env, ExecError, Report};
+use crate::simplicity::run::{bit_value, execute_term, weight_of, word_value, Env, ExecError, Report, MAX_CELLS};
 use crate::simplicity::term::Term;
 use crate::simplicity::sha::{lower_log, ChallengeVals, Part, Rec};
 use crate::simplicity::trace::{register_witness_point, register_witness_scalar, with_tape, NodeId, PointSrc, TOp, Tape, Traced, TracedCurve, TracedPoint};
@@ -67,6 +67,8 @@ pub struct Stats {
     pub stored: usize,
     /// Σ over steps of the bits kept for later steps (the scheduler's measure of copying).
     pub live_bits: u64,
+    /// The lowering the compiler chose (the lightest; the CMR depends on it).
+    pub lowering: String,
 }
 
 fn gadget_err(s: &str) -> R1CSError {
@@ -143,6 +145,12 @@ pub(crate) fn dummy_proof<R: rand_core::RngCore + rand_core::CryptoRng>(c: &Reci
     let points = (0..4 + 2 * k).map(|_| Secp256k1::compress(&(k256::ProjectivePoint::GENERATOR * K::random(&mut *rng)))).collect();
     let scalars = (0..af + bf).map(|_| K::random(&mut *rng)).collect();
     (points, scalars)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: compile with these generators (compressed or not) and options only.
+    pub(crate) static FORCE: std::cell::RefCell<Option<(bool, Options)>> = const { std::cell::RefCell::new(None) };
 }
 
 /// The lowerings the compiler tries; it keeps the lightest program (ties to the first).
@@ -310,7 +318,9 @@ pub(crate) fn compile_with<R: rand_core::RngCore + rand_core::CryptoRng>(
     // the lightest program: generators as constants or compressed, times the lowerings (their
     // weights from the dummy proof's witness: the same types, so the same bytes and cost)
     let dummy = witness_map(&points, &scalars)?;
-    let mut best: Option<(u64, Lowered)> = None;
+    // (weight, program, generators compressed, options); a candidate that needs more cells than
+    // consensus allows is never kept (an honest proof could not run it)
+    let mut best: Option<(u64, Lowered, bool, Options)> = None;
     let mut msm_count = 0;
     for compressed in [false, true] {
         let (p, terms_count) = build(compressed);
@@ -319,38 +329,57 @@ pub(crate) fn compile_with<R: rand_core::RngCore + rand_core::CryptoRng>(
         if !compressed {
             LAST_STORED.with(|k| *k.borrow_mut() = Some(p.stored_report()));
         }
-        let weigh = |opts: &Options| -> Result<(u64, Lowered), R1CSError> {
+        let weigh = |opts: &Options| -> Result<Option<(u64, Lowered)>, R1CSError> {
             let l = p.lower(opts);
-            let w = weight_of(&l.term, &dummy).map_err(|e| gadget_err(&format!("the generated program does not type: {:?}", e)))?;
-            Ok((w, l))
+            let (w, cells) = weight_of(&l.term, &dummy).map_err(|e| gadget_err(&format!("the generated program does not type: {:?}", e)))?;
+            Ok((cells <= MAX_CELLS).then_some((w, l)))
+        };
+        #[cfg(test)]
+        let forced = FORCE.with(|f| *f.borrow());
+        #[cfg(not(test))]
+        let forced: Option<(bool, Options)> = None;
+        let candidates: Vec<Options> = match forced {
+            Some((c, o)) if c == compressed => vec![o],
+            Some(_) => vec![],
+            None => LOWERINGS.to_vec(),
         };
         let mut here: Option<(u64, Lowered, Options)> = None;
-        for opts in LOWERINGS {
-            let (w, l) = weigh(&opts)?;
-            if here.as_ref().map_or(true, |(b, ..)| w < *b) {
-                here = Some((w, l, opts));
+        for opts in candidates {
+            if let Some((w, l)) = weigh(&opts)? {
+                if here.as_ref().map_or(true, |(b, ..)| w < *b) {
+                    here = Some((w, l, opts));
+                }
             }
         }
+        let Some((mut w0, mut l0, mut opts)) = here else { continue };
         // small constant words and shared functions on this generator mode's best lowering only
         // (they trade a little cost for bytes)
-        let (mut w0, mut l0, opts) = here.expect("a lowering");
-        let mut opts = opts;
-        for alt in [Options { small_words: true, ..opts }, Options { shared_funcs: true, ..opts }, Options { small_words: true, shared_funcs: true, ..opts }] {
-            let (w, l) = weigh(&alt)?;
-            if w < w0 {
-                (w0, l0, opts) = (w, l, alt);
+        if forced.is_none() {
+            for alt in [Options { small_words: true, ..opts }, Options { shared_funcs: true, ..opts }, Options { small_words: true, shared_funcs: true, ..opts }] {
+                if let Some((w, l)) = weigh(&alt)? {
+                    if w < w0 {
+                        (w0, l0, opts) = (w, l, alt);
+                    }
+                }
             }
         }
-        let _ = opts;
-        if best.as_ref().map_or(true, |(b, _)| w0 < *b) {
-            best = Some((w0, l0));
+        if best.as_ref().map_or(true, |(b, ..)| w0 < *b) {
+            best = Some((w0, l0, compressed, opts));
         }
     }
-    let (_, low) = best.expect("a lowering");
+    let (_, low, compressed, opts) = best.ok_or_else(|| gadget_err("no program within the cell limit"))?;
     let term = low.term;
     let commit = term.commit().map_err(|e| gadget_err(&format!("the generated program does not type: {}", e)))?;
     let cmr = commit.cmr();
-    let stats = Stats { jets: low.jets, tape_ops: live.iter().filter(|x| **x).count(), msm_terms: msm_count, witness_points: n_points, witness_scalars: n_scalars, steps: low.steps, stored: low.stored, live_bits: low.live_bits };
+    let lowering = format!(
+        "generators {}, role passes {}, hot/cold {}, small words {}, shared functions {}",
+        if compressed { "x and parity" } else { "points" },
+        opts.role_passes,
+        opts.hot_cold,
+        opts.small_words,
+        opts.shared_funcs
+    );
+    let stats = Stats { jets: low.jets, tape_ops: live.iter().filter(|x| **x).count(), msm_terms: msm_count, witness_points: n_points, witness_scalars: n_scalars, steps: low.steps, stored: low.stored, live_bits: low.live_bits, lowering };
     Ok(SimplicityVerifier { term, text: std::sync::OnceLock::new(), cmr, n_lin, n_mm, stats })
 }
 
@@ -611,6 +640,174 @@ mod tests {
             }
             println!("n {}: steps {}, live bits {} ({:.0} per step), reads {} depth sum {} (~{} mWU of path overhead), cost {:?}", n, st.steps, st.live_bits, st.live_bits as f64 / st.steps as f64, reads, depth, 100 * (depth + reads), r.map(|r| (r.cost_mwu, r.program_bytes, r.witness_bytes, r.cells)));
         }
+    }
+
+
+    // ---- every lowering the compiler may pick, on real verifiers (from the stage 4 review) ----
+    fn all_opts() -> Vec<(bool, Options)> {
+        let mut v = Vec::new();
+        for compressed in [false, true] {
+            for role_passes in 1..=3 {
+                for hot_cold in [false, true] {
+                    for small_words in [false, true] {
+                        for shared_funcs in [false, true] {
+                            v.push((compressed, Options { role_passes, hot_cold, small_words, shared_funcs }));
+                        }
+                    }
+                }
+            }
+        }
+        v
+    }
+
+    enum Circ { Product, Chain(usize), Table(u64, u64) }
+
+    fn circuit<CS: crate::r1cs::CircuitBuilder<K>>(cs: &mut CS, c: &Circ, xs: &[Variable], prover: bool) {
+        match c {
+            Circ::Product => product(cs, xs[0], xs[1]),
+            Circ::Chain(n) => {
+                let mut last = K::from(3u64);
+                let mut v = lc(xs[0]);
+                for _ in 0..*n {
+                    let (_, _, o) = cs.multiply(v, lc(xs[0]));
+                    v = lc(o);
+                    last *= K::from(3u64);
+                }
+                cs.constrain(v - last);
+            }
+            Circ::Table(rows, lookups) => {
+                let t = cs.table((0..*rows).map(|v| vec![v]).collect()).unwrap();
+                for i in 0..*lookups {
+                    cs.lookup_value(t, if prover { Some((i * 7) % rows) } else { None }).unwrap();
+                }
+                product(cs, xs[0], xs[1]);
+            }
+        }
+    }
+
+    fn compile_circ(c: &Circ, env: &crate::simplicity::run::Env) -> (R1CSProof<Secp256k1>, Box<dyn Fn() -> SimplicityVerifier>) {
+        let n = match c { Circ::Chain(n) => *n, Circ::Table(r, _) => 4 * *r as usize, _ => 0 };
+        let pc = PedersenGens::<Secp256k1>::for_curve();
+        let bp = BulletproofGens::<Secp256k1>::for_curve(2 * n + 256, 1);
+        let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(77);
+        let mut t = Sha256Transcript::new(b"rv");
+        t.append_message(SIGHASH_LABEL, &sighash_of(env));
+        let mut p = Prover::new(&pc, &mut t);
+        p.set_backend(Backend::Bppp);
+        let (cx, x) = p.commit(K::from(3u64), K::random(&mut rng));
+        let (cy, y) = p.commit(K::from(5u64), K::random(&mut rng));
+        circuit(&mut p, c, &[x, y], true);
+        let proof = p.prove_with_rng(&bp, &mut rng).unwrap();
+        let V = vec![cx, cy];
+        let cc = match c { Circ::Product => Circ::Product, Circ::Chain(n) => Circ::Chain(*n), Circ::Table(a, b) => Circ::Table(*a, *b) };
+        let mk = move || {
+            let mut ct = CompileTranscript::new(b"rv");
+            TranscriptBackend::append_message(&mut ct, SIGHASH_LABEL, &[0u8; 32]);
+            let mut v = Verifier::<_, Secp256k1>::for_curve(&mut ct);
+            v.set_backend(Backend::Bppp);
+            let (x, y) = (v.commit(V[0]), v.commit(V[1]));
+            circuit(&mut v, &cc, &[x, y], false);
+            v.compile_to_simplicity(&pc, &bp).unwrap()
+        };
+        (proof, Box::new(mk))
+    }
+
+    fn to_bytes(bits: &[bool]) -> Vec<u8> {
+        bits.chunks(8).map(|c| c.iter().fold(0u8, |a, b| (a << 1) | *b as u8)).collect()
+    }
+
+    /// Bad witnesses: every point's parity flipped, every point's x + 1, every scalar + 1 and + n.
+    fn bad_witnesses(w: &SimplicityWitness, sv: &SimplicityVerifier) -> Vec<(String, SimplicityWitness)> {
+        let mut out = Vec::new();
+        let st = sv.stats();
+        let n_order = k256::U256::from_be_hex("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141");
+        for i in 0..st.witness_points {
+            let name: Arc<str> = Arc::from(format!("p{}", i));
+            let bits: Vec<bool> = w.0[&name].iter_padded().collect();
+            assert_eq!(bits.len(), 257);
+            let parity = bits[0];
+            let xb = to_bytes(&bits[1..]);
+            let mut b = w.clone();
+            b.0.insert(name.clone(), ::simplicity::Value::product(bit_value(!parity), word_value(&xb)));
+            out.push((format!("{} parity", name), b));
+            let mut xb2 = xb.clone();
+            xb2[31] ^= 1;
+            let mut b = w.clone();
+            b.0.insert(name.clone(), ::simplicity::Value::product(bit_value(parity), word_value(&xb2)));
+            out.push((format!("{} x^1", name), b));
+        }
+        for i in 0..st.witness_scalars {
+            let name: Arc<str> = Arc::from(format!("s{}", i));
+            let sb = to_bytes(&w.0[&name].iter_padded().collect::<Vec<bool>>());
+            let s = k256::U256::from_be_slice(&sb);
+            let plus1 = s.wrapping_add(&k256::U256::ONE);
+            let mut b = w.clone();
+            b.0.insert(name.clone(), word_value(&k256::elliptic_curve::bigint::Encoding::to_be_bytes(&plus1)));
+            out.push((format!("{} +1", name), b));
+            let (plusn, carry) = s.adc(&n_order, k256::elliptic_curve::bigint::Limb::ZERO);
+            if carry == k256::elliptic_curve::bigint::Limb::ZERO {
+                let mut b = w.clone();
+                b.0.insert(name.clone(), word_value(&k256::elliptic_curve::bigint::Encoding::to_be_bytes(&plusn)));
+                out.push((format!("{} +n", name), b));
+            }
+        }
+        out
+    }
+
+    /// A sample of 8 lowerings in which every option takes every value (both generator modes,
+    /// 1 to 3 role passes, each switch on and off).
+    fn sample_opts() -> Vec<(bool, Options)> {
+        [(false, 1, false, false, false), (true, 1, false, true, false), (false, 2, true, false, true), (true, 2, true, true, true), (false, 3, false, true, true), (true, 3, true, false, false), (false, 1, true, true, true), (true, 2, false, false, true)]
+            .iter()
+            .map(|&(c, role_passes, hot_cold, small_words, shared_funcs)| (c, Options { role_passes, hot_cold, small_words, shared_funcs }))
+            .collect()
+    }
+
+    /// Every lowering in `opts` on the verifiers of `circuits`: the honest proof passes, every
+    /// bad witness (a point's parity or x, a scalar + 1 or + n) and another transaction fail.
+    fn lowerings_reject_bad_witnesses(circuits: Vec<Circ>, opts: Vec<(bool, Options)>) {
+        let env = dummy_env();
+        for c in circuits {
+            let (proof, mk) = compile_circ(&c, &env);
+            FORCE.with(|f| *f.borrow_mut() = None);
+            let sv0 = mk();
+            let chosen = sv0.stats().lowering.clone();
+            let w0 = sv0.witness(&proof).unwrap();
+            let r0 = sv0.execute(&w0, &env);
+            println!("default choice {}: {:?}", chosen, r0.as_ref().map(|r| (r.cost_mwu, r.budget_mwu)));
+            let bads = bad_witnesses(&w0, &sv0);
+            let mut cmrs = std::collections::HashSet::new();
+            for &(compressed, o) in &opts {
+                FORCE.with(|f| *f.borrow_mut() = Some((compressed, o)));
+                let sv = mk();
+                cmrs.insert(sv.cmr());
+                let w = sv.witness(&proof).unwrap();
+                let r = crate::simplicity::run::execute_term(&sv.term, &w.0, &env, false);
+                assert!(r.is_ok(), "{:?} {:?}: honest rejected {:?}", compressed, o, r.err());
+                for (what, b) in &bads {
+                    let r = crate::simplicity::run::execute_term(&sv.term, &b.0, &env, false);
+                    assert!(r.is_err(), "{:?} {:?}: accepted bad witness {}", compressed, o, what);
+                }
+                let r = crate::simplicity::run::execute_term(&sv.term, &w.0, &crate::simplicity::run::dummy_env_with_output(7), false);
+                assert!(r.is_err(), "{:?} {:?}: accepted another tx", compressed, o);
+            }
+            FORCE.with(|f| *f.borrow_mut() = None);
+            println!("{} distinct programs over {} lowerings, {} bad witnesses each", cmrs.len(), opts.len(), bads.len());
+        }
+    }
+
+    /// A sample of lowerings on a product and a lookup table (products of many factors).
+    #[test]
+    fn sampled_lowerings_reject_bad_witnesses() {
+        lowerings_reject_bad_witnesses(vec![Circ::Product, Circ::Table(16, 4)], sample_opts());
+    }
+
+    /// All 48 lowerings on a product, a chain and a lookup table (long: run in release with
+    /// `--ignored`).
+    #[test]
+    #[ignore]
+    fn every_lowering_rejects_bad_witnesses() {
+        lowerings_reject_bad_witnesses(vec![Circ::Product, Circ::Chain(8), Circ::Table(16, 4)], all_opts());
     }
 
 }

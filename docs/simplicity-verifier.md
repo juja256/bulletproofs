@@ -69,10 +69,12 @@ The compiler traces the crate's own BP++ verifier (`reciprocal::terms`):
   arguments the previous one inlined) and with or without a hot/cold environment (the values
   read most in a small tree), then tries small constant words (a word with a zero half as the
   pair of its halves) and shared functions (a value inlined in several steps as one function of
-  its stored inputs) on the best. It weighs each exactly without running it (the dummy proof's
-  witness has the real one's types, so the unpruned program has the same bytes and static cost)
-  and keeps the smallest max(budget, cost): byte-bound programs choose fewer bytes, cost-bound
-  ones a lower cost.
+  its stored inputs) on the best. It weighs each without running it (the dummy proof's witness
+  has the real one's types, so the unpruned program has the same bytes and static cost as with a
+  real proof; the pruned program a node runs differs by about 32 bytes per selection), drops any
+  that needs more cells than consensus allows, and keeps the smallest max(budget, cost):
+  byte-bound programs choose fewer bytes, cost-bound ones a lower cost. `Stats::lowering` names
+  the choice, on which the CMR depends.
 - **The multiscalar multiplication is a balanced tree** of `gej_add`; with the coefficients
   recomputed where they are read, the whole sum is one expression over the stored values.
 - **Scheduling.** Steps are ordered to keep few bits alive: on demand from each sink, deepest
@@ -165,7 +167,7 @@ Stage 3 against stage 4 (input weight):
 
 The last three gain most from the bound on monomials: a lookup table's batch inversion made the
 IR of bpvm's `mul` grow from 42 721 to 230 041 operations; it now stays at 46 198. The program
-choice brings the rest; compiling takes longer (it builds 14 to 18 programs).
+choice brings the rest; compiling takes longer (it builds 18 programs).
 
 Earlier: stage 2 against stage 3 (same chains):
 
@@ -219,6 +221,6 @@ as a direct R1CS circuit (`x · y = 15` in the tests) is about 5 kWU.
 - **VM circuits.** bpvm's 18-step `mul` has 1 660 MSM terms (776 gates and 852 linear slots,
   mostly the VM's fixed tables): its `scale`s alone weigh 121 kWU. Fewer linear slots in bpvm, or
   direct R1CS circuits for small statements, would fit a transaction.
-- **Compile time.** The compiler builds up to 18 programs (fib: 34 s); they are independent and
+- **Compile time.** The compiler builds 18 programs (fib: 34 s); they are independent and
   could be built in parallel.
 - Bind the commitments `V` to the transaction's outputs, and compile the BP backend.

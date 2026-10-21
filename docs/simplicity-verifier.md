@@ -45,15 +45,27 @@ The compiler traces the crate's own BP++ verifier (`reciprocal::terms`):
 - The tape, the transcript's records and the final multiscalar multiplication are lowered to a
   small SSA IR (`src/simplicity/ir.rs`), then to a DAG of Simplicity combinators built straight into
   rust-simplicity nodes (no text to parse; `to_text` writes the text on demand).
-- **Expression trees.** A value read once is built inside its reader, so it is written once,
-  straight into its reader's input. A step is a value read several times (stored), a check, a
-  value read by nobody, or a term of the multiscalar multiplication.
+- **IR passes** (`src/simplicity/opt.rs`), exact in `F_n` and in the group:
+  - a product becomes `c · Π a^e` over its atoms (challenges, inverses, witnesses, sums),
+    built as a product of squares `a^(2^j)`, lowest first, so the powers of one atom share their
+    prefixes (`mu^13` reuses `mu^5`) and every power is `O(log t)` deep;
+  - chains of additions become balanced trees;
+  - equal pure operations merge, and operations nobody needs go (checks, unwraps and witnesses
+    stay).
+- **Expression trees with recomputation.** A value read once is built inside its reader. A value
+  read several times is either **stored** (a step of its own, kept in the environment) or
+  **recomputed** inside each reader. A greedy pass from the last operation back decides, with
+  rust-simplicity's costs: recompute when (times it runs) × (its own cost and that of the
+  arguments only it reads) is at most (2 × its bits × the steps it would live) + (its reads).
+  A witness run more than once, a transcript state and a hash read from one are always stored.
+- **The multiscalar multiplication is a balanced tree** of `gej_add`; with the coefficients
+  recomputed where they are read, the whole sum is one expression over the stored values.
 - **Scheduling.** Steps are ordered to keep few bits alive: on demand from each sink, deepest
-  dependency first, so each term of the sum comes right after its coefficient (the best of that,
-  a greedy order and the program order, by the total of live bits).
+  dependency first (the best of that, a greedy order and the program order, by the total of live
+  bits).
 - **The environment** of a step is a binary tree of slots. A value holds a slot from its step to
-  its last reader's, a read is a path of `log2(slots)` selectors, and a step rebuilds only the
-  paths to the slots it changes.
+  the last step that reads it, a read is a path of `log2(slots)` selectors, and a step rebuilds
+  only the paths to the slots it changes.
 
 The cost model this follows (rust-simplicity's static bound): every executed combinator costs 100
 mWU, `iden` and `comp` also pay the width of the value they copy, `take` and `drop` nothing more,
@@ -106,57 +118,62 @@ limit (5 242 880).
 
 Chains of `n` multiplications from one committed value
 (`cargo run --release --example simplicity_costs --features simplicity [log2 max, default 10]`; Apple
-M4 Pro). The
-transaction weight of the input is its witness stack, or the cost (in WU) if that is larger
-(padding).
+M4 Pro, 2026-10-21, stage 3). The transaction weight of the input is its witness stack, or the
+cost (in WU) if that is larger (padding). `stored`: steps that keep a value; `data`: the part of
+the cost that copies data (`comp` and `iden`).
 
-| gates | MSM terms | steps | cost (mWU) | budget (mWU) | jets | program | witness | cells | tx WU | compile | run |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| 2 | 18 | 84 | 3 103 445 | 6 625 000 | 52% | 6 152 B | 353 B | 48 997 | 6.6 k | 13 ms | 36 ms |
-| 4 | 22 | 103 | 4 051 373 | 8 163 000 | 49% | 7 690 B | 353 B | 62 582 | 8.1 k | 10 ms | 33 ms |
-| 8 | 26 | 133 | 5 478 297 | 10 195 000 | 43% | 9 690 B | 385 B | 100 672 | 10.1 k | 11 ms | 40 ms |
-| 16 | 36 | 198 | 9 675 434 | 16 268 000 | 34% | 15 730 B | 418 B | 170 576 | 16.2 k | 19 ms | 66 ms |
-| 32 | 52 | 300 | 19 483 906 | 27 012 000 | 25% | 26 410 B | 482 B | 335 450 | 27.0 k | 32 ms | 116 ms |
-| 64 | 86 | 519 | 50 551 736 | 51 066 000 | 16% | 50 400 B | 546 B | 663 416 | 51.0 k | 62 ms | 256 ms |
-| 128 | 152 | 946 | 153 699 950 | 102 131 000 | | | | | ≈ 154 k (padded) | 130 ms | 0.7 s |
-| 256 | 282 | 1 789 | 522 822 464 | 213 543 000 | | | | | ≈ 523 k (padded) | 283 ms | 2.4 s |
-| 512 | 540 | 3 464 | over the cell limit (6 097 624 cells) | | | | | | | 0.65 s | 8.9 s |
-| 1 024 | 1 054 | 6 803 | over the cell limit (13 109 338 cells) | | | | | | | 1.5 s | 34 s |
+| gates | MSM terms | steps | stored | cost (mWU) | budget (mWU) | jets | data | program | B/gate | witness | cells | tx WU | compile | run |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 2 | 18 | 60 | 46 | 2 831 682 | 5 420 000 | 57% | 30% | 4 947 B | 2 473 | 353 B | 54 355 | 5.4 k | 10 ms | 36 ms |
+| 4 | 22 | 66 | 54 | 3 554 123 | 6 315 000 | 57% | 30% | 5 842 B | 1 460 | 353 B | 53 615 | 6.3 k | 9 ms | 31 ms |
+| 8 | 26 | 74 | 61 | 4 524 003 | 7 983 000 | 54% | 30% | 7 478 B | 934 | 385 B | 61 807 | 7.9 k | 11 ms | 39 ms |
+| 16 | 36 | 90 | 78 | 6 693 380 | 11 303 000 | 52% | 31% | 10 765 B | 672 | 418 B | 81 531 | 11.3 k | 15 ms | 56 ms |
+| 32 | 52 | 115 | 101 | 10 713 032 | 18 418 000 | 49% | 32% | 17 816 B | 556 | 482 B | 111 686 | 18.4 k | 25 ms | 91 ms |
+| 64 | 86 | 159 | 145 | 20 042 079 | 32 243 000 | 45% | 35% | 31 577 B | 493 | 546 B | 199 520 | 32.2 k | 49 ms | 174 ms |
+| 128 | 152 | 221 | 207 | 41 309 307 | 61 626 000 | 41% | 36% | 60 896 B | 475 | 610 B | 317 296 | 61.6 k | 96 ms | 0.3 s |
+| 256 | 282 | 284 | 270 | 89 711 575 | 111 193 000 | 40% | 34% | 110 399 B | 431 | 674 B | 477 840 | 111.1 k | 169 ms | 0.7 s |
+| 512 | 540 | 334 | 320 | 199 465 509 | 209 011 000 | 39% | 30% | 208 152 B | 406 | 739 B | 580 770 | 209.0 k | 0.3 s | 1.4 s |
+| 1 024 | 1 054 | 391 | 377 | 429 518 649 | 403 223 000 | | | | | | | ≈ 430 k (padded) | 0.6 s | 2.8 s |
 
-Stage 1 against stage 2:
+Stage 2 against stage 3 (same chains):
 
-| gates | stage 1 cost | stage 2 cost | stage 1 program | stage 2 program | stage 1 compile + run | stage 2 |
+| gates | stage 2 cost | stage 3 cost | stage 2 program | stage 3 program | stage 2 tx | stage 3 tx |
 |---|---|---|---|---|---|---|
-| 8 | 22.3 M mWU | 5.5 M | 42.0 kB | 9.7 kB | 31.6 s + 31.8 s | 11 ms + 40 ms |
-| 16 | 61.4 M | 9.7 M | 104.4 kB | 15.7 kB | 506 s + 545 s | 19 ms + 66 ms |
-| 64 | over budget | 50.6 M (within) | — | 50.4 kB | — | 62 ms + 256 ms |
+| 16 | 9.7 M mWU | 6.7 M | 15.7 kB | 10.8 kB | 16.2 k | 11.3 k |
+| 64 | 50.6 M | 20.0 M | 50.4 kB | 31.6 kB | 51.0 k | 32.2 k |
+| 256 | 522.8 M | 89.7 M | — | 110.4 kB | ≈ 523 k (padded) | 111.1 k |
+| 512 | over the cell limit | 199.5 M | — | 208.2 kB | — | 209.0 k |
+
+Where the cost of 64 gates went (rust-simplicity's static bound split by kind of node): stage 2
+spent 73% copying the environment between steps (Σ live bits 17.3 M); stage 3 spends 35% (Σ
+live bits 1.3 M), 31% on `scale` and 10% on recomputed products.
 
 **bpvm's fib on secp256k1** (bpvm feature `simplicity`, `examples/simplicity_fib.rs`): 78 steps,
-2 450 BP++ gates, 1 683 linear slots, 4 165 MSM terms and 81 613 traced operations. It compiles in
-6.3 s, but the program needs 37 M cells (the limit is 5.24 M), and its jets alone (4 165 `scale`s,
-about 80 000 scalar operations) cost about 370 M mWU, plus about 267 kB of generator constants.
+2 450 BP++ gates, 1 683 linear slots, 4 165 MSM terms and 81 613 traced operations. Stage 2
+needed 37 M cells. Stage 3 compiles it in 4 s and runs it as a node in 18 s: 1.46 M cells (within
+the limit), 2.8 G mWU (26% data), and a 3.55 MB program. Running it for the first time found a bug
+in bpvm, not here: `vm::simplicity::prove` bound the statement to the transcript twice and
+`compile` once, so its honest proofs were rejected (measured with the fix applied locally).
 
 **What this says.**
 
-- Up to about 64 gates the program fits a standard transaction with no padding (51 kWU at 64
-  gates). With padding, it fits to about 200–220 gates (the 400 kWU standard limit, interpolated
-  between the measured 128 and 256). From 512 gates the Bit Machine's cell limit (5 242 880)
-  binds as well.
-- The cost still grows faster than the circuit, now because of the live data itself. The
-  verifier's matrix–vector products keep about `min(rows, columns)` values alive, and every step
-  copies them (Σ live bits: 17.3 M at 64 gates).
+- Every row is now bound by the program's bytes, not its cost: the witness stack is larger than
+  the cost in WU. Up to 512 gates the program fits a standard transaction (400 kWU) with no
+  padding (209 kWU); 1 024 gates need about 430 kWU, so the limit is about 950 gates.
+- Recomputation trades copying for computation; on dense circuits (fib) the same value
+  recomputed in many steps is written as code in each, since its paths differ step by step.
 - **Comparison with [simple-groth16](https://github.com/BlockstreamResearch/simple-groth16):** its
-  Groth16 verifier costs 48.6 M mWU, a 53 kWU transaction, for any circuit. Here, BP++ is cheaper
-  below about 64 gates and dearer above. A circuit of bpvm's size (fib) does not fit a standard
+  Groth16 verifier costs 48.6 M mWU, a 53 kWU transaction, for any circuit. BP++ is now lighter
+  up to about 100 gates and heavier above. A circuit of bpvm's size (fib) does not fit a standard
   transaction even at the floor of jets and generators (about 400 kWU). BP++ in Simplicity suits
   small statements, without a trusted setup, about secp256k1 commitments (Liquid's confidential
   amounts and assets).
 
 ## Next
 
-- **Regroup the coefficients of the multiscalar multiplication** that are linear in shared values:
-  `Σ_j (Σ_r W_rj u_r) H_j = Σ_r u_r (Σ_j W_rj H_j)`, with the inner sums constant points computed at
-  compile time. That removes the matrix–vector products from the program, and with them the large
-  live set.
-- **Scoped blocks**: copy long-lived values once per block rather than once per step.
+- **Bytes.** The program's size now sets the weight: share the code of a value recomputed in
+  several steps (one function over the stored values it reads), store generators as `x` and
+  parity (`decompress`, −32 B and +11 WU per point), and weigh bytes in the store/recompute rule.
+- A hot/cold environment (values read often in a small tree) was tried: −1.2% of the cost at 64
+  gates but more bytes, so it was left out.
 - Bind the commitments `V` to the transaction's outputs, and compile the BP backend.

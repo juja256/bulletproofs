@@ -27,8 +27,8 @@ fn main() {
     let max: u32 = std::env::args().nth(1).and_then(|a| a.parse().ok()).unwrap_or(10);
     let env = dummy_env();
     let x = Scalar::from(3u64);
-    println!("| gates | tape ops | MSM terms | steps | cost (mWU) | budget (mWU) | jets | program B | B/gate | witness B | cells | tx WU | compile | run |");
-    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+    println!("| gates | tape ops | MSM terms | steps | stored | cost (mWU) | budget (mWU) | jets | data | program B | B/gate | witness B | cells | tx WU | compile | run |");
+    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     for lg in 1..=max {
         let n = 1usize << lg;
         let pc = PedersenGens::for_curve();
@@ -66,12 +66,12 @@ fn main() {
                 let stack = (r.budget_mwu / 1000 - 50) as usize;
                 let tx = stack.max((r.cost_mwu / 1000) as usize);
                 println!(
-                    "| {} | {} | {} | {} | {} | {} | {:.0}% | {} | {} | {} | {} | {} | {:.1?} | {:.1?} |",
-                    n, st.tape_ops, st.msm_terms, st.steps, r.cost_mwu, r.budget_mwu, 100.0 * jets as f64 / r.cost_mwu as f64,
+                    "| {} | {} | {} | {} | {} | {} | {} | {:.0}% | {:.0}% | {} | {} | {} | {} | {} | {:.1?} | {:.1?} |",
+                    n, st.tape_ops, st.msm_terms, st.steps, st.stored, r.cost_mwu, r.budget_mwu, 100.0 * jets as f64 / r.cost_mwu as f64, 100.0 * r.data_mwu as f64 / r.cost_mwu as f64,
                     r.program_bytes, r.program_bytes / n, r.witness_bytes, r.cells, tx, compile, t1.elapsed()
                 )
             }
-            Err(e) => println!("| {} | {} | {} | {} | {:?} | | | | | | | | {:.1?} | {:.1?} |", n, st.tape_ops, st.msm_terms, st.steps, e, compile, t1.elapsed()),
+            Err(e) => println!("| {} | {} | {} | {} | {} | {:?} | | | | | | | | | {:.1?} | {:.1?} |", n, st.tape_ops, st.msm_terms, st.steps, st.stored, e, compile, t1.elapsed()),
         }
     }
 }

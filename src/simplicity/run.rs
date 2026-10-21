@@ -22,7 +22,8 @@ pub type Env = ElementsEnv<Arc<elements::Transaction>>;
 pub struct Report {
     /// The static cost bound of the decoded (pruned) program, in milliweight units.
     pub cost_mwu: u64,
-    /// The budget the witness stack pays for: 1000 · (witness bytes + 50).
+    /// The budget the input's witness stack pays for: 1000 · (stack bytes + 50), the stack
+    /// being the witness data, the program, the CMR and the control block (one leaf).
     pub budget_mwu: u64,
     /// The pruned program's consensus encoding.
     pub program_bytes: usize,
@@ -53,7 +54,7 @@ pub enum ExecError {
     Budget {
         /// The cost bound.
         cost_mwu: u64,
-        /// 1000 · (witness bytes + 50).
+        /// 1000 · (stack bytes + 50).
         budget_mwu: u64,
     },
 }
@@ -137,6 +138,14 @@ pub(crate) fn bit_value(b: bool) -> Value {
     Value::u1(b as u8)
 }
 
+/// The budget of a spend whose witness stack is (witness, program, CMR, control block of one
+/// leaf), each with its one-byte length prefix (simple-groth16's `deploy spend`):
+/// 1000 · (stack bytes + 50) mWU.
+pub(crate) fn budget(program_bytes: usize, witness_bytes: usize) -> u64 {
+    let stack = program_bytes + witness_bytes + 32 + 33 + 4 + 1;
+    1000 * (stack as u64 + 50)
+}
+
 fn cost_of(n: &RedeemNode) -> u64 {
     n.bounds().cost.to_string().parse().expect("cost as an integer")
 }
@@ -172,7 +181,7 @@ pub(crate) fn execute_forest(forest: &Forest, witness: &HashMap<Arc<str>, Value>
         mac.exec(&decoded, env).map_err(|e| ExecError::Exec(e.to_string()))?;
         let bounds = decoded.bounds();
         let cost_mwu = cost_of(&decoded);
-        let budget_mwu = 1000 * (w.len() as u64 + 50);
+        let budget_mwu = budget(p.len(), w.len());
         if budgeted && cost_mwu > budget_mwu {
             return Err(ExecError::Budget { cost_mwu, budget_mwu });
         }

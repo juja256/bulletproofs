@@ -88,7 +88,7 @@ impl CompileTranscript {
         let body = if label == SIGHASH_LABEL && message.len() == 32 {
             Part::Sighash
         } else {
-            crate::simplicity::trace_provenance(message).unwrap_or_else(|| Part::Const(message.to_vec()))
+            crate::simplicity::trace::provenance(message).unwrap_or_else(|| Part::Const(message.to_vec()))
         };
         self.log.push(Rec::Bytes(vec![Part::Const(head), body]));
     }
@@ -109,9 +109,10 @@ impl TranscriptBackend for CompileTranscript {
         request.extend_from_slice(&le32(label.len()));
         request.extend_from_slice(label);
         request.extend_from_slice(&le32(dest.len()));
+        let k = self.log.iter().filter(|r| matches!(r, Rec::Challenge { .. })).count();
         self.log.push(Rec::Challenge { request, len: dest.len() });
         self.inner.challenge_bytes(label, dest);
-        crate::simplicity::trace_challenge(dest);
+        crate::simplicity::trace::note_challenge(k, dest);
     }
 
     fn build_rng(&self) -> merlin::TranscriptRngBuilder {

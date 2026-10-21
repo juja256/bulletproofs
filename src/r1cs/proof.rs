@@ -321,3 +321,14 @@ impl<'de, C: Curve> Deserialize<'de> for R1CSProof<C> {
         deserializer.deserialize_bytes(R1CSProofVisitor(PhantomData))
     }
 }
+
+#[cfg(feature = "simplicity")]
+impl<C: Curve> R1CSProof<C> {
+    /// The circuit proof and the dimensions `(n_lin, n_mm)` of a BP++ proof (`None` for BP).
+    pub(crate) fn bppp_parts(&self) -> Option<(&crate::bppp::CircuitProof<C>, usize, usize)> {
+        match &self.0 {
+            ProofKind::Bppp(p) => Some((&p.proof, p.n_lin, p.n_mm)),
+            _ => None,
+        }
+    }
+}

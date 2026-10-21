@@ -68,6 +68,12 @@ impl<F: Field> SparseMatrix<F> {
         self.start.push(self.cols.len());
     }
 
+    /// The same matrix over another field, every coefficient mapped by `f`.
+    #[cfg(feature = "simplicity")]
+    pub(crate) fn map<G: Field>(&self, f: impl Fn(F) -> G) -> SparseMatrix<G> {
+        SparseMatrix { n_cols: self.n_cols, start: self.start.clone(), cols: self.cols.clone(), vals: self.vals.iter().map(|v| f(*v)).collect() }
+    }
+
     /// Append the rows of `other` (same number of columns).
     pub(crate) fn extend_rows(&mut self, other: &SparseMatrix<F>) {
         assert_eq!(self.n_cols, other.n_cols, "column counts differ");

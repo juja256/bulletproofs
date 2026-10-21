@@ -6,6 +6,7 @@ mod ir;
 mod run;
 mod point;
 mod sha;
+mod trace;
 
 pub use self::run::{dummy_env, dummy_env_with_output, sighash_of, Env, ExecError, Report};
 
@@ -15,10 +16,3 @@ pub const SIGHASH_LABEL: &[u8] = b"sighash";
 
 pub use self::sha::CompileTranscript;
 
-/// Provenance of bytes absorbed by a [`CompileTranscript`] (the tracer's registry; none yet).
-pub(crate) fn trace_provenance(_bytes: &[u8]) -> Option<sha::Part> {
-    None
-}
-
-/// A challenge's output bytes, for the tracer (none yet).
-pub(crate) fn trace_challenge(_bytes: &[u8]) {}

@@ -165,6 +165,21 @@ impl Prog {
         v
     }
 
+    /// The names of the witnesses nobody reads (rust-simplicity cannot prune a program that
+    /// computes and discards a witness; the compiler reads every one).
+    pub(crate) fn unread_witnesses(&self) -> Vec<Arc<str>> {
+        let mut read = vec![false; self.ops.len()];
+        for o in &self.ops {
+            for a in o.args() {
+                read[a.0 as usize] = true;
+            }
+        }
+        self.ops.iter().enumerate().filter_map(|(i, o)| match o {
+            Op::Witness(n, _) if !read[i] => Some(n.clone()),
+            _ => None,
+        }).collect()
+    }
+
     /// The operations in order.
     pub(crate) fn ops(&self) -> &[Op] {
         &self.ops
@@ -208,7 +223,7 @@ impl Prog {
         Lowering::new(self, &Options::default()).run()
     }
 
-    /// The number of steps the program runs (values read several times or by nobody, checks).
+    /// The number of steps the program runs (stored values, values read by nobody, checks).
     #[cfg(test)]
     pub(crate) fn step_count(&self) -> usize {
         Lowering::new(self, &Options::default()).steps()
@@ -262,13 +277,15 @@ impl Prog {
 enum Role {
     /// A constant, read where used.
     Const,
-    /// A witness read once: the witness node at its reader.
+    /// A witness run once: the witness node at its reader (a witness node has one path).
     InlineWitness,
-    /// A value read once (and not in a branch of a selection): built inside its reader's
-    /// expression, so it is written once, straight into its reader's input.
+    /// A value built inside each reader's expression (not in a branch of a selection): read
+    /// once, or read several times and cheaper to recompute than to store, so it runs at each
+    /// reader.
     Inline,
-    /// A step of its own: a value read several times (stored while it has readers left), a
-    /// value read by nobody (computed and discarded: it may contain a check), an assertion.
+    /// A step of its own: a value stored while it has readers left (worth storing, a witness
+    /// run more than once, a transcript state read more than once or a hash read from one),
+    /// a value read by nobody (computed and discarded: it may contain a check), an assertion.
     Root,
 }
 
@@ -778,6 +795,7 @@ impl<'a> Lowering<'a> {
         (t, funcs.get())
     }
 
+    #[cfg(test)]
     fn run(self) -> Term {
         self.run_with(|_| {})
     }
@@ -925,6 +943,7 @@ pub(crate) struct Lowered {
     pub(crate) stored: usize,
     pub(crate) live_bits: u64,
     /// Shared functions built ([`Options::shared_funcs`]).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) funcs: usize,
 }
 
@@ -1362,6 +1381,48 @@ mod tests {
         assert!(execute_term(&p.lower(&opts).term, &w, &dummy_env(), false).is_err());
     }
 
+
+    /// A stored value read only through values recomputed in a late step lives until that
+    /// step (else the read finds its slot empty).
+    #[test]
+    fn stored_value_lives_until_its_last_inlined_reader() {
+        let x = sc(7);
+        let mut p = Prog::new();
+        let wx = p.push(Op::Witness("x".into(), Ty::word()));
+        let wy = p.push(Op::Witness("y".into(), Ty::word()));
+        let inv = p.push(Op::Jet("scalar_invert", vec![wx], Ty::word()));
+        let one = p.push(Op::Const(Ty::word(), be(&sc(1))));
+        let u = p.push(Op::Jet("scalar_add", vec![inv, one], Ty::word()));
+        let ku = p.push(Op::Const(Ty::word(), be(&(x.invert().unwrap() + sc(1)))));
+        let ky = p.push(Op::Const(Ty::word(), be(&sc(2))));
+        let first = p.push(Op::Jet("eq_256", vec![u, ku], Ty::Bit));
+        p.push(Op::Assert(first));
+        for _ in 0..40 {
+            let q = p.push(Op::Jet("eq_256", vec![wy, ky], Ty::Bit));
+            p.push(Op::Assert(q));
+        }
+        let last = p.push(Op::Jet("eq_256", vec![u, ku], Ty::Bit));
+        p.push(Op::Assert(last));
+        let l = Lowering::new(&p, &Options::default());
+        assert_eq!(l.role[u.0 as usize], Role::Inline, "u is recomputed at both checks");
+        assert_eq!(l.role[inv.0 as usize], Role::Inline, "and so is the inversion");
+        assert_eq!(l.role[wx.0 as usize], Role::Root, "the witness is stored, read only through them");
+        let mut w = HashMap::new();
+        w.insert(Arc::<str>::from("x"), word_value(&be(&x)));
+        w.insert(Arc::<str>::from("y"), word_value(&be(&sc(2))));
+        assert!(execute_term(&p.to_term(), &w, &dummy_env(), false).is_ok());
+    }
+
+    /// Witnesses nobody reads are listed (a program must read every witness).
+    #[test]
+    fn unread_witnesses_are_listed() {
+        let mut p = Prog::new();
+        let wx = p.push(Op::Witness("x".into(), Ty::word()));
+        p.push(Op::Witness("y".into(), Ty::word()));
+        let z = p.push(Op::Jet("scalar_is_zero", vec![wx], Ty::Bit));
+        p.push(Op::Assert(z));
+        assert_eq!(p.unread_witnesses(), vec![Arc::<str>::from("y")]);
+    }
 }
 
 /// Random programs (suggested by the stage 2 review): every check must run after inlining,

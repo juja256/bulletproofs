@@ -195,9 +195,8 @@ pub(crate) fn breakdown(root: &Arc<RedeemNode>) -> std::collections::BTreeMap<St
             Inner::Jet(_) => "jet",
             Inner::Word(_) => "word",
         };
-        if kind != "unit" {
-            put(&mut b, &format!("overhead {}", kind), 100);
-        }
+        // every node, `unit` included, costs 100 mWU (`NodeBounds::NOP` is the overhead)
+        put(&mut b, &format!("overhead {}", kind), 100);
         match n.inner() {
             Inner::Iden => put(&mut b, "bits iden", n.arrow().target.bit_width() as u64),
             Inner::Witness(_) => put(&mut b, "bits witness", n.arrow().target.bit_width() as u64),
@@ -382,5 +381,14 @@ main := comp (comp (pair h w) jet_eq_256) jet_verify
             Err(ExecError::Budget { cost_mwu, budget_mwu }) => assert!(cost_mwu > budget_mwu),
             other => panic!("expected a budget error, got {:?}", other.map(|r| r.cost_mwu)),
         }
+    }
+
+    /// The breakdown by kind of node adds up to the static cost (every node, `unit` included).
+    #[test]
+    fn breakdown_adds_up_to_the_cost() {
+        let p = crate::simplicity::ir::tests_support::arithmetic_prog();
+        let r = execute_term(&p.to_term(), &crate::simplicity::ir::tests_support::arithmetic_witness(0), &dummy_env(), false).unwrap();
+        let total: u64 = LAST_BREAKDOWN.with(|b| b.borrow().clone()).unwrap().iter().filter(|(k, _)| !k.starts_with('#')).map(|(_, v)| *v).sum();
+        assert_eq!(total, r.cost_mwu);
     }
 }

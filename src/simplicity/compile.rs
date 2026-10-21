@@ -61,7 +61,7 @@ pub struct Stats {
     pub witness_points: usize,
     /// Scalars of the proof (witness values).
     pub witness_scalars: usize,
-    /// Steps the program runs (values read several times, checks, terms of the sum).
+    /// Steps the program runs (stored values, values read by nobody, checks).
     pub steps: usize,
     /// Steps that store a value for later steps (the rest is recomputed where it is read).
     pub stored: usize,
@@ -302,7 +302,9 @@ pub(crate) fn compile_with<R: rand_core::RngCore + rand_core::CryptoRng>(
         }
         let acc = msm(&mut p, &msm_terms);
         assert_infinity(&mut p, acc);
-        (crate::simplicity::opt::optimize(&p), msm_terms.len())
+        let p = crate::simplicity::opt::optimize(&p);
+        debug_assert!(p.unread_witnesses().is_empty(), "witnesses nobody reads: {:?}", p.unread_witnesses());
+        (p, msm_terms.len())
     };
 
     // the lightest program: generators as constants or compressed, times the lowerings (their

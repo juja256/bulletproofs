@@ -146,11 +146,13 @@ pub(crate) fn dummy_proof<R: rand_core::RngCore + rand_core::CryptoRng>(c: &Reci
 }
 
 /// The lowerings the compiler tries; it keeps the lightest program (ties to the first).
-const LOWERINGS: [Options; 4] = [
+const LOWERINGS: [Options; 6] = [
     Options { role_passes: 1, hot_cold: false, small_words: false },
     Options { role_passes: 2, hot_cold: false, small_words: false },
+    Options { role_passes: 3, hot_cold: false, small_words: false },
     Options { role_passes: 1, hot_cold: true, small_words: false },
     Options { role_passes: 2, hot_cold: true, small_words: false },
+    Options { role_passes: 3, hot_cold: true, small_words: false },
 ];
 
 /// The transcript domain of R1CS proofs on the BP++ backend (as `Verifier::verify_bppp`).

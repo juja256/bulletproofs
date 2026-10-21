@@ -16,7 +16,7 @@ use crate::errors::R1CSError;
 use crate::generators::{BulletproofGens, PedersenGens};
 use crate::r1cs::R1CSProof;
 use crate::simplicity::ir::{Lowered, Op, Options, Prog, Ty, Val};
-use crate::simplicity::point::{assert_infinity, const_gej, ge_to_gej, msm, witness_point, witness_scalar, WitPoint};
+use crate::simplicity::point::{assert_infinity, const_gej, const_gej_compressed, ge_to_gej, msm, witness_point, witness_scalar, WitPoint};
 use crate::simplicity::run::{bit_value, execute_term, weight_of, word_value, Env, ExecError, Report};
 use crate::simplicity::term::Term;
 use crate::simplicity::sha::{lower_log, ChallengeVals, Part, Rec};
@@ -228,10 +228,6 @@ pub(crate) fn compile_with<R: rand_core::RngCore + rand_core::CryptoRng>(
         }
     };
 
-    // the program
-    let mut p = Prog::new();
-    let wp: Vec<WitPoint> = (0..n_points).map(|i| witness_point(&mut p, &format!("p{}", i))).collect();
-    let ws: Vec<Val> = (0..n_scalars).map(|i| witness_scalar(&mut p, &format!("s{}", i))).collect();
     let roots: Vec<NodeId> = std::iter::once(&terms.g)
         .chain(&terms.h)
         .chain(&terms.n)
@@ -250,72 +246,88 @@ pub(crate) fn compile_with<R: rand_core::RngCore + rand_core::CryptoRng>(
         }
         *k.borrow_mut() = Some(m);
     });
-    let mut lw = TapeLowering { tape: &tape, live: &live, vals: HashMap::new(), ws: &ws };
-    let challenges = {
-        let mut parts = |p: &mut Prog, part: &Part, ch: &[ChallengeVals]| match part {
-            Part::Sighash => vec![(p.push(Op::Jet("sig_all_hash", vec![], Ty::word())), 32)],
-            Part::WitPoint(i) => vec![(wp[*i].sec1_prefix, 1), (wp[*i].x, 32)],
-            Part::Scalar(n) => vec![(lw.node(p, NodeId(*n), ch), 32)],
-            Part::Const(_) => unreachable!("constants are hashed by lower_log"),
-        };
-        lower_log(&mut p, &log, usize::MAX, &mut parts)
-    };
-    // every live node (the checks among them), in tape order
-    for i in 0..tape.ops.len() {
-        if live[i] {
-            lw.node(&mut p, NodeId(i as u32), &challenges);
-        }
-    }
-    let scalar = |p: &mut Prog, lw: &mut TapeLowering, t: &Traced| -> Option<Val> {
-        match t.node {
-            Some(n) => Some(lw.node(p, n, &challenges)),
-            None if bool::from(t.value.is_zero()) => None,
-            None => Some(p.push(Op::Const(Ty::word(), t.value.to_repr().to_vec()))),
-        }
-    };
-    let mut msm_terms = Vec::new();
-    let generators = std::iter::once((&terms.g, gens.g)).chain(terms.h.iter().zip(gens.h.iter().copied())).chain(terms.n.iter().zip(gens.n.iter().copied()));
-    for (k, pt) in generators {
-        if let Some(kv) = scalar(&mut p, &mut lw, k) {
-            let g = const_gej(&mut p, &pt.to_affine());
-            msm_terms.push((kv, g));
-        }
-    }
-    for (k, pt) in &terms.points {
-        // a constant identity (a commitment to zero with a zero blinding) adds nothing
-        if pt.src == PointSrc::Const && bool::from(group::Group::is_identity(&pt.value)) {
-            continue;
-        }
-        if let Some(kv) = scalar(&mut p, &mut lw, k) {
-            let g = match pt.src {
-                PointSrc::Witness(i) => ge_to_gej(&mut p, wp[i].ge),
-                PointSrc::Const => const_gej(&mut p, &pt.value.to_affine()),
-            };
-            msm_terms.push((kv, g));
-        }
-    }
-    let acc = msm(&mut p, &msm_terms);
-    assert_infinity(&mut p, acc);
 
-    let p = crate::simplicity::opt::optimize(&p);
-    #[cfg(test)]
-    LAST_STORED.with(|k| *k.borrow_mut() = Some(p.stored_report()));
-    // the lightest of the lowerings (their weights from the dummy proof's witness: the same
-    // types, so the same program bytes and cost)
+    // the program, with the generators as constant points or (`compressed`) as x and parity
+    // decompressed by the program; and its number of terms in the sum
+    let build = |compressed: bool| -> (Prog, usize) {
+        let mut p = Prog::new();
+        let wp: Vec<WitPoint> = (0..n_points).map(|i| witness_point(&mut p, &format!("p{}", i))).collect();
+        let ws: Vec<Val> = (0..n_scalars).map(|i| witness_scalar(&mut p, &format!("s{}", i))).collect();
+        let mut lw = TapeLowering { tape: &tape, live: &live, vals: HashMap::new(), ws: &ws };
+        let challenges = {
+            let mut parts = |p: &mut Prog, part: &Part, ch: &[ChallengeVals]| match part {
+                Part::Sighash => vec![(p.push(Op::Jet("sig_all_hash", vec![], Ty::word())), 32)],
+                Part::WitPoint(i) => vec![(wp[*i].sec1_prefix, 1), (wp[*i].x, 32)],
+                Part::Scalar(n) => vec![(lw.node(p, NodeId(*n), ch), 32)],
+                Part::Const(_) => unreachable!("constants are hashed by lower_log"),
+            };
+            lower_log(&mut p, &log, usize::MAX, &mut parts)
+        };
+        // every live node (the checks among them), in tape order
+        for i in 0..tape.ops.len() {
+            if live[i] {
+                lw.node(&mut p, NodeId(i as u32), &challenges);
+            }
+        }
+        let scalar = |p: &mut Prog, lw: &mut TapeLowering, t: &Traced| -> Option<Val> {
+            match t.node {
+                Some(n) => Some(lw.node(p, n, &challenges)),
+                None if bool::from(t.value.is_zero()) => None,
+                None => Some(p.push(Op::Const(Ty::word(), t.value.to_repr().to_vec()))),
+            }
+        };
+        let constant = |p: &mut Prog, pt: &k256::AffinePoint| if compressed { const_gej_compressed(p, pt) } else { const_gej(p, pt) };
+        let mut msm_terms = Vec::new();
+        let generators = std::iter::once((&terms.g, gens.g)).chain(terms.h.iter().zip(gens.h.iter().copied())).chain(terms.n.iter().zip(gens.n.iter().copied()));
+        for (k, pt) in generators {
+            if let Some(kv) = scalar(&mut p, &mut lw, k) {
+                let g = constant(&mut p, &pt.to_affine());
+                msm_terms.push((kv, g));
+            }
+        }
+        for (k, pt) in &terms.points {
+            // a constant identity (a commitment to zero with a zero blinding) adds nothing
+            if pt.src == PointSrc::Const && bool::from(group::Group::is_identity(&pt.value)) {
+                continue;
+            }
+            if let Some(kv) = scalar(&mut p, &mut lw, k) {
+                let g = match pt.src {
+                    PointSrc::Witness(i) => ge_to_gej(&mut p, wp[i].ge),
+                    PointSrc::Const => constant(&mut p, &pt.value.to_affine()),
+                };
+                msm_terms.push((kv, g));
+            }
+        }
+        let acc = msm(&mut p, &msm_terms);
+        assert_infinity(&mut p, acc);
+        (crate::simplicity::opt::optimize(&p), msm_terms.len())
+    };
+
+    // the lightest program: generators as constants or compressed, times the lowerings (their
+    // weights from the dummy proof's witness: the same types, so the same bytes and cost)
     let dummy = witness_map(&points, &scalars)?;
     let mut best: Option<(u64, Lowered)> = None;
-    for opts in LOWERINGS {
-        let l = p.lower(&opts);
-        let w = weight_of(&l.term, &dummy).map_err(|e| gadget_err(&format!("the generated program does not type: {:?}", e)))?;
-        if best.as_ref().map_or(true, |(b, _)| w < *b) {
-            best = Some((w, l));
+    let mut msm_count = 0;
+    for compressed in [false, true] {
+        let (p, terms_count) = build(compressed);
+        msm_count = terms_count;
+        #[cfg(test)]
+        if !compressed {
+            LAST_STORED.with(|k| *k.borrow_mut() = Some(p.stored_report()));
+        }
+        for opts in LOWERINGS {
+            let l = p.lower(&opts);
+            let w = weight_of(&l.term, &dummy).map_err(|e| gadget_err(&format!("the generated program does not type: {:?}", e)))?;
+            if best.as_ref().map_or(true, |(b, _)| w < *b) {
+                best = Some((w, l));
+            }
         }
     }
     let (_, low) = best.expect("a lowering");
     let term = low.term;
     let commit = term.commit().map_err(|e| gadget_err(&format!("the generated program does not type: {}", e)))?;
     let cmr = commit.cmr();
-    let stats = Stats { jets: low.jets, tape_ops: live.iter().filter(|x| **x).count(), msm_terms: msm_terms.len(), witness_points: n_points, witness_scalars: n_scalars, steps: low.steps, stored: low.stored, live_bits: low.live_bits };
+    let stats = Stats { jets: low.jets, tape_ops: live.iter().filter(|x| **x).count(), msm_terms: msm_count, witness_points: n_points, witness_scalars: n_scalars, steps: low.steps, stored: low.stored, live_bits: low.live_bits };
     Ok(SimplicityVerifier { term, text: std::sync::OnceLock::new(), cmr, n_lin, n_mm, stats })
 }
 

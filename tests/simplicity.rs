@@ -360,15 +360,35 @@ fn table_program(rows: u64, lookups: u64, env: &bulletproofs::simplicity::Env) -
     (sv, r)
 }
 
-/// The program grows linearly with the table: 4× the rows, at most 5× the bytes and the cost
-/// (stage 3 gave 8.3× and 8.1×: products of many factors were expanded from scratch).
+/// The input's weight in mWU, padded if the cost needs it: the larger of the budget and the
+/// cost (`Budget` is reported only after every check has passed).
+fn weight(r: Result<bulletproofs::simplicity::Report, bulletproofs::simplicity::ExecError>) -> u64 {
+    match r {
+        Ok(r) => r.budget_mwu.max(r.cost_mwu),
+        Err(bulletproofs::simplicity::ExecError::Budget { cost_mwu, .. }) => cost_mwu,
+        Err(e) => panic!("rejected: {:?}", e),
+    }
+}
+
+/// The program grows linearly with the table: 4× the rows, at most 5× the weight (stage 3 gave
+/// 8.3× the bytes and 8.1× the cost: products of many factors were expanded from scratch).
 #[test]
 fn table_program_grows_linearly() {
     let env = dummy_env();
-    let (_, a) = table_program(64, 8, &env);
-    let (_, b) = table_program(256, 8, &env);
-    let (a, b) = (a.unwrap(), b.unwrap());
-    println!("table 64: {} mWU, {} B; table 256: {} mWU, {} B", a.cost_mwu, a.program_bytes, b.cost_mwu, b.program_bytes);
-    assert!(b.program_bytes <= 5 * a.program_bytes, "bytes grow {:.1}×", b.program_bytes as f64 / a.program_bytes as f64);
-    assert!(b.cost_mwu <= 5 * a.cost_mwu, "cost grows {:.1}×", b.cost_mwu as f64 / a.cost_mwu as f64);
+    let (a, b) = (weight(table_program(64, 8, &env).1), weight(table_program(256, 8, &env).1));
+    println!("table 64: {} mWU, table 256: {} mWU (weights)", a, b);
+    assert!(b <= 5 * a, "the weight grows {:.1}×", b as f64 / a as f64);
+}
+
+/// Stage 4 is not heavier than stage 3 (the input's weight, padded if needed: stage 3's
+/// budgets, every one above its cost, 2026-10-21) on the chains of 2 to 64 gates.
+#[test]
+fn stage4_not_heavier_than_stage3() {
+    let env = dummy_env();
+    for (n, stage3) in [(2, 5_420_000u64), (4, 6_315_000), (8, 7_983_000), (16, 11_303_000), (32, 18_418_000), (64, 32_243_000)] {
+        let (p, v) = chain_proof_and_verifier(n, &env);
+        let w = weight(v.execute(&v.witness(&p).unwrap(), &env));
+        println!("chain {}: {} mWU (stage 3: {})", n, w, stage3);
+        assert!(w <= stage3, "chain {}", n);
+    }
 }

@@ -54,6 +54,18 @@ pub(crate) fn const_gej(p: &mut Prog, pt: &k256::AffinePoint) -> Val {
     p.push(Op::Const(Ty::gej(), b))
 }
 
+/// A constant point as its x and the parity of its y, decompressed by the program (32 bytes
+/// fewer than [`const_gej`], one `decompress` more).
+pub(crate) fn const_gej_compressed(p: &mut Prog, pt: &k256::AffinePoint) -> Val {
+    let e = pt.to_encoded_point(true);
+    let b = e.as_bytes();
+    let parity = p.push(Op::Const(Ty::Bit, vec![b[0] & 1]));
+    let x = p.push(Op::Const(Ty::word(), b[1..33].to_vec()));
+    let opt = p.push(Op::Jet("decompress", vec![parity, x], Ty::opt(Ty::ge())));
+    let ge = p.push(Op::Unwrap(opt, Ty::ge()));
+    ge_to_gej(p, ge)
+}
+
 fn one() -> [u8; 32] {
     let mut o = [0u8; 32];
     o[31] = 1;
@@ -230,5 +242,35 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Constant points given as x and parity decompress to the same points: the sum of the
+    /// tree matches, both parities occur, and a wrong coefficient fails.
+    #[test]
+    fn compressed_constants_sum_like_full_ones() {
+        let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(11);
+        let mut parities = [false; 2];
+        for bad in [false, true] {
+            let mut p = Prog::new();
+            let mut total = Scalar::ZERO;
+            let mut terms = Vec::new();
+            for i in 0..12 {
+                let (k, x) = (Scalar::random(&mut rng), Scalar::random(&mut rng));
+                total += k * x;
+                let pt = (ProjectivePoint::GENERATOR * x).to_affine();
+                parities[xy(&ProjectivePoint::from(pt)).0 as usize] = true;
+                let k = if bad && i == 5 { k + Scalar::ONE } else { k };
+                let kv = p.push(Op::Const(Ty::word(), k.to_repr().to_vec()));
+                let g = const_gej_compressed(&mut p, &pt);
+                terms.push((kv, g));
+            }
+            let kv = p.push(Op::Const(Ty::word(), (-total).to_repr().to_vec()));
+            let g = const_gej(&mut p, &AffinePoint::GENERATOR);
+            terms.push((kv, g));
+            let acc = msm(&mut p, &terms);
+            assert_infinity(&mut p, acc);
+            assert_eq!(execute_term(&p.to_term(), &HashMap::new(), &dummy_env(), false).is_ok(), !bad);
+        }
+        assert_eq!(parities, [true, true], "both parities");
     }
 }

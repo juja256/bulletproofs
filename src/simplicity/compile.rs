@@ -17,18 +17,27 @@ use crate::generators::{BulletproofGens, PedersenGens};
 use crate::r1cs::R1CSProof;
 use crate::simplicity::ir::{Op, Prog, Ty, Val};
 use crate::simplicity::point::{assert_infinity, const_gej, ge_to_gej, msm, witness_point, witness_scalar, WitPoint};
-use crate::simplicity::run::{bit_value, execute_text, word_value, Env, ExecError, Report};
+use crate::simplicity::run::{bit_value, execute_term, word_value, Env, ExecError, Report};
+use crate::simplicity::term::Term;
 use crate::simplicity::sha::{lower_log, ChallengeVals, Part, Rec};
 use crate::simplicity::trace::{register_witness_point, register_witness_scalar, with_tape, NodeId, PointSrc, TOp, Tape, Traced, TracedCurve, TracedPoint};
 use crate::simplicity::CompileTranscript;
 
 type K = k256::Scalar;
 
+impl core::fmt::Debug for SimplicityVerifier {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SimplicityVerifier").field("cmr", &self.cmr).field("stats", &self.stats).finish()
+    }
+}
+
 /// A Simplicity program that verifies the BP++ proofs of one circuit, bound to the spending
 /// transaction (`jet_sig_all_hash` in the transcript).
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SimplicityVerifier {
-    text: String,
+    term: Term,
+    /// The program's text, written on first use (an artifact).
+    text: std::sync::OnceLock<String>,
     cmr: ::simplicity::Cmr,
     n_lin: usize,
     n_mm: usize,
@@ -66,7 +75,7 @@ impl SimplicityVerifier {
 
     /// The program in Simplicity's human-readable encoding.
     pub fn to_text(&self) -> &str {
-        &self.text
+        self.text.get_or_init(|| self.term.text().expect("the program types"))
     }
 
     /// What the program contains.
@@ -99,7 +108,7 @@ impl SimplicityVerifier {
 
     /// Run the program with `w` in the transaction `env`, as a node would.
     pub fn execute(&self, w: &SimplicityWitness, env: &Env) -> Result<Report, ExecError> {
-        execute_text(&self.text, &w.0, env)
+        execute_term(&self.term, &w.0, env, true)
     }
 }
 
@@ -257,12 +266,11 @@ pub(crate) fn compile_with<R: rand_core::RngCore + rand_core::CryptoRng>(
     let acc = msm(&mut p, &msm_terms);
     assert_infinity(&mut p, acc);
 
-    let text = p.to_text();
-    let forest = ::simplicity::human_encoding::Forest::parse::<::simplicity::jet::Elements>(&text)
-        .map_err(|e| gadget_err(&format!("the generated program does not parse: {}", e)))?;
-    let cmr = forest.roots().get("main").expect("main").cmr();
+    let term = p.to_term();
+    let commit = term.commit().map_err(|e| gadget_err(&format!("the generated program does not type: {}", e)))?;
+    let cmr = commit.cmr();
     let stats = Stats { jets: p.stats(), tape_ops: live.iter().filter(|x| **x).count(), msm_terms: msm_terms.len(), witness_points: n_points, witness_scalars: n_scalars };
-    Ok(SimplicityVerifier { text, cmr, n_lin, n_mm, stats })
+    Ok(SimplicityVerifier { term, text: std::sync::OnceLock::new(), cmr, n_lin, n_mm, stats })
 }
 
 /// Tape nodes as IR values, lowered on demand (a node's arguments come before it).

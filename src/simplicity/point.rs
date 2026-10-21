@@ -87,7 +87,7 @@ pub(crate) fn assert_infinity(p: &mut Prog, gej: Val) {
 mod tests {
     use super::*;
     use crate::simplicity::ir::{Op, Prog, Ty};
-    use crate::simplicity::run::{bit_value, dummy_env, execute_text_unbudgeted, word_value};
+    use crate::simplicity::run::{bit_value, dummy_env, execute_term, word_value};
     use k256::elliptic_curve::ff::{Field as _, PrimeField as _};
     use k256::elliptic_curve::sec1::ToEncodedPoint;
     use k256::{AffinePoint, ProjectivePoint, Scalar};
@@ -130,7 +130,7 @@ mod tests {
         let mut w = HashMap::new();
         w.insert(Arc::<str>::from("p0"), point_value(&pp, false));
         w.insert(Arc::<str>::from("p1"), point_value(&qq, flip));
-        execute_text_unbudgeted(&p.to_text(), &w, &dummy_env()).is_ok()
+        execute_term(&p.to_term(), &w, &dummy_env(), false).is_ok()
     }
 
     #[test]
@@ -147,7 +147,7 @@ mod tests {
         p.push(Op::Assert(nz));
         let mut w = HashMap::new();
         w.insert(Arc::<str>::from("s0"), word_value(&bytes));
-        execute_text_unbudgeted(&p.to_text(), &w, &dummy_env()).is_ok()
+        execute_term(&p.to_term(), &w, &dummy_env(), false).is_ok()
     }
 
     #[test]
@@ -182,7 +182,7 @@ mod tests {
                 p.push(Op::Assert(ninf));
                 let mut w = HashMap::new();
                 w.insert(Arc::<str>::from("p0"), point_value(&pt, false));
-                execute_text_unbudgeted(&p.to_text(), &w, &dummy_env()).is_ok()
+                execute_term(&p.to_term(), &w, &dummy_env(), false).is_ok()
             };
             let right = if odd { 0x03 } else { 0x02 };
             assert!(run(right));

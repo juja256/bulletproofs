@@ -61,6 +61,10 @@ pub struct Stats {
     pub witness_points: usize,
     /// Scalars of the proof (witness values).
     pub witness_scalars: usize,
+    /// Steps the program runs (values read several times, checks, terms of the sum).
+    pub steps: usize,
+    /// Σ over steps of the bits kept for later steps (the scheduler's measure of copying).
+    pub live_bits: u64,
 }
 
 fn gadget_err(s: &str) -> R1CSError {
@@ -269,7 +273,7 @@ pub(crate) fn compile_with<R: rand_core::RngCore + rand_core::CryptoRng>(
     let term = p.to_term();
     let commit = term.commit().map_err(|e| gadget_err(&format!("the generated program does not type: {}", e)))?;
     let cmr = commit.cmr();
-    let stats = Stats { jets: p.stats(), tape_ops: live.iter().filter(|x| **x).count(), msm_terms: msm_terms.len(), witness_points: n_points, witness_scalars: n_scalars };
+    let stats = Stats { jets: p.stats(), tape_ops: live.iter().filter(|x| **x).count(), msm_terms: msm_terms.len(), witness_points: n_points, witness_scalars: n_scalars, steps: p.step_count(), live_bits: p.live_bits() };
     Ok(SimplicityVerifier { term, text: std::sync::OnceLock::new(), cmr, n_lin, n_mm, stats })
 }
 

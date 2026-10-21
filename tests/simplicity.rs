@@ -287,3 +287,20 @@ fn proof_of_another_circuit_is_rejected() {
     let sv16 = compile_eq(&V16, 16);
     sv16.execute(&sv16.witness(&proof16).unwrap(), &env).unwrap();
 }
+
+/// Stage 2 is not worse than stage 1 (its measured cost and program size) on the same
+/// circuits: `x · y = 15` and the chains of 2, 4 and 8 gates.
+#[test]
+fn new_backend_not_worse_than_stage1() {
+    let env = dummy_env();
+    let (proof, V) = prove(sighash_of(&env), 1);
+    let sv = compile(&V);
+    let r = sv.execute(&sv.witness(&proof).unwrap(), &env).unwrap();
+    assert!(r.cost_mwu <= 8_412_334 && r.program_bytes <= 16_020, "x·y = 15: {} mWU, {} B", r.cost_mwu, r.program_bytes);
+    for (n, cost, bytes) in [(2, 8_507_765u64, 15_922usize), (4, 13_437_957, 27_152), (8, 22_254_683, 42_004)] {
+        let (p, v) = chain_proof_and_verifier(n, &env);
+        let r = v.execute(&v.witness(&p).unwrap(), &env).unwrap();
+        println!("chain {}: {} mWU (stage 1: {}), {} B (stage 1: {}), steps {}, live bits {}", n, r.cost_mwu, cost, r.program_bytes, bytes, v.stats().steps, v.stats().live_bits);
+        assert!(r.cost_mwu <= cost && r.program_bytes <= bytes, "chain {}", n);
+    }
+}

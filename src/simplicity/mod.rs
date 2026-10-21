@@ -6,6 +6,7 @@ mod compile;
 mod ir;
 mod run;
 mod point;
+mod sched;
 mod sha;
 mod term;
 mod trace;

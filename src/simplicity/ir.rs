@@ -168,9 +168,13 @@ impl Prog {
     }
 
     /// The number of steps the program runs (values read several times or by nobody, checks).
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn step_count(&self) -> usize {
         Lowering::new(self).steps()
+    }
+
+    /// The scheduler's measure: Σ over steps of the bits live after the step.
+    pub(crate) fn live_bits(&self) -> u64 {
+        Lowering::new(self).live_bits
     }
 
     /// The program in the human-readable encoding (an artifact of [`Prog::to_term`]).
@@ -199,8 +203,12 @@ enum Role {
 struct Lowering<'a> {
     p: &'a Prog,
     role: Vec<Role>,
-    /// For a root, the last step that reads it (its own step if none).
+    /// For a root, the last position (in `order`) that reads it (its own if none).
     last_use: Vec<usize>,
+    /// The roots in the order they run.
+    order: Vec<usize>,
+    /// The scheduler's measure: Σ over steps of the live bits.
+    live_bits: u64,
     consts: HashMap<(Ty, Vec<u8>), Term>,
     witnesses: HashMap<Arc<str>, Term>,
 }
@@ -223,7 +231,7 @@ impl<'a> Lowering<'a> {
                 in_branch[y.0 as usize] = true;
             }
         }
-        let role: Vec<Role> = p
+        let mut role: Vec<Role> = p
             .ops
             .iter()
             .enumerate()
@@ -235,27 +243,66 @@ impl<'a> Lowering<'a> {
                 _ => Role::Root,
             })
             .collect();
-        // the step an operation runs at: its own for a root, its reader's for an inline one
-        let mut step = vec![0usize; n];
-        for i in (0..n).rev() {
-            step[i] = match role[i] {
-                Role::Root | Role::Const => i,
-                Role::Inline | Role::InlineWitness => step[reader[i]],
-            };
+        // the accumulator of a multiscalar multiplication is a step per term, so that the
+        // scheduler can put each term right after its coefficient (inlined, the whole sum would
+        // be one expression at the end, keeping every coefficient's inputs alive until then)
+        for (i, o) in p.ops.iter().enumerate() {
+            if let Op::Jet("gej_add", args, _) = o {
+                role[i] = Role::Root;
+                if role[args[0].0 as usize] == Role::Inline {
+                    role[args[0].0 as usize] = Role::Root;
+                }
+            }
         }
-        let mut last_use: Vec<usize> = (0..n).collect();
+        // the root each operation runs in: itself for a root, its reader's for an inline one
+        let mut owner: Vec<usize> = (0..n).collect();
+        for i in (0..n).rev() {
+            if matches!(role[i], Role::Inline | Role::InlineWitness) {
+                owner[i] = owner[reader[i]];
+            }
+        }
+        // the roots' graph: each root reads the roots its expression (with its inlined
+        // arguments) reads
+        let roots: Vec<usize> = (0..n).filter(|i| role[*i] == Role::Root).collect();
+        let mut index = vec![usize::MAX; n];
+        for (k, r) in roots.iter().enumerate() {
+            index[*r] = k;
+        }
+        let mut deps: Vec<Vec<usize>> = vec![Vec::new(); roots.len()];
+        for (i, o) in p.ops.iter().enumerate() {
+            if role[i] == Role::Const {
+                continue;
+            }
+            for a in o.args() {
+                let a = a.0 as usize;
+                if role[a] == Role::Root {
+                    deps[index[owner[i]]].push(index[a]);
+                }
+            }
+        }
+        let bits: Vec<u64> = roots.iter().map(|r| p.tys[*r].as_ref().map_or(0, bits_of)).collect();
+        let graph = crate::simplicity::sched::Graph::new(deps, bits);
+        let sched = crate::simplicity::sched::schedule(&graph);
+        let live_bits = crate::simplicity::sched::live_bits(&graph, &sched);
+        let order: Vec<usize> = sched.into_iter().map(|k| roots[k]).collect();
+        // positions in that order; a root's last use is the last position reading it
+        let mut pos = vec![0usize; n];
+        for (k, r) in order.iter().enumerate() {
+            pos[*r] = k;
+        }
+        let mut last_use: Vec<usize> = (0..n).map(|i| pos[owner[i]]).collect();
         for (i, o) in p.ops.iter().enumerate() {
             for a in o.args() {
                 let a = a.0 as usize;
-                last_use[a] = last_use[a].max(step[i]);
+                last_use[a] = last_use[a].max(pos[owner[i]]);
             }
         }
-        Lowering { p, role, last_use, consts: HashMap::new(), witnesses: HashMap::new() }
+        Lowering { p, role, last_use, order, live_bits, consts: HashMap::new(), witnesses: HashMap::new() }
     }
 
     /// The number of steps (roots).
     fn steps(&self) -> usize {
-        self.role.iter().filter(|r| **r == Role::Root).count()
+        self.order.len()
     }
 
     /// A constant, read from any environment: the constant itself (`1 -> T`) is one shared
@@ -350,12 +397,10 @@ impl<'a> Lowering<'a> {
         let key = |l: &Lowering, v: Val| (l.last_use[v.0 as usize], v);
         let mut env: Vec<Val> = Vec::new();
         let mut steps = Vec::new();
-        for i in 0..self.p.ops.len() {
-            if self.role[i] != Role::Root {
-                continue;
-            }
+        let order = self.order.clone();
+        for (k, &i) in order.iter().enumerate() {
             let v = Val(i as u32);
-            let dead = env.iter().take_while(|x| self.last_use[x.0 as usize] <= i).count();
+            let dead = env.iter().take_while(|x| self.last_use[x.0 as usize] <= k).count();
             let rest: Vec<Val> = env[dead..].to_vec();
             let (step, next) = match &self.p.ops[i] {
                 Op::Assert(b) => {
@@ -365,7 +410,7 @@ impl<'a> Lowering<'a> {
                 }
                 _ => {
                     let e = self.expr(i, &env);
-                    if self.last_use[i] > i {
+                    if self.last_use[i] > k {
                         let pos = rest.iter().take_while(|x| key(&self, **x) < key(&self, v)).count();
                         let mut s = Term::pair(&e, &Self::suffix(dead + pos));
                         for x in rest[..pos].iter().rev() {
@@ -388,6 +433,18 @@ impl<'a> Lowering<'a> {
         // composition is associative: a balanced tree of `comp` keeps the program shallow
         steps.push(Term::unit());
         balanced(&steps)
+    }
+}
+
+/// The bits a value of type `t` takes in the environment.
+pub(crate) fn bits_of(t: &Ty) -> u64 {
+    match t {
+        Ty::Bit => 1,
+        Ty::Word(n) => *n as u64,
+        Ty::Prod(a, b) => bits_of(a) + bits_of(b),
+        Ty::Opt(t) => 1 + bits_of(t),
+        Ty::Ctx => 838,
+        Ty::CtxBuf => 518,
     }
 }
 

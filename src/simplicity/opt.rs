@@ -29,12 +29,14 @@ impl Mono {
     fn constant(c: K) -> Mono {
         Mono { c, f: BTreeMap::new() }
     }
-    fn times(&self, o: &Mono) -> Mono {
+    /// The product; none if an exponent would pass `u64` (the product then stays as it is).
+    fn times(&self, o: &Mono) -> Option<Mono> {
         let mut f = self.f.clone();
         for (a, e) in &o.f {
-            *f.entry(*a).or_insert(0) += e;
+            let x = f.entry(*a).or_insert(0);
+            *x = x.checked_add(*e)?;
         }
-        Mono { c: self.c * o.c, f }
+        Some(Mono { c: self.c * o.c, f })
     }
 }
 
@@ -89,6 +91,11 @@ impl Builder {
     fn konst(&mut self, c: K) -> Val {
         self.push(Op::Const(Ty::word(), c.to_repr().to_vec()))
     }
+    /// Whether `v` is the result of a scalar jet (reduced mod n).
+    fn canonical(&self, v: Val) -> bool {
+        matches!(self.out.ops()[v.index()], Op::Jet("scalar_add" | "scalar_multiply" | "scalar_negate" | "scalar_invert" | "scalar_normalize", ..))
+    }
+
     /// `a^(2^j)` by squaring.
     fn square(&mut self, a: Val, j: u32) -> Val {
         if j == 0 {
@@ -120,7 +127,9 @@ impl Builder {
         }
         match acc {
             None => self.konst(m.c),
-            Some(x) if m.c == K::ONE => x,
+            // a lone atom is the product only if it is a canonical scalar already (the jet
+            // reduces mod n: a witness word or a hash may be above n)
+            Some(x) if m.c == K::ONE && (m.f.len() > 1 || m.f.values().any(|e| *e > 1) || self.canonical(x)) => x,
             Some(x) => {
                 let k = self.konst(m.c);
                 self.mul(x, k)
@@ -158,7 +167,7 @@ fn monomials(p: &Prog) -> Prog {
     }
     for (i, op) in ops.iter().enumerate() {
         if let Op::Jet("scalar_multiply", a, _) = op {
-            let mut m = Mono::constant(K::ONE);
+            let mut m = Some(Mono::constant(K::ONE));
             for x in a {
                 let x = x.index();
                 let f = match (&mono[x], scalar_const(&ops[x])) {
@@ -166,10 +175,13 @@ fn monomials(p: &Prog) -> Prog {
                     (None, Some(c)) => Mono::constant(c),
                     (None, None) => Mono::atom(get(&mut b, &mut built, &mono, x)),
                 };
-                m = m.times(&f);
+                m = m.and_then(|m| m.times(&f));
             }
-            mono[i] = Some(m);
-            continue;
+            if m.is_some() {
+                mono[i] = m;
+                continue;
+            }
+            // an exponent past u64: built as it is, an atom for the products that read it
         }
         let args: Vec<Val> = op.args().iter().map(|a| get(&mut b, &mut built, &mono, a.index())).collect();
         built[i] = Some(b.push(op.with_args(&args)));
@@ -548,5 +560,51 @@ mod tests {
             let (p, _, _) = build(seed, 60, None);
             assert_eq!(format!("{:?}", optimize(&p).ops()), format!("{:?}", optimize(&p).ops()));
         }
+    }
+
+    /// x · 1 of a word that is not a canonical scalar is reduced by the jet: the rewrite must
+    /// keep the product, not return x (review, stage 3).
+    #[test]
+    fn noncanonical_atom_times_one_keeps_the_reduction() {
+        // n + 5
+        let n5 = {
+            let mut b = [0u8; 32];
+            b.copy_from_slice(&(0..64).step_by(2).map(|i| u8::from_str_radix(&"FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364146"[i..i + 2], 16).unwrap()).collect::<Vec<u8>>());
+            b
+        };
+        let build = |expected: &[u8]| {
+            let mut p = Prog::new();
+            let w = p.push(Op::Witness("x".into(), Ty::word()));
+            let one = p.push(Op::Const(Ty::word(), be(&K::ONE)));
+            let m = mul(&mut p, w, one);
+            let k = p.push(Op::Const(Ty::word(), expected.to_vec()));
+            let q = p.push(Op::Jet("eq_256", vec![m, k], Ty::Bit));
+            p.push(Op::Assert(q));
+            p
+        };
+        let w = HashMap::from([(Arc::<str>::from("x"), word_value(&n5))]);
+        let run = |p: &Prog| execute_term(&p.to_term(), &w, &dummy_env(), false).is_ok();
+        let five = be(&K::from(5u64));
+        assert!(run(&build(&five)), "the jet reduces n + 5 to 5");
+        assert!(run(&optimize(&build(&five))));
+        assert!(!run(&build(&n5)));
+        assert!(!run(&optimize(&build(&n5))));
+    }
+
+    /// An exponent past u64 (64 squarings of a square) keeps its value.
+    #[test]
+    fn exponent_overflow_keeps_the_value() {
+        let x = K::from(3u64);
+        let mut p = Prog::new();
+        let w = p.push(Op::Witness("x".into(), Ty::word()));
+        let (mut s, mut e) = (w, x);
+        for _ in 0..65 {
+            s = mul(&mut p, s, s);
+            e = e * e;
+        }
+        check(&mut p, s, e);
+        let wit = HashMap::from([("x", x)]);
+        assert!(eval(&p, &wit).is_ok());
+        assert!(eval(&optimize(&p), &wit).is_ok());
     }
 }

@@ -57,7 +57,8 @@ The compiler traces the crate's own BP++ verifier (`reciprocal::terms`):
   **recomputed** inside each reader. A greedy pass from the last operation back decides, with
   rust-simplicity's costs: recompute when (times it runs) × (its own cost and that of the
   arguments only it reads) is at most (2 × its bits × the steps it would live) + (its reads).
-  A witness run more than once, a transcript state and a hash read from one are always stored.
+  A witness run more than once, a transcript state read more than once and a hash read from a
+  state are always stored.
 - **The multiscalar multiplication is a balanced tree** of `gej_add`; with the coefficients
   recomputed where they are read, the whole sum is one expression over the stored values.
 - **Scheduling.** Steps are ordered to keep few bits alive: on demand from each sink, deepest
@@ -157,9 +158,10 @@ in bpvm, not here: `vm::simplicity::prove` bound the statement to the transcript
 
 **What this says.**
 
-- Every row is now bound by the program's bytes, not its cost: the witness stack is larger than
-  the cost in WU. Up to 512 gates the program fits a standard transaction (400 kWU) with no
-  padding (209 kWU); 1 024 gates need about 430 kWU, so the limit is about 950 gates.
+- Up to 512 gates the weight is set by the program's bytes, not its cost (the witness stack is
+  larger than the cost in WU), and the program fits a standard transaction (400 kWU) with no
+  padding (209 kWU at 512 gates). At 1 024 gates the cost (429.5 M mWU) passes the budget, so the
+  input needs padding to about 430 kWU: the limit is about 950 gates.
 - Recomputation trades copying for computation; on dense circuits (fib) the same value
   recomputed in many steps is written as code in each, since its paths differ step by step.
 - **Comparison with [simple-groth16](https://github.com/BlockstreamResearch/simple-groth16):** its

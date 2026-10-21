@@ -4,6 +4,7 @@
 
 mod ir;
 mod run;
+mod point;
 mod sha;
 
 pub use self::run::{dummy_env, dummy_env_with_output, sighash_of, Env, ExecError, Report};

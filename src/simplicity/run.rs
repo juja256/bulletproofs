@@ -164,14 +164,6 @@ pub(crate) fn execute_text(program: &str, witness: &HashMap<Arc<str>, Value>, en
     execute_forest(&forest, witness, env, true)
 }
 
-/// [`execute_text`] without the budget check: for parts of programs (gadget tests), whose
-/// small witnesses pay for little.
-#[cfg(test)]
-pub(crate) fn execute_text_unbudgeted(program: &str, witness: &HashMap<Arc<str>, Value>, env: &Env) -> Result<Report, ExecError> {
-    let forest = Forest::parse::<Elements>(program).map_err(|e| ExecError::Parse(e.to_string()))?;
-    execute_forest(&forest, witness, env, false)
-}
-
 /// Run a program given as a combinator DAG, as a node would ([`execute_text`]'s checks).
 pub(crate) fn execute_term(t: &crate::simplicity::term::Term, witness: &HashMap<Arc<str>, Value>, env: &Env, budgeted: bool) -> Result<Report, ExecError> {
     types::Context::with_context(|ctx| {

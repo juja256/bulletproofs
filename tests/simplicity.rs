@@ -304,3 +304,28 @@ fn new_backend_not_worse_than_stage1() {
         assert!(r.cost_mwu <= cost && r.program_bytes <= bytes, "chain {}", n);
     }
 }
+
+/// Stage 3 is not worse than stage 2 (its measured cost and program size, 2026-10-21) on the
+/// same circuits: `x · y = 15` and the chains of 2 to 64 gates.
+#[test]
+fn stage3_not_worse_than_stage2() {
+    let env = dummy_env();
+    let (proof, V) = prove(sighash_of(&env), 1);
+    let sv = compile(&V);
+    let r = sv.execute(&sv.witness(&proof).unwrap(), &env).unwrap();
+    println!("x·y = 15: {} mWU (stage 2: 3134520), {} B (stage 2: 6102), data {} mWU", r.cost_mwu, r.program_bytes, r.data_mwu);
+    assert!(r.cost_mwu <= 3_134_520 && r.program_bytes <= 6_102, "x·y = 15");
+    for (n, cost, bytes) in [
+        (2, 3_103_445u64, 6_156usize),
+        (4, 4_051_373, 7_694),
+        (8, 5_478_297, 9_694),
+        (16, 9_675_434, 15_731),
+        (32, 19_483_906, 26_412),
+        (64, 50_551_736, 50_408),
+    ] {
+        let (p, v) = chain_proof_and_verifier(n, &env);
+        let r = v.execute(&v.witness(&p).unwrap(), &env).unwrap();
+        println!("chain {}: {} mWU (stage 2: {}), {} B (stage 2: {}), data {} mWU, steps {}", n, r.cost_mwu, cost, r.program_bytes, bytes, r.data_mwu, v.stats().steps);
+        assert!(r.cost_mwu <= cost && r.program_bytes <= bytes, "chain {}", n);
+    }
+}

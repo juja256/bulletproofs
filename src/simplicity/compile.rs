@@ -147,10 +147,10 @@ pub(crate) fn dummy_proof<R: rand_core::RngCore + rand_core::CryptoRng>(c: &Reci
 
 /// The lowerings the compiler tries; it keeps the lightest program (ties to the first).
 const LOWERINGS: [Options; 4] = [
-    Options { role_passes: 1, hot_cold: false },
-    Options { role_passes: 2, hot_cold: false },
-    Options { role_passes: 1, hot_cold: true },
-    Options { role_passes: 2, hot_cold: true },
+    Options { role_passes: 1, hot_cold: false, small_words: false },
+    Options { role_passes: 2, hot_cold: false, small_words: false },
+    Options { role_passes: 1, hot_cold: true, small_words: false },
+    Options { role_passes: 2, hot_cold: true, small_words: false },
 ];
 
 /// The transcript domain of R1CS proofs on the BP++ backend (as `Verifier::verify_bppp`).
@@ -315,12 +315,27 @@ pub(crate) fn compile_with<R: rand_core::RngCore + rand_core::CryptoRng>(
         if !compressed {
             LAST_STORED.with(|k| *k.borrow_mut() = Some(p.stored_report()));
         }
-        for opts in LOWERINGS {
-            let l = p.lower(&opts);
+        let weigh = |opts: &Options| -> Result<(u64, Lowered), R1CSError> {
+            let l = p.lower(opts);
             let w = weight_of(&l.term, &dummy).map_err(|e| gadget_err(&format!("the generated program does not type: {:?}", e)))?;
-            if best.as_ref().map_or(true, |(b, _)| w < *b) {
-                best = Some((w, l));
+            Ok((w, l))
+        };
+        let mut here: Option<(u64, Lowered, Options)> = None;
+        for opts in LOWERINGS {
+            let (w, l) = weigh(&opts)?;
+            if here.as_ref().map_or(true, |(b, ..)| w < *b) {
+                here = Some((w, l, opts));
             }
+        }
+        // small constant words on this generator mode's best lowering only (they trade a few
+        // nodes run for bytes)
+        let (mut w0, mut l0, opts) = here.expect("a lowering");
+        let (w, l) = weigh(&Options { small_words: true, ..opts })?;
+        if w < w0 {
+            (w0, l0) = (w, l);
+        }
+        if best.as_ref().map_or(true, |(b, _)| w0 < *b) {
+            best = Some((w0, l0));
         }
     }
     let (_, low) = best.expect("a lowering");

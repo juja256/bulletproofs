@@ -296,6 +296,8 @@ struct Lowering<'a> {
     hot_size: usize,
     /// Whether each stored value lives in the hot tree.
     hot: Vec<bool>,
+    /// Words with a zero half built as pairs ([`Options::small_words`]).
+    small_words: bool,
     consts: HashMap<(Ty, Vec<u8>), Term>,
     witnesses: HashMap<Arc<str>, Term>,
     /// The expressions of inlined values built in the current step (they read its slots).
@@ -402,6 +404,7 @@ impl<'a> Lowering<'a> {
             hot_levels,
             hot_size,
             hot,
+            small_words: opts.small_words,
             consts: HashMap::new(),
             witnesses: HashMap::new(),
             cache: HashMap::new(),
@@ -582,7 +585,8 @@ impl<'a> Lowering<'a> {
     /// A constant, read from any environment: the constant itself (`1 -> T`) is one shared
     /// node, the `comp unit` that reads it is per use.
     fn constant(&mut self, t: &Ty, bytes: &[u8]) -> Term {
-        let k = self.consts.entry((t.clone(), bytes.to_vec())).or_insert_with(|| const_term(t, bytes)).clone();
+        let small = self.small_words;
+        let k = self.consts.entry((t.clone(), bytes.to_vec())).or_insert_with(|| const_term(t, bytes, small)).clone();
         Term::comp(&Term::unit(), &k)
     }
 
@@ -793,11 +797,14 @@ pub(crate) struct Options {
     pub(crate) role_passes: usize,
     /// The environment as a small hot tree for the values read most and a cold tree.
     pub(crate) hot_cold: bool,
+    /// Constant words with a zero half as the pair of their halves: fewer bytes for small
+    /// scalars, a few more nodes run per read.
+    pub(crate) small_words: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { role_passes: 1, hot_cold: false }
+        Options { role_passes: 1, hot_cold: false, small_words: false }
     }
 }
 
@@ -872,14 +879,26 @@ fn balanced(steps: &[Term]) -> Term {
     Term::comp(&balanced(&steps[..h]), &balanced(&steps[h..]))
 }
 
+/// A word constant: a word whose high or low half is zero is the pair of its halves, so that a
+/// small scalar takes a few bytes (the zero words are shared) instead of 32.
+fn word_term(bytes: &[u8]) -> Term {
+    let h = bytes.len() / 2;
+    if bytes.len() >= 16 && (bytes[..h].iter().all(|b| *b == 0) || bytes[h..].iter().all(|b| *b == 0)) {
+        Term::pair(&word_term(&bytes[..h]), &word_term(&bytes[h..]))
+    } else {
+        Term::word(bytes)
+    }
+}
+
 /// A constant of type `t` from its bytes (`1 -> T`).
-fn const_term(t: &Ty, bytes: &[u8]) -> Term {
+fn const_term(t: &Ty, bytes: &[u8], small: bool) -> Term {
     match t {
         Ty::Bit => Term::bit(bytes[0] & 1 == 1),
+        Ty::Word(_) if small => word_term(bytes),
         Ty::Word(_) => Term::word(bytes),
         Ty::Prod(a, b) => {
             let n = a.const_bytes();
-            Term::pair(&const_term(a, &bytes[..n]), &const_term(b, &bytes[n..]))
+            Term::pair(&const_term(a, &bytes[..n], small), &const_term(b, &bytes[n..], small))
         }
         Ty::Opt(_) | Ty::Ctx | Ty::CtxBuf => unreachable!(),
     }
@@ -1218,7 +1237,7 @@ mod tests {
         let kt = p.push(Op::Const(Ty::word(), be(&total)));
         let e = p.push(Op::Jet("eq_256", vec![acc, kt], Ty::Bit));
         p.push(Op::Assert(e));
-        let opts = Options { role_passes: 1, hot_cold: true };
+        let opts = Options { role_passes: 1, hot_cold: true, small_words: false };
         let mut w = HashMap::new();
         w.insert(Arc::<str>::from("x"), word_value(&be(&sc(5))));
         for i in 0..20u64 {
@@ -1322,7 +1341,7 @@ pub(crate) mod random_programs {
     fn random_programs_accept_and_every_check_runs() {
         let mut total = 0;
         // every lowering the compiler may pick
-        let all = [(1, false), (2, false), (1, true), (2, true)].map(|(role_passes, hot_cold)| Options { role_passes, hot_cold });
+        let all = [(1, false, false), (2, false, false), (1, true, false), (2, true, true)].map(|(role_passes, hot_cold, small_words)| Options { role_passes, hot_cold, small_words });
         for (k, opts) in all.iter().enumerate() {
             // the default lowering on every seed, the others on a share of them
             for seed in (1..60u64).filter(|s| k == 0 || s % 3 == k as u64 % 3) {

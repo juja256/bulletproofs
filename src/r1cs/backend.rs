@@ -61,7 +61,7 @@ pub(super) use self::bppp_backend::*;
 pub(super) const BPPP_DOMAIN: &[u8] = b"bppp-r1cs v2";
 
 /// BP++ has no second phase of arbitrary randomized constraints (spec §6.1): a gadget that
-/// specified any gets a `GadgetError` (lookups and permutations go through `CircuitBuilder`).
+/// specified any gets a `GadgetError` (lookups and permutations go through `ConstraintSystem::lookup` and `reciprocal`).
 pub(super) fn refuse_randomized(n_deferred: usize) -> Result<(), crate::errors::R1CSError> {
     if n_deferred == 0 {
         Ok(())

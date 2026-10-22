@@ -11,7 +11,8 @@ use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use serde_json::Value;
 
-use super::builder::{CircuitBuilder, Cost, TableId};
+use super::builder::{Cost, TableId};
+use super::ConstraintSystem;
 use super::{Backend, LinearCombination, Prover, R1CSError, Variable, Verifier};
 use crate::bppp::testutil;
 use crate::curve::{Curve, Field, Ristretto};
@@ -45,7 +46,7 @@ fn ints(v: &Value) -> Vec<u64> {
 
 /// Run the program; `commit(cs, v, s)` commits an input. Returns the index and error of the
 /// first failing operation.
-fn run<F: Field, CS: CircuitBuilder<F>>(
+fn run<F: Field, CS: ConstraintSystem<F>>(
     cs: &mut CS,
     program: &[Value],
     prover: bool,
@@ -59,7 +60,7 @@ fn run<F: Field, CS: CircuitBuilder<F>>(
                     commit(cs, testutil::sc(&op["v"]), testutil::sc(&op["s"]));
                 }
                 "multiply" => {
-                    cs.multiply(lc(&op["l"]), lc(&op["r"]));
+                    cs.multiply(lc(&op["l"]), lc(&op["r"]))?;
                 }
                 "allocate" => {
                     cs.allocate(val(op, "v"))?;

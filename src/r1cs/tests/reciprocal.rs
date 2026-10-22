@@ -1,12 +1,12 @@
 use rand::thread_rng;
 use curve25519_dalek::scalar::Scalar;
 use curve25519_dalek::ristretto::CompressedRistretto;
-use bulletproofs::{BulletproofGens, PedersenGens, RangeProof};
+use crate::{BulletproofGens, PedersenGens, RangeProof};
 use merlin::Transcript;
 use std::time::Instant;
-use bulletproofs::r1cs::{ConstraintSystem, LinearCombination, Prover, R1CSProof, RandomizableConstraintSystem, RandomizedConstraintSystem, Variable, Verifier};
-use bulletproofs::r1cs::R1CSError;
-use bulletproofs::curve::Ristretto;
+use crate::r1cs::{ConstraintSystem, LinearCombination, Prover, R1CSProof, RandomizableConstraintSystem, RandomizedConstraintSystem, Variable, Verifier};
+use crate::r1cs::R1CSError;
+use crate::curve::Ristretto;
 
 /// Create a single-value range proof for `value` in [0, 2^nbits).
 /// Returns (proof, commitment, blinding).

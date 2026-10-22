@@ -12,11 +12,10 @@ use super::{
 use crate::curve::Curve;
 use crate::errors::R1CSError;
 use crate::generators::{BulletproofGens, PedersenGens};
-use crate::r1cs::Metrics;
 use crate::transcript::{TranscriptBackend, TranscriptProtocol, TranscriptRef};
 use super::proof::ProofKind;
 use super::proof::BpppProof;
-use super::builder::{self, Builder, CircuitBuilder, Cost, Counts, Reciprocal, TableId};
+use super::builder::{self, Builder, Cost, Counts, Reciprocal, TableId};
 use super::compact::{ConstraintStore, Flattened};
 
 /// A [`ConstraintSystem`] implementation for use by the verifier.
@@ -62,14 +61,8 @@ pub struct Verifier<T: TranscriptRef, C: Curve> {
     witness_base: usize,
 }
 
-/// Verifier in the randomizing phase.
-///
-/// Note: this type is exported because it is used to specify the associated type
-/// in the public impl of a trait `ConstraintSystem`, which boils down to allowing compiler to
-/// monomorphize the closures for the proving and verifying code.
-/// However, this type cannot be instantiated by the user and therefore can only be used within
-/// the callback provided to `specify_randomized_constraints`.
-pub struct RandomizingVerifier<T: TranscriptRef, C: Curve> {
+/// Verifier in the randomizing phase (the second phase of the BP backend).
+pub(crate) struct RandomizingVerifier<T: TranscriptRef, C: Curve> {
     verifier: Verifier<T, C>,
 }
 
@@ -78,26 +71,12 @@ impl<T: TranscriptRef, C: Curve> ConstraintSystem<C::Scalar> for Verifier<T, C> 
         self.transcript.backend()
     }
 
-    fn multiply(
-        &mut self,
-        mut left: LinearCombination<C::Scalar>,
-        mut right: LinearCombination<C::Scalar>,
-    ) -> (Variable, Variable, Variable) {
-        let var = self.num_vars;
-        self.num_vars += 1;
+    fn witness(&mut self, _: Option<C::Scalar>) -> Result<Variable, R1CSError> {
+        Ok(self.builder.witness())
+    }
 
-        // Create variables for l,r,o
-        let l_var = Variable::MultiplierLeft(var);
-        let r_var = Variable::MultiplierRight(var);
-        let o_var = Variable::MultiplierOutput(var);
-
-        // Constrain l,r,o:
-        left.terms.push((l_var, -C::Scalar::ONE));
-        right.terms.push((r_var, -C::Scalar::ONE));
-        self.constrain(left);
-        self.constrain(right);
-
-        (l_var, r_var, o_var)
+    fn multiply(&mut self, left: LinearCombination<C::Scalar>, right: LinearCombination<C::Scalar>) -> Result<Variable, R1CSError> {
+        Ok(self.multiplier(left, right).2)
     }
 
     fn allocate(&mut self, _: Option<C::Scalar>) -> Result<Variable, R1CSError> {
@@ -115,50 +94,21 @@ impl<T: TranscriptRef, C: Curve> ConstraintSystem<C::Scalar> for Verifier<T, C> 
         }
     }
 
-    fn allocate_multiplier(
-        &mut self,
-        _: Option<(C::Scalar, C::Scalar)>,
-    ) -> Result<(Variable, Variable, Variable), R1CSError> {
-        let var = self.num_vars;
-        self.num_vars += 1;
-
-        // Create variables for l,r,o
-        let l_var = Variable::MultiplierLeft(var);
-        let r_var = Variable::MultiplierRight(var);
-        let o_var = Variable::MultiplierOutput(var);
-
-        Ok((l_var, r_var, o_var))
-    }
-
-    fn eval(&self, _: &LinearCombination<C::Scalar>) -> Option<C::Scalar> {
-        None
-    }
-
-    fn metrics(&self) -> Metrics {
-        Metrics {
-            multipliers: self.num_vars,
-            constraints: self.constraints.len() + self.deferred_constraints.len(),
-            phase_one_constraints: self.constraints.len(),
-            phase_two_constraints: self.deferred_constraints.len(),
-        }
-    }
-
-    fn constrain(&mut self, lc: LinearCombination<C::Scalar>) {
-        // TODO: check that the linear combinations are valid
-        // (e.g. that variables are valid, that the linear combination
-        // evals to 0 for prover, etc).
-        self.constraints.push(&lc);
-    }
-}
-
-impl<T: TranscriptRef, C: Curve> CircuitBuilder<C::Scalar> for Verifier<T, C> {
-    fn witness(&mut self, _: Option<C::Scalar>) -> Result<Variable, R1CSError> {
-        Ok(self.builder.witness())
+    fn allocate_multiplier(&mut self, _: Option<(C::Scalar, C::Scalar)>) -> Result<(Variable, Variable, Variable), R1CSError> {
+        Ok(self.free_multiplier())
     }
 
     fn constrain_product(&mut self, l: LinearCombination<C::Scalar>, r: LinearCombination<C::Scalar>, out: LinearCombination<C::Scalar>) -> Result<(), R1CSError> {
         let c = self.counts();
         self.builder.constrain_product(l, r, out, c)
+    }
+
+    fn constrain(&mut self, lc: LinearCombination<C::Scalar>) {
+        self.constraints.push(&lc);
+    }
+
+    fn eval(&self, _: &LinearCombination<C::Scalar>) -> Option<C::Scalar> {
+        None
     }
 
     fn table(&mut self, rows: Vec<Vec<u64>>) -> Result<TableId, R1CSError> {
@@ -172,7 +122,7 @@ impl<T: TranscriptRef, C: Curve> CircuitBuilder<C::Scalar> for Verifier<T, C> {
 
     fn lookup_value(&mut self, t: TableId, v: Option<u64>) -> Result<Variable, R1CSError> {
         self.builder.check_value_table(t)?;
-        let x = CircuitBuilder::witness(self, v.map(C::Scalar::from))?;
+        let x = self.witness(v.map(C::Scalar::from))?;
         self.lookup(t, &[x.into()])?;
         Ok(x)
     }
@@ -208,49 +158,25 @@ impl<T: TranscriptRef, C: Curve> RandomizableConstraintSystem<C::Scalar> for Ver
     }
 }
 
-impl<T: TranscriptRef, C: Curve> ConstraintSystem<C::Scalar> for RandomizingVerifier<T, C> {
-    fn transcript(&mut self) -> &mut dyn TranscriptBackend {
-        self.verifier.transcript.backend()
+impl<T: TranscriptRef, C: Curve> RandomizedConstraintSystem<C::Scalar> for RandomizingVerifier<T, C> {
+    fn multiply(&mut self, l: LinearCombination<C::Scalar>, r: LinearCombination<C::Scalar>) -> (Variable, Variable, Variable) {
+        self.verifier.multiplier(l, r)
     }
 
-    fn multiply(
-        &mut self,
-        left: LinearCombination<C::Scalar>,
-        right: LinearCombination<C::Scalar>,
-    ) -> (Variable, Variable, Variable) {
-        self.verifier.multiply(left, right)
-    }
-
-    fn allocate(&mut self, assignment: Option<C::Scalar>) -> Result<Variable, R1CSError> {
-        self.verifier.allocate(assignment)
-    }
-
-    fn allocate_multiplier(
-        &mut self,
-        input_assignments: Option<(C::Scalar, C::Scalar)>,
-    ) -> Result<(Variable, Variable, Variable), R1CSError> {
-        self.verifier.allocate_multiplier(input_assignments)
-    }
-
-    fn eval(&self, _: &LinearCombination<C::Scalar>) -> Option<C::Scalar> {
-        None    
-    }
-
-    fn metrics(&self) -> Metrics {
-        self.verifier.metrics()
+    fn allocate_multiplier(&mut self, _: Option<(C::Scalar, C::Scalar)>) -> Result<(Variable, Variable, Variable), R1CSError> {
+        Ok(self.verifier.free_multiplier())
     }
 
     fn constrain(&mut self, lc: LinearCombination<C::Scalar>) {
-        self.verifier.constrain(lc)
+        self.verifier.constraints.push(&lc);
     }
-}
 
-impl<T: TranscriptRef, C: Curve> RandomizedConstraintSystem<C::Scalar> for RandomizingVerifier<T, C> {
+    fn eval(&self, _: &LinearCombination<C::Scalar>) -> Option<C::Scalar> {
+        None
+    }
+
     fn challenge_scalar(&mut self, label: &'static [u8]) -> C::Scalar {
-        self.verifier
-            .transcript
-            .backend()
-            .challenge_scalar(label)
+        self.verifier.transcript.backend().challenge_scalar(label)
     }
 }
 
@@ -275,6 +201,24 @@ impl<T: TranscriptRef<Backend = crate::simplicity::CompileTranscript>> Verifier<
 }
 
 impl<T: TranscriptRef, C: Curve> Verifier<T, C> {
+    /// A BP multiplier with `left = l`, `right = r` (two linear constraints); returns
+    /// `(left, right, out)`.
+    fn multiplier(&mut self, mut l: LinearCombination<C::Scalar>, mut r: LinearCombination<C::Scalar>) -> (Variable, Variable, Variable) {
+        let (l_var, r_var, o_var) = self.free_multiplier();
+        l.terms.push((l_var, -C::Scalar::ONE));
+        r.terms.push((r_var, -C::Scalar::ONE));
+        self.constraints.push(&l);
+        self.constraints.push(&r);
+        (l_var, r_var, o_var)
+    }
+
+    /// A BP multiplier with free inputs; returns `(left, right, out)`.
+    fn free_multiplier(&mut self) -> (Variable, Variable, Variable) {
+        let i = self.num_vars;
+        self.num_vars += 1;
+        (Variable::MultiplierLeft(i), Variable::MultiplierRight(i), Variable::MultiplierOutput(i))
+    }
+
     /// Construct an empty constraint system with specified external
     /// input variables.
     ///
@@ -369,8 +313,8 @@ impl<T: TranscriptRef, C: Curve> Verifier<T, C> {
         self.witness_base = self.num_vars;
         self.num_vars += (self.builder.n_w + 1) / 2;
         for (l, r, out) in core::mem::take(&mut self.builder.products) {
-            let (_, _, o) = self.multiply(l, r);
-            self.constrain(o - out);
+            let (_, _, o) = self.multiplier(l, r);
+            self.constraints.push(&(o - out));
         }
         for arg in core::mem::take(&mut self.builder.args) {
             self.specify_randomized_constraints(move |cs| builder::logup(cs, arg))?;

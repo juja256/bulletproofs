@@ -1,5 +1,5 @@
-//! The circuit builder (spec §7): witnesses, products, lookups and reciprocal arguments on top
-//! of [`ConstraintSystem`], recorded independently of the backend and lowered at `prove` /
+//! The circuit builder (spec §7): the record of witnesses, products, lookups and reciprocal
+//! arguments of a [`ConstraintSystem`], independent of the backend and lowered at `prove` /
 //! `verify` to Bulletproofs (§7.5, logUp over randomized constraints) or to a BP++ reciprocal
 //! form circuit (§7.6).
 
@@ -14,7 +14,7 @@ use crate::errors::R1CSError;
 /// 2^12 lookups take 0.8 s sorted, 13 s directly).
 const DIRECT_COUNT_MAX: usize = 1 << 16;
 
-/// A table created by [`CircuitBuilder::table`].
+/// A table created by [`ConstraintSystem::table`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TableId(pub(super) usize);
 
@@ -64,67 +64,31 @@ impl Cost {
 /// A reciprocal argument (spec §7.2): a sum of terms `num / (X + tuple)` over tuples of `m`
 /// components that must vanish as a rational function in `X`, i.e. the terms cancel per
 /// tuple (a multiset equality, a lookup, a permutation). Created by
-/// [`CircuitBuilder::reciprocal`] and recorded at once; each term is validated when it is
+/// [`ConstraintSystem::reciprocal`] and recorded at once; each term is validated when it is
 /// added. An argument without terms adds nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Reciprocal(pub(super) usize);
 
 impl Reciprocal {
     /// Add the term `1 / (X + tuple)`.
-    pub fn add<F: Field, CS: CircuitBuilder<F> + ?Sized>(self, cs: &mut CS, tuple: &[LinearCombination<F>]) -> Result<(), R1CSError> {
+    pub fn add<F: Field, CS: ConstraintSystem<F> + ?Sized>(self, cs: &mut CS, tuple: &[LinearCombination<F>]) -> Result<(), R1CSError> {
         cs.reciprocal_term(self, F::ONE.into(), tuple)
     }
 
     /// Add the term `-1 / (X + tuple)`.
-    pub fn sub<F: Field, CS: CircuitBuilder<F> + ?Sized>(self, cs: &mut CS, tuple: &[LinearCombination<F>]) -> Result<(), R1CSError> {
+    pub fn sub<F: Field, CS: ConstraintSystem<F> + ?Sized>(self, cs: &mut CS, tuple: &[LinearCombination<F>]) -> Result<(), R1CSError> {
         cs.reciprocal_term(self, (-F::ONE).into(), tuple)
     }
 
     /// Add the term `num / (X + tuple)`.
-    pub fn add_weighted<F: Field, CS: CircuitBuilder<F> + ?Sized>(self, cs: &mut CS, num: LinearCombination<F>, tuple: &[LinearCombination<F>]) -> Result<(), R1CSError> {
+    pub fn add_weighted<F: Field, CS: ConstraintSystem<F> + ?Sized>(self, cs: &mut CS, num: LinearCombination<F>, tuple: &[LinearCombination<F>]) -> Result<(), R1CSError> {
         cs.reciprocal_term(self, num, tuple)
     }
 
     /// Add the term `coeff / (X + row)` for a public row.
-    pub fn add_public<F: Field, CS: CircuitBuilder<F> + ?Sized>(self, cs: &mut CS, coeff: LinearCombination<F>, row: &[u64]) -> Result<(), R1CSError> {
+    pub fn add_public<F: Field, CS: ConstraintSystem<F> + ?Sized>(self, cs: &mut CS, coeff: LinearCombination<F>, row: &[u64]) -> Result<(), R1CSError> {
         cs.reciprocal_public(self, coeff, row)
     }
-}
-
-/// Constraint systems that build circuits with lookups and reciprocal arguments (spec §7),
-/// implemented by [`Prover`](super::Prover) and [`Verifier`](super::Verifier) for both
-/// backends. All operations belong to the first phase; every variable they read must exist.
-pub trait CircuitBuilder<F: Field>: ConstraintSystem<F> {
-    /// A free witness (BP: half a multiplier; BP++: a slot of `w_O`, no gate).
-    fn witness(&mut self, v: Option<F>) -> Result<Variable, R1CSError>;
-
-    /// The constraint `l * r = out` (BP: one multiplier and its two linear constraints; BP++: one
-    /// gate). Unlike [`ConstraintSystem::multiply`] it allocates no variables.
-    fn constrain_product(&mut self, l: LinearCombination<F>, r: LinearCombination<F>, out: LinearCombination<F>) -> Result<(), R1CSError>;
-
-    /// A public table: at least one row, all rows of the same length `m >= 1` (the columns).
-    fn table(&mut self, rows: Vec<Vec<u64>>) -> Result<TableId, R1CSError>;
-
-    /// Assert that `tuple` (`m` components) is a row of table `t`, component by component; the
-    /// components may be any field elements (spec §7.3: the backends compress tuples with a
-    /// challenge, so the lookup itself bounds every component).
-    fn lookup(&mut self, t: TableId, tuple: &[LinearCombination<F>]) -> Result<(), R1CSError>;
-
-    /// A witness that is an entry of the one-column table `t`.
-    fn lookup_value(&mut self, t: TableId, v: Option<u64>) -> Result<Variable, R1CSError>;
-
-    /// A new reciprocal argument over tuples of `m >= 1` components; add its terms with the
-    /// methods of [`Reciprocal`].
-    fn reciprocal(&mut self, m: usize) -> Result<Reciprocal, R1CSError>;
-
-    /// Add the term `num / (X + tuple)` to the argument `r` (`tuple` has `m` components).
-    fn reciprocal_term(&mut self, r: Reciprocal, num: LinearCombination<F>, tuple: &[LinearCombination<F>]) -> Result<(), R1CSError>;
-
-    /// Add the term `coeff / (X + row)` for a public row (`m` entries) to the argument `r`.
-    fn reciprocal_public(&mut self, r: Reciprocal, coeff: LinearCombination<F>, row: &[u64]) -> Result<(), R1CSError>;
-
-    /// The cost of the circuit recorded so far.
-    fn cost(&self) -> Cost;
 }
 
 pub(super) fn gadget_error(description: &str) -> R1CSError {

@@ -530,7 +530,7 @@ mod tests {
     use rand_chacha::rand_core::SeedableRng;
 
     fn product<CS: ConstraintSystem<K>>(cs: &mut CS, x: Variable, y: Variable) {
-        let (_, _, o) = cs.multiply(lc(x), lc(y));
+        let o = cs.multiply(lc(x), lc(y)).unwrap();
         cs.constrain(lc(o) - K::from(15u64));
     }
 
@@ -663,14 +663,14 @@ mod tests {
             let mut p = Prover::new(&pc, &mut t);
             p.set_backend(Backend::Bppp);
             let (cx, x) = p.commit(K::from(3u64), K::random(&mut rng));
-            let _ = chain(&mut |a, b| p.multiply(a, b).2, x);
+            let _ = chain(&mut |a, b| p.multiply(a, b).unwrap(), x);
             let proof = p.prove_with_rng(&bp, &mut rng).unwrap();
             let mut ct = CompileTranscript::new(b"chain");
             TranscriptBackend::append_message(&mut ct, SIGHASH_LABEL, &[0u8; 32]);
             let mut v = Verifier::<_, Secp256k1>::new(&mut ct);
             v.set_backend(Backend::Bppp);
             let xv = v.commit(cx);
-            let _ = chain(&mut |a, b| v.multiply(a, b).2, xv);
+            let _ = chain(&mut |a, b| v.multiply(a, b).unwrap(), xv);
             crate::simplicity::ir::PATH_STATS.with(|c| *c.borrow_mut() = (0, 0));
             let sv = v.compile_to_simplicity(&pc, &bp).unwrap();
             let (reads, depth) = crate::simplicity::ir::PATH_STATS.with(|c| *c.borrow());
@@ -721,14 +721,14 @@ mod tests {
 
     enum Circ { Product, Chain(usize), Table(u64, u64) }
 
-    fn circuit<CS: crate::r1cs::CircuitBuilder<K>>(cs: &mut CS, c: &Circ, xs: &[Variable], prover: bool) {
+    fn circuit<CS: crate::r1cs::ConstraintSystem<K>>(cs: &mut CS, c: &Circ, xs: &[Variable], prover: bool) {
         match c {
             Circ::Product => product(cs, xs[0], xs[1]),
             Circ::Chain(n) => {
                 let mut last = K::from(3u64);
                 let mut v = lc(xs[0]);
                 for _ in 0..*n {
-                    let (_, _, o) = cs.multiply(v, lc(xs[0]));
+                    let o = cs.multiply(v, lc(xs[0])).unwrap();
                     v = lc(o);
                     last *= K::from(3u64);
                 }

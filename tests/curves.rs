@@ -181,13 +181,13 @@ mod identity {
         let mut prover = Prover::new(&pc, &mut t);
         let (cx, x) = prover.commit(C::Scalar::from(3u64), C::Scalar::from(5u64));
         let (cy, y) = prover.commit(C::Scalar::from(4u64), C::Scalar::from(6u64));
-        let (_, _, o) = prover.multiply(x.into(), y.into());
+        let o = prover.multiply(x.into(), y.into()).unwrap();
         prover.constrain(o - C::Scalar::from(12u64));
         let proof = R1CSProof::<C>::from_bytes(&prover.prove(&bp).unwrap().to_bytes()).unwrap();
         let mut t = Transcript::new(b"one phase");
         let mut verifier = Verifier::<_, C>::new(&mut t);
         let (x, y) = (verifier.commit(cx), verifier.commit(cy));
-        let (_, _, o) = verifier.multiply(x.into(), y.into());
+        let o = verifier.multiply(x.into(), y.into()).unwrap();
         verifier.constrain(o - C::Scalar::from(12u64));
         verifier.verify(&proof, &pc, &bp).unwrap();
     }
@@ -315,7 +315,7 @@ mod malformed {
             prover.set_backend(backend);
             let (cx, x) = prover.commit(Scalar::from(3u64), Scalar::random(&mut rng));
             let (cy, y) = prover.commit(Scalar::from(4u64), Scalar::random(&mut rng));
-            let (_, _, o) = prover.multiply(x.into(), y.into());
+            let o = prover.multiply(x.into(), y.into()).unwrap();
             prover.constrain(o - Scalar::from(12u64));
             let bytes = prover.prove(&bp).unwrap().to_bytes();
             let first = if backend == Backend::Bp { 1 } else { 17 };
@@ -328,7 +328,7 @@ mod malformed {
                 let mut verifier = Verifier::<_, C>::new(&mut t);
                 verifier.set_backend(backend);
                 let (x, y) = (verifier.commit(cx), verifier.commit(cy));
-                let (_, _, o) = verifier.multiply(x.into(), y.into());
+                let o = verifier.multiply(x.into(), y.into()).unwrap();
                 verifier.constrain(o - Scalar::from(12u64));
                 verifier.verify(&proof, &pc, &bp).is_ok()
             });
@@ -372,7 +372,7 @@ mod bound_to_curve {
         prover.set_backend(backend);
         let (_, x) = prover.commit(C::Scalar::from(3u64), C::Scalar::from(5u64));
         let (_, y) = prover.commit(C::Scalar::from(4u64), C::Scalar::from(6u64));
-        let (_, _, o) = prover.multiply(x.into(), y.into());
+        let o = prover.multiply(x.into(), y.into()).unwrap();
         prover.constrain(o - C::Scalar::from(12u64));
         prover.prove(&bp).unwrap().to_bytes()
     }

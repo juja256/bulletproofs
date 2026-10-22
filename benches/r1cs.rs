@@ -27,51 +27,24 @@ use rand::seq::SliceRandom;
 use rand::Rng;
 use bulletproofs::curve::Ristretto;
 
-// Shuffle gadget (documented in markdown file)
+// Shuffle gadget
 
 /// A proof-of-shuffle.
 struct ShuffleProof(R1CSProof<Ristretto>);
 
 impl ShuffleProof {
-    fn gadget<CS: RandomizableConstraintSystem<Scalar>>(
-        cs: &mut CS,
-        x: Vec<Variable>,
-        y: Vec<Variable>,
-    ) -> Result<(), R1CSError> {
+    /// `y` is a permutation of `x`: a reciprocal argument (on BP, logUp over randomized
+    /// constraints), sum 1/(X + x_i) - sum 1/(X + y_i) = 0.
+    fn gadget<CS: ConstraintSystem<Scalar>>(cs: &mut CS, x: Vec<Variable>, y: Vec<Variable>) -> Result<(), R1CSError> {
         assert_eq!(x.len(), y.len());
-        let k = x.len();
-
-        if k == 1 {
-            cs.constrain(y[0] - x[0]);
-            return Ok(());
+        let arg = cs.reciprocal(1)?;
+        for v in &x {
+            arg.add(cs, &[(*v).into()])?;
         }
-
-        cs.specify_randomized_constraints(move |cs| {
-            let z = cs.challenge_scalar(b"shuffle challenge");
-
-            // Make last x multiplier for i = k-1 and k-2
-            let (_, _, last_mulx_out) = cs.multiply(x[k - 1] - z, x[k - 2] - z);
-
-            // Make multipliers for x from i == [0, k-3]
-            let first_mulx_out = (0..k - 2).rev().fold(last_mulx_out, |prev_out, i| {
-                let (_, _, o) = cs.multiply(prev_out.into(), x[i] - z);
-                o
-            });
-
-            // Make last y multiplier for i = k-1 and k-2
-            let (_, _, last_muly_out) = cs.multiply(y[k - 1] - z, y[k - 2] - z);
-
-            // Make multipliers for y from i == [0, k-3]
-            let first_muly_out = (0..k - 2).rev().fold(last_muly_out, |prev_out, i| {
-                let (_, _, o) = cs.multiply(prev_out.into(), y[i] - z);
-                o
-            });
-
-            // Constrain last x mul output and last y mul output to be equal
-            cs.constrain(first_mulx_out - first_muly_out);
-
-            Ok(())
-        })
+        for v in &y {
+            arg.sub(cs, &[(*v).into()])?;
+        }
+        Ok(())
     }
 }
 

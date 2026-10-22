@@ -4,7 +4,7 @@
 
 use bulletproofs::curve::{Curve, Field, Ristretto};
 use bulletproofs::r1cs::{
-    Backend, CircuitBuilder, ConstraintSystem, LinearCombination, Prover, R1CSError, R1CSProof, TableId, Variable,
+    Backend, ConstraintSystem, LinearCombination, Prover, R1CSError, R1CSProof, TableId, Variable,
     Verifier,
 };
 use bulletproofs::{BulletproofGens, PedersenGens};
@@ -18,14 +18,14 @@ struct Tables {
     xor: TableId,
 }
 
-fn tables<F: Field, CS: CircuitBuilder<F>>(cs: &mut CS) -> Result<Tables, R1CSError> {
+fn tables<F: Field, CS: ConstraintSystem<F>>(cs: &mut CS) -> Result<Tables, R1CSError> {
     let byte = cs.table((0..256u64).map(|x| vec![x]).collect())?;
     let xor = cs.table((0..256u64).map(|x| vec![x >> 4, x & 15, (x >> 4) ^ (x & 15)]).collect())?;
     Ok(Tables { byte, xor })
 }
 
 /// `x < 2^16`: two byte lookups. `v` is the prover's value (`None` for the verifier).
-fn range16<F: Field, CS: CircuitBuilder<F>>(cs: &mut CS, t: &Tables, x: LinearCombination<F>, v: Option<u64>) -> Result<(), R1CSError> {
+fn range16<F: Field, CS: ConstraintSystem<F>>(cs: &mut CS, t: &Tables, x: LinearCombination<F>, v: Option<u64>) -> Result<(), R1CSError> {
     let lo = cs.lookup_value(t.byte, v.map(|v| v & 0xff))?;
     let hi = cs.lookup_value(t.byte, v.map(|v| v >> 8))?;
     cs.constrain(x - lo - hi * F::from(256u64));
@@ -34,7 +34,7 @@ fn range16<F: Field, CS: CircuitBuilder<F>>(cs: &mut CS, t: &Tables, x: LinearCo
 
 /// `z = x ^ y` for nibbles: one lookup of the tuple `(x, y, z)`. No range checks of `x`, `y`,
 /// `z` are needed: the lookup proves that the tuple is a row, component by component.
-fn xor4<F: Field, CS: CircuitBuilder<F>>(cs: &mut CS, t: &Tables, x: Variable, y: Variable, v: Option<(u64, u64)>) -> Result<Variable, R1CSError> {
+fn xor4<F: Field, CS: ConstraintSystem<F>>(cs: &mut CS, t: &Tables, x: Variable, y: Variable, v: Option<(u64, u64)>) -> Result<Variable, R1CSError> {
     let z = cs.witness(v.map(|(a, b)| F::from(a ^ b)))?;
     cs.lookup(t.xor, &[x.into(), y.into(), z.into()])?;
     Ok(z)
@@ -42,7 +42,7 @@ fn xor4<F: Field, CS: CircuitBuilder<F>>(cs: &mut CS, t: &Tables, x: Variable, y
 
 /// `output` is a permutation of `input` (a multiset equality): one reciprocal argument,
 /// `sum 1/(X + x) - sum 1/(X + y) = 0`.
-fn shuffle<F: Field, CS: CircuitBuilder<F>>(cs: &mut CS, input: &[Variable], output: &[Variable]) -> Result<(), R1CSError> {
+fn shuffle<F: Field, CS: ConstraintSystem<F>>(cs: &mut CS, input: &[Variable], output: &[Variable]) -> Result<(), R1CSError> {
     let arg = cs.reciprocal(1)?;
     for x in input {
         arg.add(cs, &[(*x).into()])?;
@@ -53,16 +53,17 @@ fn shuffle<F: Field, CS: CircuitBuilder<F>>(cs: &mut CS, input: &[Variable], out
     Ok(())
 }
 
-/// An upstream gadget, written against `ConstraintSystem` only: `x * y = z` for a public `z`.
-fn product_is<F: Field, CS: ConstraintSystem<F>>(cs: &mut CS, x: Variable, y: Variable, z: u64) {
-    let (_, _, xy) = cs.multiply(x.into(), y.into());
+/// `x * y = z` for a public `z`.
+fn product_is<F: Field, CS: ConstraintSystem<F>>(cs: &mut CS, x: Variable, y: Variable, z: u64) -> Result<(), R1CSError> {
+    let xy = cs.multiply(x.into(), y.into())?;
     cs.constrain(xy - F::from(z));
+    Ok(())
 }
 
 /// The statement: the committed `a`, `b` are below `2^16`; the prover knows nibbles `p`, `q`
 /// with `p ^ q = 9` and a permutation `(c, d)` of `(a, b)` with `c * d = product`.
 /// `secret` is the prover's `(a, b, p, q)`.
-fn statement<F: Field, CS: CircuitBuilder<F>>(cs: &mut CS, ab: [Variable; 2], product: u64, secret: Option<[u64; 4]>) -> Result<(), R1CSError> {
+fn statement<F: Field, CS: ConstraintSystem<F>>(cs: &mut CS, ab: [Variable; 2], product: u64, secret: Option<[u64; 4]>) -> Result<(), R1CSError> {
     let t = tables(cs)?;
     range16(cs, &t, ab[0].into(), secret.map(|s| s[0]))?;
     range16(cs, &t, ab[1].into(), secret.map(|s| s[1]))?;
@@ -74,7 +75,7 @@ fn statement<F: Field, CS: CircuitBuilder<F>>(cs: &mut CS, ab: [Variable; 2], pr
     let c = cs.witness(secret.map(|s| F::from(s[1])))?;
     let d = cs.witness(secret.map(|s| F::from(s[0])))?;
     shuffle(cs, &ab, &[c, d])?;
-    product_is(cs, c, d, product);
+    product_is(cs, c, d, product)?;
     Ok(())
 }
 

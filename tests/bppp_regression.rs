@@ -5,7 +5,7 @@
 #![allow(non_snake_case)]
 
 use bulletproofs::bppp::{self, ArithmeticCircuit, BpppGens, CircuitWitness, MactEntry, MactStatement, RangeStatement, Slot, SparseMatrix};
-use bulletproofs::r1cs::{Backend, CircuitBuilder, ConstraintSystem, LinearCombination, Prover, Variable};
+use bulletproofs::r1cs::{Backend, ConstraintSystem, LinearCombination, Prover, Variable};
 use bulletproofs::{BulletproofGens, PedersenGens};
 use curve25519_dalek::scalar::Scalar;
 use merlin::Transcript;
@@ -99,7 +99,7 @@ fn r1cs_proof(builder: bool) -> Vec<u8> {
     p.set_backend(Backend::Bppp);
     let (_, x) = p.commit(Scalar::from(0xbeefu64), Scalar::from(9u64));
     let (_, y) = p.commit(Scalar::from(3u64), Scalar::from(10u64));
-    let (_, _, o) = p.multiply(x.into(), y.into());
+    let o = p.multiply(x.into(), y.into()).unwrap();
     p.constrain(o - Scalar::from(3 * 0xbeefu64));
     if builder {
         let byte = p.table((0..256u64).map(|v| vec![v]).collect()).unwrap();

@@ -6,13 +6,14 @@ mod builder;
 mod compact;
 mod constraint_system;
 mod linear_combination;
-mod metrics;
 mod oblivious;
 mod proof;
 mod prover;
 mod verifier;
 #[cfg(test)]
 mod soundness;
+#[cfg(test)]
+mod tests;
 #[cfg(test)]
 mod vectors;
 
@@ -22,12 +23,10 @@ pub use self::backend::{Backend, UnknownBackend};
 pub mod cheats;
 #[cfg(not(feature = "cheats"))]
 pub(crate) mod cheats;
-pub use self::builder::{CircuitBuilder, Cost, Reciprocal, TableId};
-pub use self::constraint_system::{
-    ConstraintSystem, RandomizableConstraintSystem, RandomizedConstraintSystem,
-};
+pub use self::builder::{Cost, Reciprocal, TableId};
+pub use self::constraint_system::ConstraintSystem;
+pub(crate) use self::constraint_system::{RandomizableConstraintSystem, RandomizedConstraintSystem};
 pub use self::linear_combination::{lc, LinearCombination, Variable};
-pub use self::metrics::Metrics;
 pub use self::proof::R1CSProof;
 pub use self::prover::Prover;
 pub use self::verifier::Verifier;

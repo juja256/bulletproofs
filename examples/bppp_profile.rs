@@ -13,7 +13,7 @@
 use std::time::Instant;
 
 use bulletproofs::bppp::{self, ArithmeticCircuit, BpppGens, CircuitWitness, Slot, SparseMatrix, WnlaStatement};
-use bulletproofs::r1cs::{Backend, CircuitBuilder, ConstraintSystem, LinearCombination, Prover, R1CSError, Variable, Verifier};
+use bulletproofs::r1cs::{Backend, ConstraintSystem, LinearCombination, Prover, R1CSError, Variable, Verifier};
 use bulletproofs::{BulletproofGens, PedersenGens};
 use curve25519_dalek::ristretto::RistrettoPoint;
 use curve25519_dalek::scalar::Scalar;
@@ -101,7 +101,7 @@ fn r1cs<CS: ConstraintSystem<Scalar>>(cs: &mut CS, g: &Gates, prover: bool) {
     }
 }
 
-fn range32<CS: CircuitBuilder<Scalar>>(cs: &mut CS, vars: &[Variable], vals: Option<&[u64]>) -> Result<(), R1CSError> {
+fn range32<CS: ConstraintSystem<Scalar>>(cs: &mut CS, vars: &[Variable], vals: Option<&[u64]>) -> Result<(), R1CSError> {
     let byte = cs.table((0..256u64).map(|x| vec![x]).collect())?;
     for (i, x) in vars.iter().enumerate() {
         let mut sum = LinearCombination::default();

@@ -18,7 +18,7 @@ use rand_chacha::rand_core::SeedableRng;
 fn chain<CS: ConstraintSystem<Scalar>>(cs: &mut CS, x: Variable, n: usize, last: Scalar) {
     let mut v = lc(x);
     for _ in 0..n {
-        let (_, _, o) = cs.multiply(v, lc(x));
+        let o = cs.multiply(v, lc(x)).unwrap();
         v = lc(o);
     }
     cs.constrain(v - last);

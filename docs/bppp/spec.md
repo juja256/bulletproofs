@@ -654,7 +654,8 @@ lowering, and a proof of the other backend.
 ## 7. The circuit builder (both backends)
 
 `CircuitBuilder` extends `ConstraintSystem` (which is unchanged) with free witnesses, products,
-lookups into public tables and general reciprocal arguments. It is implemented by `Prover` and
+lookups into public tables and general reciprocal arguments. *(2026-10-22: `CircuitBuilder` was merged into
+`ConstraintSystem`, the one trait of gadgets; randomized constraints became crate-internal.)* It is implemented by `Prover` and
 `Verifier`; a gadget is written once and proven with either backend. The builder only *records*
 its operations; at `prove`/`verify` the record is finalized (§7.4) and lowered either to an R1CS
 for Bulletproofs (§7.5) or to a reciprocal form circuit for BP++ (§7.6). Prover and verifier run

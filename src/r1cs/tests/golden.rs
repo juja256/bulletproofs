@@ -3,17 +3,15 @@
 //! parallelism optimisations of the prover and the inner-product argument, which must not
 //! change any value of the protocol.
 //!
-//! `cargo test --release --test golden` (also with `parallel`); the
-//! range-proof vector is checked without `yoloproofs` as well.
+//! `cargo test --release --lib r1cs::tests::golden` (also with `parallel`).
 
-#![allow(non_snake_case)]
 
-use bulletproofs::r1cs::*;
-use bulletproofs::{BulletproofGens, PedersenGens, RangeProof};
+use crate::r1cs::*;
+use crate::{BulletproofGens, PedersenGens, RangeProof};
 use curve25519_dalek::scalar::Scalar;
 use merlin::Transcript;
 use rand_core::{CryptoRng, RngCore};
-use bulletproofs::curve::Ristretto;
+use crate::curve::Ristretto;
 
 /// A fixed "RNG" (64-bit LCG) — for test vectors only.
 struct FixedRng(u64);
@@ -50,14 +48,14 @@ fn shuffle<CS: RandomizableConstraintSystem<Scalar>>(cs: &mut CS, x: Vec<Variabl
     }
     cs.specify_randomized_constraints(move |cs| {
         let z = cs.challenge_scalar(b"shuffle challenge");
-        let (_, _, last_mulx_out) = cs.multiply(x[k - 1] - z, x[k - 2] - z);
+        let last_mulx_out = cs.multiply(x[k - 1] - z, x[k - 2] - z).2;
         let first_mulx_out = (0..k - 2).rev().fold(last_mulx_out, |prev_out, i| {
-            let (_, _, o) = cs.multiply(prev_out.into(), x[i] - z);
+            let o = cs.multiply(prev_out.into(), x[i] - z).2;
             o
         });
-        let (_, _, last_muly_out) = cs.multiply(y[k - 1] - z, y[k - 2] - z);
+        let last_muly_out = cs.multiply(y[k - 1] - z, y[k - 2] - z).2;
         let first_muly_out = (0..k - 2).rev().fold(last_muly_out, |prev_out, i| {
-            let (_, _, o) = cs.multiply(prev_out.into(), y[i] - z);
+            let o = cs.multiply(prev_out.into(), y[i] - z).2;
             o
         });
         cs.constrain(first_mulx_out - first_muly_out);

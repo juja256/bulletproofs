@@ -31,7 +31,7 @@ enum Fault {
     Linear,
 }
 
-fn gadget<CS: CircuitBuilder<Scalar>>(cs: &mut CS, fault: Fault, prover: bool) -> Result<(), R1CSError> {
+fn gadget<CS: ConstraintSystem<Scalar>>(cs: &mut CS, fault: Fault, prover: bool) -> Result<(), R1CSError> {
     let v = |x: u64| if prover { Some(Scalar::from(x)) } else { None };
     let byte = cs.table((0..256u64).map(|x| vec![x]).collect())?;
     let b = cs.witness(v(if matches!(fault, Fault::Lookup) { 256 } else { 17 }))?;
@@ -44,7 +44,7 @@ fn gadget<CS: CircuitBuilder<Scalar>>(cs: &mut CS, fault: Fault, prover: bool) -
     let y = cs.witness(v(4))?;
     let x = cs.witness(v(if matches!(fault, Fault::Linear) { 9 } else { 8 }))?;
     cs.constrain(Lc::from(x) - y * Scalar::from(2u64));
-    let (_, _, o) = cs.multiply(b.into(), y.into());
+    let o = cs.multiply(b.into(), y.into()).unwrap();
     cs.constrain(o - Lc::from(b) * Scalar::from(4u64));
     Ok(())
 }

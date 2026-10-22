@@ -18,7 +18,7 @@ use bulletproofs::curve::Ristretto;
 /// decomposition (`b (1 - b) = 0`, `sum 2^i b_i = v`), plus one lone `allocate()` that leaves a
 /// pending multiplier, constrained to 3.
 fn gadget<CS: ConstraintSystem<Scalar>>(cs: &mut CS, vars: &[Variable], bits: Option<u64>, n: usize) -> Result<(), R1CSError> {
-    let (_, _, o) = cs.multiply(vars[0].into(), vars[1].into());
+    let o = cs.multiply(vars[0].into(), vars[1].into()).unwrap();
     cs.constrain(o - vars[2]);
     let mut sum = LinearCombination::default();
     let mut pow = Scalar::ONE;
@@ -173,52 +173,6 @@ fn no_commitments_and_no_multipliers() {
     let (x, y) = (verifier.commit(a), verifier.commit(b));
     verifier.constrain(x - y);
     verifier.verify(&proof, &pc, &bp).unwrap();
-}
-
-/// Randomized constraints cannot run on BP++ (the challenge would sit between `C_O` and
-/// `C_R`, where right wires are unbound); both sides return a gadget error.
-#[test]
-fn randomized_constraints_need_bp() {
-    let pc = PedersenGens::<Ristretto>::default();
-    let bp = BulletproofGens::new(16, 1);
-    let mut t = Transcript::new(b"rand");
-    let mut prover = Prover::new(&pc, &mut t);
-    prover.set_backend(Backend::Bppp);
-    let (_, x) = prover.commit(Scalar::from(4u64), Scalar::from(1u64));
-    prover
-        .specify_randomized_constraints(move |cs| {
-            let z = cs.challenge_scalar(b"z");
-            let (l, _, o) = cs.multiply(x - z, x - z);
-            cs.constrain(o - l * Scalar::from(2u64) + l);
-            Ok(())
-        })
-        .unwrap();
-    match prover.prove(&bp) {
-        Err(R1CSError::GadgetError { .. }) => {}
-        other => panic!("expected a gadget error, got {:?}", other.map(|_| ())),
-    }
-    // the verifier refuses too: otherwise a proof of the circuit without the randomized part
-    // would pass for a statement that also has it (found in review)
-    let mut t = Transcript::new(b"rand");
-    let mut prover = Prover::new(&pc, &mut t);
-    prover.set_backend(Backend::Bppp);
-    let (vx, _) = prover.commit(Scalar::from(4u64), Scalar::from(1u64));
-    let proof = prover.prove(&bp).unwrap();
-    let mut t = Transcript::new(b"rand");
-    let mut verifier = Verifier::new(&mut t);
-    verifier.set_backend(Backend::Bppp);
-    let x = verifier.commit(vx);
-    verifier
-        .specify_randomized_constraints(move |cs| {
-            let z = cs.challenge_scalar(b"z");
-            cs.constrain(x - z);
-            Ok(())
-        })
-        .unwrap();
-    match verifier.verify(&proof, &pc, &bp) {
-        Err(R1CSError::GadgetError { .. }) => {}
-        other => panic!("expected a gadget error, got {:?}", other),
-    }
 }
 
 #[test]

@@ -28,7 +28,7 @@ struct Tables {
     xor: TableId,
 }
 
-fn tables<CS: CircuitBuilder<Scalar>>(cs: &mut CS) -> Result<Tables, R1CSError> {
+fn tables<CS: ConstraintSystem<Scalar>>(cs: &mut CS) -> Result<Tables, R1CSError> {
     let byte = cs.table((0..256u64).map(|x| vec![x]).collect())?;
     let nib = cs.table((0..16u64).map(|x| vec![x]).collect())?;
     let xor = cs.table((0..256u64).map(|x| vec![x >> 4, x & 15, (x >> 4) ^ (x & 15)]).collect())?;
@@ -36,7 +36,7 @@ fn tables<CS: CircuitBuilder<Scalar>>(cs: &mut CS) -> Result<Tables, R1CSError> 
 }
 
 /// `x < 2^32`: four bytes from the byte table, `x = sum 256^i b_i`.
-fn range32<CS: CircuitBuilder<Scalar>>(cs: &mut CS, t: &Tables, x: Lc, value: Option<u64>) -> Result<Vec<Variable>, R1CSError> {
+fn range32<CS: ConstraintSystem<Scalar>>(cs: &mut CS, t: &Tables, x: Lc, value: Option<u64>) -> Result<Vec<Variable>, R1CSError> {
     let mut sum = Lc::default();
     let mut bytes = Vec::new();
     for i in 0..4 {
@@ -49,7 +49,7 @@ fn range32<CS: CircuitBuilder<Scalar>>(cs: &mut CS, t: &Tables, x: Lc, value: Op
 }
 
 /// Nibbles of a byte, from the nibble table.
-fn nibbles<CS: CircuitBuilder<Scalar>>(cs: &mut CS, t: &Tables, byte: Variable, value: Option<u64>) -> Result<(Variable, Variable), R1CSError> {
+fn nibbles<CS: ConstraintSystem<Scalar>>(cs: &mut CS, t: &Tables, byte: Variable, value: Option<u64>) -> Result<(Variable, Variable), R1CSError> {
     let nib = t.nib;
     let hi = cs.lookup_value(nib, value.map(|v| v >> 4))?;
     let lo = cs.lookup_value(nib, value.map(|v| v & 15))?;
@@ -58,7 +58,7 @@ fn nibbles<CS: CircuitBuilder<Scalar>>(cs: &mut CS, t: &Tables, byte: Variable, 
 }
 
 /// `z = x ^ y` for bytes, nibble by nibble through the XOR table; returns `z`.
-fn xor8<CS: CircuitBuilder<Scalar>>(cs: &mut CS, t: &Tables, x: Variable, y: Variable, v: Option<(u64, u64)>) -> Result<Variable, R1CSError> {
+fn xor8<CS: ConstraintSystem<Scalar>>(cs: &mut CS, t: &Tables, x: Variable, y: Variable, v: Option<(u64, u64)>) -> Result<Variable, R1CSError> {
     let (xh, xl) = nibbles(cs, t, x, v.map(|v| v.0))?;
     let (yh, yl) = nibbles(cs, t, y, v.map(|v| v.1))?;
     let nib = t.nib;
@@ -73,7 +73,7 @@ fn xor8<CS: CircuitBuilder<Scalar>>(cs: &mut CS, t: &Tables, x: Variable, y: Var
 
 /// A memory permutation: the multiset of `(address, value)` writes equals that of the reads,
 /// with addresses and values bytes.
-fn memory<CS: CircuitBuilder<Scalar>>(cs: &mut CS, t: &Tables, writes: &[(u64, u64)], reads: Option<&[(u64, u64)]>, n: usize) -> Result<(), R1CSError> {
+fn memory<CS: ConstraintSystem<Scalar>>(cs: &mut CS, t: &Tables, writes: &[(u64, u64)], reads: Option<&[(u64, u64)]>, n: usize) -> Result<(), R1CSError> {
     let arg = cs.reciprocal(2)?;
     for i in 0..n {
         let w = writes.get(i).copied();
@@ -92,7 +92,7 @@ fn memory<CS: CircuitBuilder<Scalar>>(cs: &mut CS, t: &Tables, writes: &[(u64, u
 
 /// A MACT-style balance: committed `(amount, asset type)` pairs, `sum_in a/(X + t) - sum_out
 /// a/(X + t) = 0`, every output amount below `2^32` (`range32`).
-fn balance<CS: CircuitBuilder<Scalar>>(cs: &mut CS, t: &Tables, ins: &[(Variable, Variable)], outs: &[(Variable, Variable)], out_amounts: Option<&[u64]>) -> Result<(), R1CSError> {
+fn balance<CS: ConstraintSystem<Scalar>>(cs: &mut CS, t: &Tables, ins: &[(Variable, Variable)], outs: &[(Variable, Variable)], out_amounts: Option<&[u64]>) -> Result<(), R1CSError> {
     let arg = cs.reciprocal(1)?;
     for (a, ty) in ins {
         arg.add_weighted(cs, (*a).into(), &[(*ty).into()])?;
@@ -114,7 +114,7 @@ struct Private {
 }
 
 /// All four gadgets in one statement.
-fn statement<CS: CircuitBuilder<Scalar>>(cs: &mut CS, V: &[Variable], p: Option<&Private>, x: Option<u64>) -> Result<(), R1CSError> {
+fn statement<CS: ConstraintSystem<Scalar>>(cs: &mut CS, V: &[Variable], p: Option<&Private>, x: Option<u64>) -> Result<(), R1CSError> {
     let t = tables(cs)?;
     // range32 of a committed value
     range32(cs, &t, V[0].into(), x)?;
@@ -236,7 +236,7 @@ fn proofs_of_one_backend_do_not_verify_with_the_other() {
 /// A small statement exercising the copies of §7.6: numerators and public coefficients that
 /// read `MultiplierRight` (the right wire of `allocate`), tuple components on `w_L` and `w_R`,
 /// constants in coefficients, a product with constants.
-fn copies<CS: CircuitBuilder<Scalar>>(cs: &mut CS, V: &[Variable], p: Option<[u64; 3]>) -> Result<(), R1CSError> {
+fn copies<CS: ConstraintSystem<Scalar>>(cs: &mut CS, V: &[Variable], p: Option<[u64; 3]>) -> Result<(), R1CSError> {
     let s = |x: u64| Scalar::from(x);
     let a = cs.allocate(p.map(|p| s(p[0])))?; // MultiplierLeft(0)
     let b = cs.allocate(p.map(|p| s(p[1])))?; // MultiplierRight(0)
@@ -328,17 +328,7 @@ fn bppp_builder_rules() {
     let g = |cs: &mut Prover<&mut Transcript, Ristretto>, x: Variable| copies(cs, &[x], Some([2, 5, 18]));
     let gv = |cs: &mut Verifier<&mut Transcript, Ristretto>, x: Variable| copies(cs, &[x], None);
     let (proof, V, _) = prove_small(b, 4, g).unwrap();
-    // randomized constraints are refused on both sides
-    let rand_p = |cs: &mut Prover<&mut Transcript, Ristretto>, x: Variable| {
-        g(cs, x)?;
-        cs.specify_randomized_constraints(|_| Ok(()))
-    };
-    let rand_v = |cs: &mut Verifier<&mut Transcript, Ristretto>, x: Variable| {
-        gv(cs, x)?;
-        cs.specify_randomized_constraints(|_| Ok(()))
-    };
-    assert!(matches!(prove_small(b, 4, rand_p), Err(R1CSError::GadgetError { .. })));
-    assert!(matches!(verify_small(b, &proof, V, rand_v), Err(R1CSError::GadgetError { .. })));
+    // randomized constraints are refused on both sides: r1cs::tests::randomized
     // a verifier without the builder operations rejects a builder proof, and conversely
     let plain_p = |cs: &mut Prover<&mut Transcript, Ristretto>, x: Variable| {
         cs.constrain(x - 4u64);
@@ -403,7 +393,7 @@ fn failed_operations_record_nothing() {
     let mut p = Prover::new(&pc, &mut t);
     let mut t2 = Transcript::new(b"x");
     let mut v = Verifier::<_, Ristretto>::new(&mut t2);
-    fn go<CS: CircuitBuilder<Scalar>>(cs: &mut CS, val: Option<u64>) {
+    fn go<CS: ConstraintSystem<Scalar>>(cs: &mut CS, val: Option<u64>) {
         let two = cs.table(vec![vec![0, 0]]).unwrap();
         let one = cs.table(vec![vec![0]]).unwrap();
         let before = cs.cost();
@@ -483,10 +473,10 @@ fn failed_operations_leave_the_plain_proof() {
     assert_eq!(proof.to_bytes(), p2.to_bytes());
 }
 
-/// `CircuitBuilder` is object safe: gadgets can take `&mut dyn CircuitBuilder`.
+/// `ConstraintSystem` is object safe: gadgets can take `&mut dyn ConstraintSystem`.
 #[test]
 fn object_safe() {
-    fn gadget(cs: &mut dyn CircuitBuilder<Scalar>, v: Option<u64>) -> Result<Variable, R1CSError> {
+    fn gadget(cs: &mut dyn ConstraintSystem<Scalar>, v: Option<u64>) -> Result<Variable, R1CSError> {
         let t = cs.table((0..4u64).map(|x| vec![x]).collect())?;
         cs.lookup_value(t, v)
     }
@@ -512,7 +502,7 @@ fn object_safe() {
 /// a borrow from the next one) is not a row: the prover refuses.
 #[test]
 fn xor32_with_unbounded_nibbles() {
-    fn xor32<CS: CircuitBuilder<Scalar>>(cs: &mut CS, x: Variable, y: Variable, nibbles: Option<[(u64, u64); 8]>) -> Result<Variable, R1CSError> {
+    fn xor32<CS: ConstraintSystem<Scalar>>(cs: &mut CS, x: Variable, y: Variable, nibbles: Option<[(u64, u64); 8]>) -> Result<Variable, R1CSError> {
         let t = cs.table((0..256u64).map(|v| vec![v >> 4, v & 15, (v >> 4) ^ (v & 15)]).collect())?;
         let (mut sx, mut sy, mut sz) = (Lc::default(), Lc::default(), Lc::default());
         for i in 0..8 {

@@ -4,7 +4,7 @@
 #![allow(non_snake_case)]
 
 use bulletproofs::bppp::{self, MactEntry, MactStatement, RangeStatement};
-use bulletproofs::r1cs::{Backend, CircuitBuilder, ConstraintSystem, Prover, R1CSProof, Verifier};
+use bulletproofs::r1cs::{Backend, ConstraintSystem, Prover, R1CSProof, Verifier};
 use bulletproofs::{BulletproofGens, PedersenGens};
 use curve25519_dalek::ristretto::CompressedRistretto;
 use curve25519_dalek::scalar::Scalar;
@@ -68,13 +68,12 @@ fn range_and_mact_proofs() {
     }
 }
 
-fn gadget<CS: CircuitBuilder<Scalar>>(cs: &mut CS, x: bulletproofs::r1cs::Variable, v: Option<u64>) {
+fn gadget<CS: ConstraintSystem<Scalar>>(cs: &mut CS, x: bulletproofs::r1cs::Variable, v: Option<u64>) {
     let t = cs.table((0..16u64).map(|i| vec![i]).collect()).unwrap();
     let a = cs.lookup_value(t, v.map(|v| v & 15)).unwrap();
     let b = cs.lookup_value(t, v.map(|v| v >> 4)).unwrap();
     cs.constrain(x - a - b * Scalar::from(16u64));
-    let (l, _, _) = cs.multiply(a.into(), b.into());
-    cs.constrain(l - a);
+    cs.multiply(a.into(), b.into()).unwrap();
 }
 
 #[test]
@@ -90,7 +89,7 @@ fn r1cs_proofs_of_every_kind() {
         if builder {
             gadget(&mut p, x, Some(0x5a));
         } else {
-            let (_, _, o) = p.multiply(x.into(), Scalar::from(2u64).into());
+            let o = p.multiply(x.into(), Scalar::from(2u64).into()).unwrap();
             p.constrain(o - Scalar::from(0xb4u64));
         }
         let good = p.prove_with_rng(&bp, &mut rng).unwrap().to_bytes();
@@ -102,7 +101,7 @@ fn r1cs_proofs_of_every_kind() {
             if builder {
                 gadget(&mut v, x, None);
             } else {
-                let (_, _, o) = v.multiply(x.into(), Scalar::from(2u64).into());
+                let o = v.multiply(x.into(), Scalar::from(2u64).into()).unwrap();
                 v.constrain(o - Scalar::from(0xb4u64));
             }
             v.verify(proof, &pc, &bp)

@@ -3,7 +3,7 @@
 use super::*;
 use crate::bppp::BpppGens;
 use crate::curve::Secp256k1Compressed;
-use crate::r1cs::{lc, Backend, CircuitBuilder, Prover, R1CSProof, Variable, Verifier};
+use crate::r1cs::{lc, Backend, ConstraintSystem, Prover, R1CSProof, Variable, Verifier};
 use crate::simplicity::CompileTranscript;
 use crate::{BulletproofGens, PedersenGens, Sha256Transcript};
 use rand_chacha::rand_core::SeedableRng;
@@ -26,8 +26,8 @@ fn folding_and_nodes() {
 /// `x · y = 15` with committed `x`, `y`; with `lookup` (the prover's value, `u64::MAX` for the
 /// verifier), also `x` in a table of 0..16: the reciprocal form then has poles, so batch
 /// inversion and `compile(eta, alpha)` run.
-fn gadget<CS: CircuitBuilder<S>>(cs: &mut CS, x: Variable, y: Variable, lookup: Option<u64>) {
-    let (_, _, o) = cs.multiply(lc(x), lc(y));
+fn gadget<CS: ConstraintSystem<S>>(cs: &mut CS, x: Variable, y: Variable, lookup: Option<u64>) {
+    let o = cs.multiply(lc(x), lc(y)).unwrap();
     cs.constrain(lc(o) - S::from(15u64));
     if let Some(xv) = lookup {
         let t = cs.table((0..16u64).map(|v| vec![v]).collect()).unwrap();

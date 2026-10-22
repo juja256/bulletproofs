@@ -66,12 +66,6 @@ simplicity = ["dep:simplicity-lang"]
 name = "range_proof"
 
 [[test]]
-name = "r1cs"
-
-[[test]]
-name = "reciprocal"
-
-[[test]]
 name = "r1cs_bppp"
 
 [[test]]

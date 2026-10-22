@@ -1,18 +1,13 @@
-#![allow(non_snake_case)]
 
-extern crate bulletproofs;
-extern crate curve25519_dalek;
-extern crate merlin;
-extern crate rand;
 
-use bulletproofs::r1cs::*;
-use bulletproofs::{BulletproofGens, PedersenGens};
+use crate::r1cs::*;
+use crate::{BulletproofGens, PedersenGens};
 use curve25519_dalek::ristretto::CompressedRistretto;
 use curve25519_dalek::scalar::Scalar;
 use merlin::Transcript;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
-use bulletproofs::curve::Ristretto;
+use crate::curve::Ristretto;
 
 // Shuffle gadget (documented in markdown file)
 
@@ -37,20 +32,20 @@ impl ShuffleProof {
             let z = cs.challenge_scalar(b"shuffle challenge");
 
             // Make last x multiplier for i = k-1 and k-2
-            let (_, _, last_mulx_out) = cs.multiply(x[k - 1] - z, x[k - 2] - z);
+            let last_mulx_out = cs.multiply(x[k - 1] - z, x[k - 2] - z).2;
 
             // Make multipliers for x from i == [0, k-3]
             let first_mulx_out = (0..k - 2).rev().fold(last_mulx_out, |prev_out, i| {
-                let (_, _, o) = cs.multiply(prev_out.into(), x[i] - z);
+                let o = cs.multiply(prev_out.into(), x[i] - z).2;
                 o
             });
 
             // Make last y multiplier for i = k-1 and k-2
-            let (_, _, last_muly_out) = cs.multiply(y[k - 1] - z, y[k - 2] - z);
+            let last_muly_out = cs.multiply(y[k - 1] - z, y[k - 2] - z).2;
 
             // Make multipliers for y from i == [0, k-3]
             let first_muly_out = (0..k - 2).rev().fold(last_muly_out, |prev_out, i| {
-                let (_, _, o) = cs.multiply(prev_out.into(), y[i] - z);
+                let o = cs.multiply(prev_out.into(), y[i] - z).2;
                 o
             });
 
@@ -235,7 +230,7 @@ fn example_gadget<CS: ConstraintSystem<Scalar>>(
     c1: LinearCombination<Scalar>,
     c2: LinearCombination<Scalar>,
 ) {
-    let (_, _, c_var) = cs.multiply(a1 + a2, b1 + b2);
+    let c_var = cs.multiply(a1 + a2, b1 + b2).unwrap();
     cs.constrain(c1 + c2 - c_var);
 }
 

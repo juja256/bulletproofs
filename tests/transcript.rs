@@ -113,7 +113,7 @@ mod r1cs {
         if bind {
             cs.transcript().append_message(b"ctx", b"gadget data");
         }
-        let (_, _, o) = cs.multiply(x.into(), y.into());
+        let o = cs.multiply(x.into(), y.into()).unwrap();
         cs.constrain(LinearCombination::from(o) - Scalar::from(15u8));
     }
 
@@ -360,21 +360,16 @@ mod all_protocols {
     }
     both!(sha256_linear_round_trips_and_binds, linear);
 
-    /// `x · y = 15` and, in the second phase, `(x - z)(y - z) = 15 - 8z + z²` for a challenge
-    /// `z`, with committed `x = 3`, `y = 5`.
+    /// `x · y = 15` with committed `x = 3`, `y = 5`, and with `two_phase` a lookup of `x` in a
+    /// table (on BP a logUp argument over challenges of the second phase).
     fn r1cs_with<C: Curve, T: TranscriptBackend + Clone, U: TranscriptBackend>(t: Mk<T>, u: Mk<U>, backend: bulletproofs::r1cs::Backend, two_phase: bool) {
-        use bulletproofs::r1cs::{lc, ConstraintSystem as _, Prover, RandomizableConstraintSystem, RandomizedConstraintSystem, Variable, Verifier};
-        fn gadget<C: Curve, CS: RandomizableConstraintSystem<C::Scalar>>(cs: &mut CS, x: Variable, y: Variable, two_phase: bool) {
-            let (_, _, o) = cs.multiply(lc(x), lc(y));
+        use bulletproofs::r1cs::{lc, ConstraintSystem, Prover, Variable, Verifier};
+        fn gadget<C: Curve, CS: ConstraintSystem<C::Scalar>>(cs: &mut CS, x: Variable, y: Variable, two_phase: bool) {
+            let o = cs.multiply(lc(x), lc(y)).unwrap();
             cs.constrain(lc(o) - C::Scalar::from(15u64));
             if two_phase {
-                cs.specify_randomized_constraints(move |cs| {
-                    let z = cs.challenge_scalar(b"z");
-                    let (_, _, o) = cs.multiply(lc(x) - z, lc(y) - z);
-                    cs.constrain(lc(o) - (C::Scalar::from(15u64) - C::Scalar::from(8u64) * z + z * z));
-                    Ok(())
-                })
-                .unwrap();
+                let t = cs.table(vec![vec![1], vec![3], vec![7]]).unwrap();
+                cs.lookup(t, &[lc(x)]).unwrap();
             }
         }
         let pc = PedersenGens::<C>::default();
@@ -614,7 +609,7 @@ mod full_proofs {
 
     /// `x · y = 15` with committed `x = 3`, `y = 5`.
     fn product<CS: ConstraintSystem<S>>(cs: &mut CS, x: Variable, y: Variable) {
-        let (_, _, o) = cs.multiply(lc(x), lc(y));
+        let o = cs.multiply(lc(x), lc(y)).unwrap();
         cs.constrain(lc(o) - S::from(15u64));
     }
 
@@ -767,12 +762,12 @@ mod sha256_more {
         let after = |seed: u64| {
             let mut p = Prover::new(&pc, Sha256Transcript::new(b"after"));
             let (cx, x) = p.commit(Scalar::from(3u8), Scalar::from(seed));
-            let (_, _, o) = p.multiply(lc(x), lc(x));
+            let o = p.multiply(lc(x), lc(x)).unwrap();
             p.constrain(lc(o) - Scalar::from(9u8));
             let (proof, mut pt) = p.prove_with_rng_and_return_transcript(&bp, &mut ChaCha20Rng::seed_from_u64(seed)).unwrap();
             let mut v = Verifier::new(Sha256Transcript::new(b"after"));
             let x = v.commit(cx);
-            let (_, _, o) = v.multiply(lc(x), lc(x));
+            let o = v.multiply(lc(x), lc(x)).unwrap();
             v.constrain(lc(o) - Scalar::from(9u8));
             let mut vt = v.verify_and_return_transcript(&proof, &pc, &bp).unwrap();
             let (mut a, mut b) = ([0u8; 32], [0u8; 32]);

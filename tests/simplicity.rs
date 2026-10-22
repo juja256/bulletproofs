@@ -6,7 +6,7 @@
 #![allow(non_snake_case)]
 
 use bulletproofs::curve::{Curve, Secp256k1};
-use bulletproofs::r1cs::{lc, Backend, CircuitBuilder, ConstraintSystem, Prover, R1CSProof, RandomizableConstraintSystem, RandomizedConstraintSystem, Variable, Verifier};
+use bulletproofs::r1cs::{lc, Backend, ConstraintSystem, Prover, R1CSProof, Variable, Verifier};
 use bulletproofs::{BulletproofGens, PedersenGens};
 use k256::Scalar;
 use bulletproofs::simplicity::{dummy_env, dummy_env_with_output, sighash_of, CompileTranscript, SimplicityVerifier, SIGHASH_LABEL};
@@ -22,7 +22,7 @@ fn gens() -> (PedersenGens<Secp256k1>, BulletproofGens<Secp256k1>) {
 
 /// `x · y = 15` with committed `x`, `y`.
 fn product<CS: ConstraintSystem<Scalar>>(cs: &mut CS, x: Variable, y: Variable) {
-    let (_, _, o) = cs.multiply(lc(x), lc(y));
+    let o = cs.multiply(lc(x), lc(y)).unwrap();
     cs.constrain(lc(o) - Scalar::from(15u64));
 }
 
@@ -45,7 +45,7 @@ fn prove(sighash: [u8; 32], seed: u64) -> (R1CSProof<Secp256k1>, Vec<Compressed>
     prove_with(&mut t, Backend::Bppp, seed)
 }
 
-fn compile_with(V: &[Compressed], backend: Backend, sighash: bool, randomized: bool) -> Result<SimplicityVerifier, bulletproofs::r1cs::R1CSError> {
+fn compile_with(V: &[Compressed], backend: Backend, sighash: bool) -> Result<SimplicityVerifier, bulletproofs::r1cs::R1CSError> {
     let (pc, bp) = gens();
     let mut ct = CompileTranscript::new(b"test");
     if sighash {
@@ -56,20 +56,11 @@ fn compile_with(V: &[Compressed], backend: Backend, sighash: bool, randomized: b
     let x = v.commit(V[0]);
     let y = v.commit(V[1]);
     product(&mut v, x, y);
-    if randomized {
-        v.specify_randomized_constraints(move |cs| {
-            let z = cs.challenge_scalar(b"z");
-            let (_, _, o) = cs.multiply(lc(x) - z, lc(y));
-            cs.constrain(lc(o) - lc(o));
-            Ok(())
-        })
-        .unwrap();
-    }
     v.compile_to_simplicity(&pc, &bp)
 }
 
 fn compile(V: &[Compressed]) -> SimplicityVerifier {
-    compile_with(V, Backend::Bppp, true, false).unwrap()
+    compile_with(V, Backend::Bppp, true).unwrap()
 }
 
 #[test]
@@ -133,9 +124,9 @@ fn merlin_proof_is_rejected() {
 #[test]
 fn compile_errors() {
     let (_, V) = prove(sighash_of(&dummy_env()), 5);
-    assert!(compile_with(&V, Backend::Bp, true, false).is_err());
-    assert!(compile_with(&V, Backend::Bppp, false, false).is_err());
-    assert!(compile_with(&V, Backend::Bppp, true, true).is_err());
+    assert!(compile_with(&V, Backend::Bp, true).is_err());
+    assert!(compile_with(&V, Backend::Bppp, false).is_err());
+    // randomized constraints: r1cs::tests::randomized
 }
 
 #[test]
@@ -147,7 +138,7 @@ fn program_is_deterministic() {
 }
 
 /// A table lookup and a witness variable of the circuit builder (the reciprocal form has poles).
-fn gadgets<CS: CircuitBuilder<Scalar>>(cs: &mut CS, x: Variable, y: Variable, prover: bool) {
+fn gadgets<CS: ConstraintSystem<Scalar>>(cs: &mut CS, x: Variable, y: Variable, prover: bool) {
     product(cs, x, y);
     let t = cs.table((0..16u64).map(|v| vec![v]).collect()).unwrap();
     let l = cs.lookup_value(t, if prover { Some(3) } else { None }).unwrap();
@@ -190,7 +181,7 @@ fn chain<CS: ConstraintSystem<Scalar>>(cs: &mut CS, x: Variable, n: usize) {
     let mut last = Scalar::from(3u64);
     let mut v = lc(x);
     for _ in 0..n {
-        let (_, _, o) = cs.multiply(v, lc(x));
+        let o = cs.multiply(v, lc(x)).unwrap();
         v = lc(o);
         last *= Scalar::from(3u64);
     }
@@ -235,7 +226,7 @@ fn chains_verify() {
 
 /// `x · y = c`.
 fn product_eq<CS: ConstraintSystem<Scalar>>(cs: &mut CS, x: Variable, y: Variable, c: u64) {
-    let (_, _, o) = cs.multiply(lc(x), lc(y));
+    let o = cs.multiply(lc(x), lc(y)).unwrap();
     cs.constrain(lc(o) - Scalar::from(c));
 }
 
@@ -333,7 +324,7 @@ fn stage3_not_worse_than_stage2() {
 
 /// `lookups` lookups into a table of `rows` values (a range table, as bpvm's VM has): the
 /// verifier inverts `rows` challenge-dependent values.
-fn table_circuit<CS: CircuitBuilder<Scalar>>(cs: &mut CS, rows: u64, lookups: u64, prover: bool) {
+fn table_circuit<CS: ConstraintSystem<Scalar>>(cs: &mut CS, rows: u64, lookups: u64, prover: bool) {
     let t = cs.table((0..rows).map(|v| vec![v]).collect()).unwrap();
     for i in 0..lookups {
         cs.lookup_value(t, if prover { Some((i * 7) % rows) } else { None }).unwrap();

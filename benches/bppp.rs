@@ -226,8 +226,8 @@ fn range_bench(c: &mut Criterion) {
 /// `n` 32-bit range checks of committed values through a byte table (spec §7), on both
 /// backends of the circuit builder.
 fn builder_bench(c: &mut Criterion) {
-    use bulletproofs::r1cs::{Backend, CircuitBuilder, ConstraintSystem, LinearCombination, Prover, R1CSError, Variable, Verifier};
-    fn gadget<CS: CircuitBuilder<Scalar>>(cs: &mut CS, vars: &[Variable], vals: Option<&[u64]>) -> Result<(), R1CSError> {
+    use bulletproofs::r1cs::{Backend, ConstraintSystem, LinearCombination, Prover, R1CSError, Variable, Verifier};
+    fn gadget<CS: ConstraintSystem<Scalar>>(cs: &mut CS, vars: &[Variable], vals: Option<&[u64]>) -> Result<(), R1CSError> {
         let byte = cs.table((0..256u64).map(|x| vec![x]).collect())?;
         for (i, x) in vars.iter().enumerate() {
             let mut sum = LinearCombination::default();

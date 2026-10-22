@@ -230,7 +230,7 @@ let (proof, committed) = RangeProof::prove_single(&bp_gens, &pc_gens, &mut trans
 - Commitments to secrets go through k256's constant-time multiscalar multiplication
   (`lincomb`, GLV); public scalars through a variable-time Pippenger with batch-affine bucket
   sums. As upstream on ristretto255, the inner-product argument (and the BP++ norm argument) handles its blinded vectors `l(x)`, `r(x)` in variable time.
-- Gadgets for both curves: `fn g<F: Field, CS: CircuitBuilder<F>>` (see
+- Gadgets for both curves: `fn g<F: Field, CS: ConstraintSystem<F>>` (see
   [Writing gadgets for both backends](#writing-gadgets-for-both-backends)).
 
 Proof sizes and times on one core of an Apple M4 Pro
@@ -392,12 +392,11 @@ example a 64-bit proof in base 256 is 704 B.
 - The R1CS front end on BP++ (spec §6): `prover.set_backend(Backend::Bppp)` and
   `verifier.set_backend(Backend::Bppp)`; `prove`/`verify` and gadgets are unchanged. The
   constraint system is lowered to a reciprocal form circuit (spec §6.1, the same lowering and one
-  proof encoding with or without `CircuitBuilder` operations); randomized constraints are not
-  supported on BP++ (they return a `GadgetError`).
+  proof encoding with or without lookups and reciprocal arguments).
 
-- `r1cs::CircuitBuilder` (spec §7): free witnesses, products, public tables with lookups and
-  general reciprocal (logUp-style) arguments on top of `ConstraintSystem`, implemented by
-  `Prover` and `Verifier` for both backends. A gadget is written once: BP lowers it to
+- The circuit builder (spec §7): free witnesses, products, public tables with lookups and
+  general reciprocal (logUp-style) arguments, methods of `ConstraintSystem` on both
+  backends. A gadget is written once: BP lowers it to
   randomized constraints (one second-phase multiplier per lookup, `|T|/2` multipliers per
   table), BP++ to a reciprocal form circuit (one gate per lookup, witnesses and multiplicities
   in free slots). Multi-column tuples are compressed with a challenge on both backends (BP:
@@ -484,39 +483,31 @@ Every operation below is called by both roles. The prover passes the values (`So
 verifier passes `None`, and both must issue the same calls in the same order: the sequence of
 calls *is* the statement.
 
-### `ConstraintSystem`: plain R1CS (upstream, both backends)
+### `ConstraintSystem`: the one trait of gadgets (both backends)
+
+`Prover` and `Verifier` implement it. Its operations are recorded and lowered at
+`prove`/`verify` to whichever backend is chosen.
 
 | method | what it does |
 |---|---|
-| `multiply(l, r)` | Creates a multiplication gate: three new wires `(left, right, out)` with `out = left * right`, and ties `left = l`, `right = r`. Use it to compute a product of two linear combinations; `out` is the product. |
+| `witness(v)` | A free variable with the prover's value `v` and no constraint. The default choice for values you constrain yourself. |
+| `multiply(l, r)` | The product `l * r` of two linear combinations as a new variable. |
+| `constrain_product(l, r, out)` | Asserts `l * r = out` for three linear combinations, without a new variable. Use it when the product already has a name (for example `out` is a witness). |
 | `allocate(v)` | Creates one new wire with the prover's value `v` and no constraint on it. Two consecutive `allocate`s share one multiplication gate (as its left and right inputs). Constrain the wire yourself. |
 | `allocate_multiplier(Some((a, b)))` | Creates a multiplication gate from the values `a`, `b` directly: wires `(left, right, out)` with `out = a * b`, without linear combinations as inputs. |
 | `constrain(lc)` | Asserts `lc = 0`. Free on both backends: it adds a row to the linear part, no gate. |
 | `eval(lc)` | The value of a linear combination: `Some` for the prover, `None` for the verifier. For computing the witness inside a gadget. |
-| `transcript()` | The Fiat–Shamir transcript (`&mut dyn TranscriptBackend`), to bind extra public data into the proof: `cs.transcript().append_message(b"label", data)` with `use bulletproofs::TranscriptBackend;`. |
-| `metrics()` | Counts multipliers and constraints of the plain R1CS part. |
-
-### `RandomizableConstraintSystem`: constraints with challenges (upstream, BP only)
-
-| method | what it does |
-|---|---|
-| `specify_randomized_constraints(\|cs\| ..)` | Defers a closure to a second phase that runs after every first-phase wire is committed. Inside, `cs.challenge_scalar(label)` returns a random challenge bound to those wires, for checks that need randomness (permutations, polynomial identities). **BP++ refuses it**: use `lookup` and `reciprocal` instead. |
-
-### `CircuitBuilder`: lookups and multiset arguments (this fork, both backends)
-
-`CircuitBuilder` extends `ConstraintSystem`, so one gadget mixes both on the same variables.
-Its operations are recorded and lowered at `prove`/`verify` to whichever backend is chosen.
-
-| method | what it does |
-|---|---|
-| `witness(v)` | A free wire with the prover's value `v` and no constraint. Like `allocate`, but cheaper on BP++ (no gate). The default choice for values you constrain yourself. |
-| `constrain_product(l, r, out)` | Asserts `l * r = out` for three linear combinations, without creating wires. Use it when the product already has a name (for example `out` is a witness). |
 | `table(rows)` | Declares a public table: a list of rows of equal length (`u64` entries), such as all bytes `{0..255}` or all triples `(a, b, a ^ b)`. Returns a `TableId`. Costs nothing until it is looked up; create each table once and share it. |
 | `lookup(t, tuple)` | Asserts that the tuple of linear combinations is a row of table `t`, column by column. The components need no separate range checks: a lookup into a byte table also proves "this is a byte". |
 | `lookup_value(t, v)` | A new witness that must be an entry of the one-column table `t`: `witness` + `lookup` in one call, the usual way to get a bounded value (a byte, a nibble). |
 | `reciprocal(m)` | Starts a reciprocal (logUp-style) argument over tuples of `m` columns and returns a handle. The argument asserts that its terms `num / (X + tuple)` sum to zero for every `X`, i.e. they cancel tuple by tuple. That is a multiset equality: permutations, memory consistency, a bus between parts of a circuit. |
 | `reciprocal_term(r, num, tuple)`, `reciprocal_public(r, coeff, row)` | The low-level way to add terms to an argument; the handle methods below are the usual way. |
+| `transcript()` | The Fiat–Shamir transcript (`&mut dyn TranscriptBackend`), to bind extra public data into the proof: `cs.transcript().append_message(b"label", data)` with `use bulletproofs::TranscriptBackend;`. |
 | `cost()` | The circuit's size so far on each backend: `gates(backend)`, `linear(backend)`, `gens_capacity(backend)` (the `BulletproofGens` capacity to create). The verifier can compute it too. |
+
+Upstream's randomized constraints (`RandomizableConstraintSystem`, challenges drawn in a second
+phase) are internal: BP lowers lookups and reciprocal arguments to them; gadgets use `lookup`
+and `reciprocal` instead, which run on both backends.
 
 The handle returned by `reciprocal(m)` adds terms:
 
@@ -544,9 +535,9 @@ So `output` is a permutation of `input` when the argument with `add(x)` for ever
 
 ### Gadgets over any curve
 
-The traits take the scalar field as a parameter with no default: `ConstraintSystem<F>`,
-`CircuitBuilder<F>`. A gadget written as `fn g<F: Field, CS: CircuitBuilder<F>>(..)` (with
-`bulletproofs::curve::Field`) runs on every curve; `CircuitBuilder<Scalar>` with
+The traits take the scalar field as a parameter with no default: `ConstraintSystem<F>`.
+A gadget written as `fn g<F: Field, CS: ConstraintSystem<F>>(..)` (with
+`bulletproofs::curve::Field`) runs on every curve; `ConstraintSystem<Scalar>` with
 curve25519-dalek's `Scalar` is a ristretto255 gadget. In generic code:
 
 - values are `F::from(u64)`, linear combinations `LinearCombination<F>`;
@@ -561,12 +552,12 @@ curve25519-dalek's `Scalar` is a ristretto255 gadget. In generic code:
 ### An example
 
 Committed values come from `Prover::commit(v, blinding)` / `Verifier::commit(V)` before the
-gadget runs and are passed in as `Variable`s. `CircuitBuilder` is object safe
-(`&mut dyn CircuitBuilder`).
+gadget runs and are passed in as `Variable`s. `ConstraintSystem` is object safe
+(`&mut dyn ConstraintSystem<F>`).
 
 ```rust,ignore
 /// `x < 2^16`: two byte lookups. `v` is the prover's value (`None` for the verifier).
-fn range16<F: Field, CS: CircuitBuilder<F>>(cs: &mut CS, t: &Tables, x: LinearCombination<F>, v: Option<u64>) -> Result<(), R1CSError> {
+fn range16<F: Field, CS: ConstraintSystem<F>>(cs: &mut CS, t: &Tables, x: LinearCombination<F>, v: Option<u64>) -> Result<(), R1CSError> {
     let lo = cs.lookup_value(t.byte, v.map(|v| v & 0xff))?;
     let hi = cs.lookup_value(t.byte, v.map(|v| v >> 8))?;
     cs.constrain(x - lo - hi * F::from(256u64));
@@ -575,14 +566,14 @@ fn range16<F: Field, CS: CircuitBuilder<F>>(cs: &mut CS, t: &Tables, x: LinearCo
 
 /// `z = x ^ y` for nibbles: one lookup of the tuple `(x, y, z)`; no range checks of the
 /// components are needed (the lookup proves the tuple is a row, component by component).
-fn xor4<F: Field, CS: CircuitBuilder<F>>(cs: &mut CS, t: &Tables, x: Variable, y: Variable, v: Option<(u64, u64)>) -> Result<Variable, R1CSError> {
+fn xor4<F: Field, CS: ConstraintSystem<F>>(cs: &mut CS, t: &Tables, x: Variable, y: Variable, v: Option<(u64, u64)>) -> Result<Variable, R1CSError> {
     let z = cs.witness(v.map(|(a, b)| F::from(a ^ b)))?;
     cs.lookup(t.xor, &[x.into(), y.into(), z.into()])?;
     Ok(z)
 }
 
 /// `output` is a permutation of `input`: sum 1/(X + x) - sum 1/(X + y) = 0.
-fn shuffle<F: Field, CS: CircuitBuilder<F>>(cs: &mut CS, input: &[Variable], output: &[Variable]) -> Result<(), R1CSError> {
+fn shuffle<F: Field, CS: ConstraintSystem<F>>(cs: &mut CS, input: &[Variable], output: &[Variable]) -> Result<(), R1CSError> {
     let arg = cs.reciprocal(1)?;
     for x in input {
         arg.add(cs, &[(*x).into()])?;
@@ -636,16 +627,14 @@ rejects it. Accepting either backend means trusting both.
 
 `cost()` reports both (`gates(backend)`, `linear(backend)`, `gens_capacity(backend)`);
 the verifier can compute it without the witness. BP's capacity is the multipliers rounded up
-to a power of two, plus your own randomized multipliers, which `cost()` does not count. BP++'s
-is `max(gates, linear + 6)`. Proof size grows with the logarithm of both. `metrics()` counts
-only the plain R1CS part.
+to a power of two. BP++'s is `max(gates, linear + 6)`. Proof size grows with the logarithm of
+both.
 
 ### Rules and pitfalls
 
-- **Phases.** Builder operations belong to the first phase, and every variable they read must
-  already exist. **BP++ refuses `specify_randomized_constraints`** (a `GadgetError` from the
-  prover and the verifier): write permutations, lookups and multiset checks with `table`,
-  `lookup` and `reciprocal`, not with your own challenges.
+- **Variables first.** Every variable an operation reads must already exist. Write
+  permutations, lookups and multiset checks with `table`, `lookup` and `reciprocal`: there are
+  no challenges in the public API.
 - **Tuples need no range checks.** Both backends compress a tuple with a challenge drawn after
   its components are committed. A lookup therefore proves the tuple *is* a row, whatever the
   components are. A reciprocal argument proves that its terms cancel per tuple (a multiset
@@ -677,7 +666,7 @@ statements with the testing feature `cheats`:
 `r1cs::cheats::with_unchecked_prover(|| prove(...))` makes the prover skip its own checks
 (lookups equal to no row, unsatisfied BP++ circuits), and the verifier must reject the result.
 [bpvm](https://github.com/juja256/bpvm) is a larger example: an RV32IM zkVM written once against
-`CircuitBuilder` and proven with either backend.
+`ConstraintSystem` and proven with either backend.
 
 ## About
 

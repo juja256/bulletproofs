@@ -8,7 +8,7 @@ use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 
 use super::builder::cheat::{self, Cheat};
-use super::builder::CircuitBuilder;
+use super::ConstraintSystem;
 use super::{Backend, Prover, R1CSError, Verifier};
 use crate::{BulletproofGens, PedersenGens};
 use crate::curve::Ristretto;
@@ -53,12 +53,12 @@ trait Ops {
     fn recip(&mut self, m: usize, private: Vec<(super::LinearCombination<Scalar>, Vec<super::LinearCombination<Scalar>>)>, public: Vec<(super::LinearCombination<Scalar>, Vec<u64>)>) -> Result<(), R1CSError>;
 }
 
-impl<C: CircuitBuilder<Scalar>> Ops for C {
+impl<C: ConstraintSystem<Scalar>> Ops for C {
     fn table(&mut self, rows: Vec<Vec<u64>>) -> super::TableId {
-        CircuitBuilder::table(self, rows).unwrap()
+        ConstraintSystem::table(self, rows).unwrap()
     }
     fn lookup(&mut self, t: super::TableId, x: &[super::LinearCombination<Scalar>]) -> Result<(), R1CSError> {
-        CircuitBuilder::lookup(self, t, x)
+        ConstraintSystem::lookup(self, t, x)
     }
     fn witness_scalar(&mut self, v: Option<Scalar>) -> Result<super::Variable, R1CSError> {
         self.witness(v)
@@ -81,7 +81,7 @@ impl<C: CircuitBuilder<Scalar>> Ops for C {
     }
 }
 
-impl<C: CircuitBuilder<Scalar>> Gadget for C {
+impl<C: ConstraintSystem<Scalar>> Gadget for C {
     fn w(&mut self, v: Option<u64>) -> super::Variable {
         self.witness(v.map(Scalar::from)).unwrap()
     }

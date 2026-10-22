@@ -9,6 +9,9 @@ for this discussion.
 
 ### 1.1 `CircuitBuilder: ConstraintSystem`, implemented by `Prover` and `Verifier`
 
+*(2026-10-22: superseded by the API refactor: one trait `ConstraintSystem` with the builder
+operations, randomized constraints internal, `metrics` gone.)*
+
 - **Why a supertrait.** Gadgets mix plain R1CS operations (`multiply`, `constrain`, `allocate`)
   with builder operations (`lookup`, `reciprocal`) on the same variables. With one trait object
   per side, a gadget has one `cs` and existing gadgets keep working unchanged.

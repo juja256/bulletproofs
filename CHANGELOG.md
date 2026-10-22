@@ -16,6 +16,16 @@ Entries are listed in reverse chronological order.
     `for_curve` and the module `bulletproofs::secp256k1` (aliases over secp256k1) are gone.
     Code that relied on the default names the curve once, usually on the generators
     (`PedersenGens::<Ristretto>::default()`); the rest is inferred.
+  * One constraint-system trait: `CircuitBuilder` is merged into `ConstraintSystem` (bounds
+    `CS: CircuitBuilder<F>` become `CS: ConstraintSystem<F>`). `multiply(l, r)` returns
+    `Result<Variable, R1CSError>`, the product (the input wires are no longer returned).
+    `metrics()` and `Metrics` are gone (`cost()` stays). `RandomizableConstraintSystem` and
+    `RandomizedConstraintSystem` are crate-internal (the BP lowering of lookups and reciprocal
+    arguments uses them); gadgets express permutations and lookups with `reciprocal` and
+    `lookup`. Upstream's shuffle, reciprocal-gadget and golden tests moved into the crate
+    (`r1cs::tests`, same proof bytes); `docs/r1cs-docs-example.md` (upstream's randomized
+    shuffle tutorial) is gone, README's «Writing gadgets for both backends» replaces it; the
+    `r1cs` shuffle bench uses a reciprocal argument.
 * Transcripts: every protocol takes its Fiat–Shamir transcript as `&mut T` for any
   `T: TranscriptBackend`; `merlin::Transcript` stays the default with byte-identical proofs.
   New `Sha256Transcript` (feature `sha256-transcript`, on with `secp256k1`): a transcript on

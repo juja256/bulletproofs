@@ -24,7 +24,7 @@ impl ShuffleProof {
         let k = x.len();
 
         if k == 1 {
-            cs.constrain(y[0] - x[0]);
+            cs.constrain(lc(y[0]) - x[0]);
             return Ok(());
         }
 
@@ -50,7 +50,7 @@ impl ShuffleProof {
             });
 
             // Constrain last x mul output and last y mul output to be equal
-            cs.constrain(first_mulx_out - first_muly_out);
+            cs.constrain(lc(first_mulx_out) - first_muly_out);
 
             Ok(())
         })
@@ -372,16 +372,16 @@ pub fn range_proof<CS: ConstraintSystem<Scalar>>(
     let mut exp_2 = Scalar::ONE;
     for i in 0..n {
         // Create low-level variables and add them to constraints
-        let (a, b, o) = cs.allocate_multiplier(v_assignment.map(|q| {
-            let bit: u64 = (q >> i) & 1;
-            ((1 - bit).into(), bit.into())
-        }))?;
+        let bit = v_assignment.map(|q| (q >> i) & 1);
+        let a = cs.witness(bit.map(|bit| Scalar::from(1 - bit)))?;
+        let b = cs.witness(bit.map(Scalar::from))?;
+        let o = cs.multiply(a.into(), b.into())?;
 
         // Enforce a * b = 0, so one of (a,b) is zero
         cs.constrain(o.into());
 
         // Enforce that a = 1 - b, so they both are 1 or 0.
-        cs.constrain(a + (b - 1u64));
+        cs.constrain(lc(a) + b - 1u64);
 
         // Add `-b_i*2^i` to the linear combination
         // in order to form the following constraint by the end of the loop:

@@ -5,7 +5,7 @@
 #![allow(non_snake_case)]
 
 use bulletproofs::bppp::{self, ArithmeticCircuit, BpppGens, CircuitWitness, MactEntry, MactStatement, RangeStatement, Slot, SparseMatrix};
-use bulletproofs::r1cs::{Backend, ConstraintSystem, LinearCombination, Prover, Variable};
+use bulletproofs::r1cs::{Backend, ConstraintSystem, LinearCombination, Prover};
 use bulletproofs::{BulletproofGens, PedersenGens};
 use curve25519_dalek::scalar::Scalar;
 use merlin::Transcript;
@@ -112,7 +112,7 @@ fn r1cs_proof(builder: bool) -> Vec<u8> {
         let w = p.witness(Some(Scalar::from(7u64))).unwrap();
         p.constrain_product(w.into(), y.into(), Scalar::from(21u64).into()).unwrap();
         let r = p.reciprocal(1).unwrap();
-        r.add_weighted(&mut p, x.into(), &[Variable::Committed(1).into()]).unwrap();
+        r.add_weighted(&mut p, x.into(), &[y.into()]).unwrap();
         r.add_public(&mut p, LinearCombination::from(-Scalar::from(0xbeefu64)), &[3]).unwrap();
     }
     p.prove_with_rng(&bp, &mut rng(4)).unwrap().to_bytes()
@@ -136,7 +136,8 @@ fn bppp_proofs_are_pinned() {
         "2a48d4d8030d829f69b59399816e9bad94c0723e6eb09f8ada733f04ccd1c176",
         "c0901efd7fa5282e8e55cb0b79016df2a5b7265869b63d88b0df2d28bc4fb713",
         "21078855863d69b79787eb06eff4da666c2267a5e07fdd33b4beb59427b6db0a",
-        "2ac7b65d11dcb0907397768fa234e173c7f04f19a409368d0fe860524059f2e9",
+        // 2026-10-22: the witness `w` of the product is folded into its left wire
+        "1fb847f35ff5f3c2e275a0acab75dfec1085c088b8b4a3f7371344dca119149b",
     ];
     for (name, g) in &got {
         println!("{}: {}", name, g);

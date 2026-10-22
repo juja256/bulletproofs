@@ -28,31 +28,13 @@ pub trait ConstraintSystem<F: Field> {
     /// A free witness: `v` is the prover's value (`None` for the verifier).
     fn witness(&mut self, v: Option<F>) -> Result<Variable, R1CSError>;
 
-    /// The product `left * right` as a new variable.
+    /// The product `left * right` as a new variable. A free witness that is the whole of
+    /// `left` or `right` (coefficient 1, no constant) becomes the product's input wire, the first
+    /// time it is one: it then costs nothing of its own.
     fn multiply(&mut self, left: LinearCombination<F>, right: LinearCombination<F>) -> Result<Variable, R1CSError>;
 
-    /// Allocate a single variable.
-    ///
-    /// This either allocates a new multiplier and returns its `left` variable,
-    /// or returns a `right` variable of a multiplier previously allocated by this method.
-    /// The output of a multiplier is assigned on a even call, when `right` is assigned.
-    ///
-    /// When CS is committed at the end of the first or second phase, the half-assigned multiplier
-    /// has the `right` assigned to zero and all its variables committed.
-    ///
-    /// Returns unconstrained `Variable` for use in further constraints.
-    fn allocate(&mut self, assignment: Option<F>) -> Result<Variable, R1CSError>;
-
-    /// Allocate variables `left`, `right`, and `out`
-    /// with the implicit constraint that
-    /// ```text
-    /// left * right = out
-    /// ```
-    ///
-    /// Returns `(left, right, out)` for use in further constraints.
-    fn allocate_multiplier(&mut self, input_assignments: Option<(F, F)>) -> Result<(Variable, Variable, Variable), R1CSError>;
-
-    /// The constraint `l * r = out`, without a new variable.
+    /// The constraint `l * r = out`, without a new variable. Free witnesses fold into its input
+    /// wires as for [`multiply`](Self::multiply).
     fn constrain_product(&mut self, l: LinearCombination<F>, r: LinearCombination<F>, out: LinearCombination<F>) -> Result<(), R1CSError>;
 
     /// The constraint `lc = 0`.

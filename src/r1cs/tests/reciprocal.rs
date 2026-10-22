@@ -1,3 +1,4 @@
+use crate::r1cs::lc;
 use rand::thread_rng;
 use curve25519_dalek::scalar::Scalar;
 use curve25519_dalek::ristretto::CompressedRistretto;
@@ -111,16 +112,16 @@ pub fn range_proof_gadget<CS: ConstraintSystem<Scalar>>(
     let mut exp_2 = Scalar::ONE;
     for i in 0..n {
         // Create low-level variables and add them to constraints
-        let (a, b, o) = cs.allocate_multiplier(v_assignment.map(|q| {
-            let bit: u64 = (q >> i) & 1;
-            ((1 - bit).into(), bit.into())
-        }))?;
+        let bit = v_assignment.map(|q| (q >> i) & 1);
+        let a = cs.witness(bit.map(|bit| Scalar::from(1 - bit)))?;
+        let b = cs.witness(bit.map(Scalar::from))?;
+        let o = cs.multiply(a.into(), b.into())?;
 
         // Enforce a * b = 0, so one of (a,b) is zero
         cs.constrain(o.into());
 
         // Enforce that a = 1 - b, so they both are 1 or 0.
-        cs.constrain(a + (b - 1u64));
+        cs.constrain(lc(a) + b - 1u64);
 
         // Add `-b_i*2^i` to the linear combination
         // in order to form the following constraint by the end of the loop:
@@ -215,12 +216,12 @@ pub fn range_proof_reciprocal_gadget<CS: RandomizableConstraintSystem<Scalar>>(
     
     let m_vars: Vec<Variable> = m_assignments.iter()
         .map(|&assign| {
-            cs.allocate(assign.map(|v| Scalar::from(v)))
+            cs.witness(assign.map(|v| Scalar::from(v)))
         })
         .collect::<Result<Vec<Variable>, R1CSError>>()?; // commit to multiplicities
 
     let d_vars = (0..(n / b)).map(|i| {
-        cs.allocate(v_assignment.map(|q| {
+        cs.witness(v_assignment.map(|q| {
             Scalar::from((q >> (i*b)) & ((1u64 << b) - 1))
         }))
     }).collect::<Result<Vec<Variable>, R1CSError>>()?; // commit to digits

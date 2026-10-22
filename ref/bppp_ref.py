@@ -1553,13 +1553,19 @@ def bld_parse_lc(lc):
 
 class Builder:
     """The builder record of spec 7.1-7.2 together with the prover's values. Every operation
-    validates first and records only if it succeeds."""
+    validates first and records only if it succeeds.
+
+    Folding (2026-10-22): a free witness that is the whole left or right input of a product
+    (coefficient 1, no constant), the first time it is, becomes that product's wire: of R1CS
+    multiplier i ("L", i) / ("R", i) from multiply, or of builder product p ("PL", p) /
+    ("PR", p) from product. The input's linear row is then dropped, every other reference to
+    the witness reads the wire, and the witness takes no slot of its own."""
 
     def __init__(self):
         self.v, self.s = [], []                 # committed inputs, k = len(v)
         self.aL, self.aR, self.aO = [], [], []  # R1CS multipliers, n = len(aL)
-        self.pending = None                     # multiplier whose right input allocate fills
         self.wit = []                           # builder witnesses, n_w = len(wit)
+        self.fold = []                          # per witness: the wire it is folded into, or None
         self.r1cs = []                          # R1CS constraints (LC = 0), in order
         self.products = []                      # (l, r, out)
         self.tables = []                        # rows (m = len(rows[0]))
@@ -1583,12 +1589,31 @@ class Builder:
             if not self.exists(x):
                 raise BuilderError(f"variable {x} does not exist")
 
+    def wires(self, wit=None):
+        """(aL, aR): the multiplier inputs, a folded witness's value in its wire."""
+        W = self.wit if wit is None else wit
+        aL, aR = list(self.aL), list(self.aR)
+        for i, f in enumerate(self.fold):
+            if f is not None and f[0] in ("L", "R"):
+                (aL if f[0] == "L" else aR)[f[1]] = W[i]
+        return aL, aR
+
     def value(self, x, wit=None):
         if x == ONE:
             return 1
-        src = {"V": self.v, "L": self.aL, "R": self.aR, "O": self.aO,
-               "W": self.wit if wit is None else wit}[x[0]]
+        if x[0] in ("L", "R"):
+            return self.wires(wit)[0 if x[0] == "L" else 1][x[1]]
+        src = {"V": self.v, "O": self.aO, "W": self.wit if wit is None else wit}[x[0]]
         return src[x[1]]
+
+    def _fold(self, lc, wire):
+        """Fold lc into wire if it is exactly one free witness with coefficient 1."""
+        if len(lc) == 1 and lc[0][1] % L == 1 and lc[0][0] != ONE and lc[0][0][0] == "W":
+            i = lc[0][0][1]
+            if self.fold[i] is None:
+                self.fold[i] = wire
+                return True
+        return False
 
     def eval(self, lc, wit=None):
         return sum(c * self.value(x, wit) for x, c in lc) % L
@@ -1609,32 +1634,11 @@ class Builder:
         self.aL.append(a)
         self.aR.append(b)
         self.aO.append(a * b % L)
-        self.r1cs.append(list(l) + [(("L", i), L - 1)])
-        self.r1cs.append(list(r) + [(("R", i), L - 1)])
-        return ("L", i), ("R", i), ("O", i)
-
-    def allocate(self, v):
-        """Fills the left input of a new multiplier (right = output = 0 while pending), or the
-        right input of the pending one (dalek semantics: multiply/allocate_multiplier leave the
-        pending multiplier alone)."""
-        if self.pending is None:
-            i = self.n
-            self.aL.append(v % L)
-            self.aR.append(0)
-            self.aO.append(0)
-            self.pending = i
-            return ("L", i)
-        i, self.pending = self.pending, None
-        self.aR[i] = v % L
-        self.aO[i] = self.aL[i] * self.aR[i] % L
-        return ("R", i)
-
-    def allocate_multiplier(self, a, b):
-        i = self.n
-        self.aL.append(a % L)
-        self.aR.append(b % L)
-        self.aO.append(a * b % L)
-        return ("L", i), ("R", i), ("O", i)
+        if not self._fold(l, ("L", i)):
+            self.r1cs.append(list(l) + [(("L", i), L - 1)])
+        if not self._fold(r, ("R", i)):
+            self.r1cs.append(list(r) + [(("R", i), L - 1)])
+        return ("O", i)
 
     def constrain(self, lc):
         # Not a builder operation; checked here like multiply (reported).
@@ -1644,12 +1648,16 @@ class Builder:
     # -- builder operations (7.2)
     def witness(self, v):
         self.wit.append(v % L)
+        self.fold.append(None)
         self.has_builder_ops = True
         return ("W", self.n_w - 1)
 
     def product(self, l, r, out):
         for lc in (l, r, out):
             self.check_lc(lc)
+        p = len(self.products)
+        self._fold(l, ("PL", p))
+        self._fold(r, ("PR", p))
         self.products.append((list(l), list(r), list(out)))
         self.has_builder_ops = True
 
@@ -1726,10 +1734,6 @@ def bld_apply(b, op):
         return b.commit(S(op["v"]), S(op["s"]))
     if kind == "multiply":
         return b.multiply(LC(op["l"]), LC(op["r"]))
-    if kind == "allocate":
-        return b.allocate(S(op["v"]))
-    if kind == "allocate_multiplier":
-        return b.allocate_multiplier(S(op["l"]), S(op["r"]))
     if kind == "constrain":
         return b.constrain(LC(op["lc"]))
     if kind == "witness":
@@ -1792,7 +1796,13 @@ def bld_finalize(b, prover=True):
         priv = [([(ONE, 1)], tup) for tt, tup in b.lookups if tt == t]
         pub = [([(("W", mult[t] + r), L - 1)], row) for r, row in enumerate(rows)]
         args.append((len(rows[0]), priv, pub))
-    return {"mult": mult, "n_w": nw, "args": args, "wit": wit}
+    # the free witnesses (multiplicities included), numbered densely in order
+    free, n_free = {}, 0
+    for i in range(nw):
+        if i >= b.n_w or b.fold[i] is None:
+            free[i] = n_free
+            n_free += 1
+    return {"mult": mult, "n_w": nw, "args": args, "wit": wit, "free": free, "n_free": n_free}
 
 
 def bld_uses_eta(fin):
@@ -1809,7 +1819,7 @@ def bld_costs(b, fin):
     n_p = sum(len(priv) for _, priv, _ in fin["args"])
     n_prod = len(b.products)
     n_r = 1 if b.n == n_prod == n_p == 0 else b.n
-    return {"bp_phase1": b.n + (fin["n_w"] + 1) // 2 + n_prod, "bp_phase2": n_p,
+    return {"bp_phase1": b.n + (fin["n_free"] + 1) // 2 + n_prod, "bp_phase2": n_p,
             "bppp_gates": n_p + n_r + n_prod}
 
 
@@ -1827,11 +1837,13 @@ def bld_lower(b, fin, prover_constants=False):
     n_r = 1 if b.n == n_prod == n_p == 0 else b.n
     n_m = n_r + n_prod
     nm2 = n_p + n_m
-    nw = fin["n_w"]
+    nw = fin["n_free"]
     W = fin["wit"]
+    free = fin["free"]
+    prod_folded = {f for f in b.fold if f is not None and f[0] in ("PL", "PR")}
     # R1CS constraints may name variables that do not exist yet (ConstraintSystem does not
     # check them at the call); here every variable must exist (spec 6.1). Multiplicities count.
-    lim = {"V": k, "L": b.n, "R": b.n, "O": b.n, "W": nw}
+    lim = {"V": k, "L": b.n, "R": b.n, "O": b.n, "W": fin["n_w"]}
     for lc in b.r1cs:
         for x, _ in lc:
             if x != ONE and x[1] >= lim[x[0]]:
@@ -1840,8 +1852,14 @@ def bld_lower(b, fin, prover_constants=False):
     # the components j = 0..m-1 (MultiplierLeft or MultiplierRight); then the public coeffs
     copies = []                      # the copied LCs u
 
+    def wire_kind(x):
+        """"L" or "R" for a variable that is a left or right wire (a folded witness too)."""
+        if x[0] == "W" and x[1] < b.n_w and b.fold[x[1]] is not None:
+            return {"L": "L", "PL": "L", "R": "R", "PR": "R"}[b.fold[x[1]][0]]
+        return x[0]
+
     def copied(lc, kinds):
-        if any(x != ONE and x[0] in kinds for x, _ in lc):
+        if any(x != ONE and wire_kind(x) in kinds for x, _ in lc):
             copies.append(lc)
             return [(("Y", len(copies) - 1), 1)]
         return lc
@@ -1864,9 +1882,14 @@ def bld_lower(b, fin, prover_constants=False):
     def col(x):
         """Column of a variable; ("Y", y) is copy y (after the witnesses in w_O)."""
         kind, i = x
+        if kind == "W" and i < b.n_w and b.fold[i] is not None:
+            f, j = b.fold[i]
+            return {"L": cL(j), "R": cR(j), "PL": cL(n_r + j), "PR": cR(n_r + j)}[f]
         if kind in ("L", "R", "O"):
             return {"L": cL, "R": cR, "O": cO}[kind](i)
-        return cO({"V": n_r, "W": n_r + k, "Y": n_r + k + nw}[kind] + i)
+        if kind == "W":
+            return cO(n_r + k + free[i])
+        return cO({"V": n_r, "Y": n_r + k + nw}[kind] + i)
 
     def low(lc, scale=1):
         """(terms, constant) of the lowered LC, coefficients times scale."""
@@ -1893,8 +1916,10 @@ def bld_lower(b, fin, prover_constants=False):
             c = -b.eval([(x, cc) for x, cc in lc if x != ONE], W) % L
         w_l.append(t)
         a_l.append(c)
-    for g, (l, r, _) in enumerate(b.products):           # 3. product inputs
-        for wcol, lc in ((cL(n_r + g), l), (cR(n_r + g), r)):
+    for g, (l, r, _) in enumerate(b.products):           # 3. product inputs (not folded ones)
+        for wcol, lc, side in ((cL(n_r + g), l, "PL"), (cR(n_r + g), r, "PR")):
+            if (side, g) in prod_folded:
+                continue
             t, c = low(lc, L - 1)
             w_l.append([(wcol, 1)] + t)
             a_l.append(c)
@@ -1929,9 +1954,11 @@ def bld_lower(b, fin, prover_constants=False):
         pad = lambda v: (v + [0] * n_r)[:n_r]  # noqa: E731
         # w_D: the value of x_0 for m = 1, and 0 (ignored, spec 4.3) for a tuple pole
         w_D = [b.eval(tup[0], W) if m == 1 else 0 for m, _, tup in poles]
-        w_L = pad(list(b.aL)) + [b.eval(l, W) for l, _, _ in b.products]
-        w_R = pad(list(b.aR)) + [b.eval(r, W) for _, r, _ in b.products]
-        w_O = pad(list(b.aO)) + list(b.v) + list(W) + [b.eval(u, W) for u in copies]
+        aL, aR = b.wires(W)
+        w_L = pad(aL) + [b.eval(l, W) for l, _, _ in b.products]
+        w_R = pad(aR) + [b.eval(r, W) for _, r, _ in b.products]
+        w_O = (pad(list(b.aO)) + list(b.v) + [W[i] for i in sorted(free)]
+               + [b.eval(u, W) for u in copies])
         wit = {"w_D": w_D, "w_L": w_L, "w_R": w_R, "w_O": w_O, "v": [[x] for x in b.v],
                "s": list(b.s)}
     return rc, wit
@@ -1994,7 +2021,7 @@ def bld_semantic(b, fin):
     numerators of its terms sum to zero). Returns True iff all hold."""
     W = fin["wit"]
     ok = all(b.eval(lc, W) == 0 for lc in b.r1cs)
-    ok &= all(x * y % L == z for x, y, z in zip(b.aL, b.aR, b.aO))
+    ok &= all(x * y % L == z for x, y, z in zip(*b.wires(W), b.aO))
     ok &= all(b.eval(l, W) * b.eval(r, W) % L == b.eval(o, W) for l, r, o in b.products)
     for t, tup in b.lookups:
         vals = [b.eval(lc, W) for lc in tup]
@@ -2068,7 +2095,8 @@ def bld_self_check():
         assert recip_uses_eta(rc) == (m >= 2) == bld_uses_eta(fin)
         assert bld_semantic(b, fin) == bld_check_lowered(b, fin, rng)
     b = Builder()
-    Lm, Rm, Om = b.allocate_multiplier(3, 4)
+    Lm, Rm = b.witness(3), b.witness(4)
+    b.multiply([(Lm, 1)], [(Rm, 1)])  # both folded: Lm, Rm are the wires of multiplier 0
     W0 = b.witness(5)
     b.reciprocal(2, [([(Rm, 1)], [[(Lm, 1)], [(W0, 1)]]),        # copies: num, comp 0
                      ([(Lm, 1)], [[(W0, 1)], [(Rm, 0), (ONE, 4)]])],  # comp 1 (coefficient 0)
@@ -2088,11 +2116,65 @@ def bld_self_check():
     assert wit["w_O"][first:] == [4, 3, 4, L - 4, 4]
     assert bld_semantic(b, fin) == bld_check_lowered(b, fin, rng)
     r1cs_random_plain_check(rng)
+    bld_random_fold_check(rng)
+
+
+def bld_random_fold_check(rng, count=200):
+    """Folding on random programs: witnesses alone (or not) in multiply and product inputs,
+    read again by constraints, products, lookups (one and two columns) and numerators. The
+    direct semantic check and the lowered circuit agree, for the honest values and for every
+    single changed value (bld_agreement_check); a folded witness takes no slot of its own."""
+    for _ in range(count):
+        b = Builder()
+        small = lambda: rng.randrange(4)  # noqa: E731
+        t1 = b.table([[i] for i in range(4)])
+        t2 = b.table([[i, i * i % L] for i in range(4)])
+        for _ in range(rng.randrange(1, 9)):
+            ws = [("W", i) for i in range(b.n_w)]
+            wires = [(t, i) for i in range(b.n) for t in "LRO"]
+
+            def inp():
+                if ws and rng.random() < 0.6:
+                    return [(rng.choice(ws), 1)]  # a lone witness: folds if free
+                vs = ws + wires
+                return [(rng.choice(vs), rng.randrange(1, 4)) for _ in range(rng.randrange(1, 3))] if vs else [(ONE, 2)]
+
+            op = rng.randrange(7)
+            if op <= 1 or not ws:
+                b.witness(small())
+            elif op == 2:
+                b.multiply(inp(), inp())
+            elif op == 3:
+                l, r = inp(), inp()
+                out = b.witness(b.eval(l) * b.eval(r) % L if rng.random() < 0.9 else small())
+                b.product(l, r, [(out, 1)])
+            elif op == 4:
+                x = rng.choice(ws + wires)
+                lc = [(x, 1)]
+                b.constrain(lc + [(ONE, -b.eval(lc) % L)] if rng.random() < 0.9 else lc)
+            elif op == 5:
+                x = rng.choice(ws + wires)
+                if rng.random() < 0.5:
+                    b.lookup(t1, [[(x, 1)]])
+                else:
+                    sq = b.witness(b.eval([(x, 1)]) ** 2 % L)
+                    b.lookup(t2, [[(x, 1)], [(sq, 1)]])
+            else:
+                x = rng.choice(ws + wires)
+                b.reciprocal(1, [([(x, 1)], [[(x, 1)]]), ([(x, L - 1)], [[(x, 1)]])], [])
+        try:
+            fin = bld_finalize(b)
+        except BuilderProverError:
+            continue
+        folded = sum(f is not None for f in b.fold)
+        assert fin["n_free"] == fin["n_w"] - folded
+        assert bld_semantic(b, fin) == bld_check_lowered(b, fin, rng)
+        bld_agreement_check(b, rng)
 
 
 def r1cs_random_plain_check(rng, count=150):
-    """r1cs_plain_self_check on random plain programs (commit, multiply, allocate,
-    allocate_multiplier, constrain; constraints satisfied or not, n = 0 and k = 0 included)."""
+    """r1cs_plain_self_check on random plain programs (commit, multiply, constrain;
+    constraints satisfied or not, n = 0 and k = 0 included)."""
     for _ in range(count):
         b = Builder()
         for _ in range(rng.randrange(0, 3)):
@@ -2105,13 +2187,8 @@ def r1cs_random_plain_check(rng, count=150):
                       if vs else [])
                 return lc + [(ONE, rng.randrange(L))]
 
-            op = rng.randrange(4)
-            if op == 0:
+            if rng.randrange(2) == 0:
                 b.multiply(rlc(), rlc())
-            elif op == 1:
-                b.allocate(rng.randrange(L))
-            elif op == 2:
-                b.allocate_multiplier(rng.randrange(L), rng.randrange(L))
             else:
                 lc = rlc()
                 if rng.random() < 0.7:

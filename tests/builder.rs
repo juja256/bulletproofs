@@ -169,12 +169,13 @@ fn gadgets_on_both_backends() {
         let parsed = R1CSProof::from_bytes(&proof.to_bytes()).unwrap();
         assert_eq!(verify(backend, &parsed, &V, &bp).unwrap(), cost);
         // private terms: range32 4, xor8 8 (6 nibbles, 2 xor rows), memory 12 + 6, balance
-        // 3 + 8 = 41; witnesses 33 + multiplicities 256 + 16 + 256 = 561, 281 pairs; 1 product
-        // N_lin: 7 input copies + 561 witnesses - 42 norm slots
-        assert_eq!(cost, Cost { bp_phase1: 282, bp_phase2: 41, bppp_gates: 42, bppp_linear: 526 }, "{:?}", backend);
+        // 3 + 8 = 41; witnesses 33 + multiplicities 256 + 16 + 256 = 561, one folded into the
+        // product's wire: 560 free, 280 pairs, + 1 product
+        // N_lin: 7 input copies + 560 free witnesses - 42 norm slots
+        assert_eq!(cost, Cost { bp_phase1: 281, bp_phase2: 41, bppp_gates: 42, bppp_linear: 525 }, "{:?}", backend);
         // exactly the capacity the cost asks for suffices, one less does not
         let need = cost.gens_capacity(backend);
-        assert_eq!(need, if backend == Backend::Bp { 512 } else { 532 });
+        assert_eq!(need, if backend == Backend::Bp { 512 } else { 531 });
         assert!(prove(backend, &vals, &p, &BulletproofGens::new(need, 1)).is_ok());
         assert!(matches!(prove(backend, &vals, &p, &BulletproofGens::new(need - 1, 1)), Err(R1CSError::InvalidGeneratorsLength)));
     }
@@ -234,20 +235,21 @@ fn proofs_of_one_backend_do_not_verify_with_the_other() {
 }
 
 /// A small statement exercising the copies of §7.6: numerators and public coefficients that
-/// read `MultiplierRight` (the right wire of `allocate`), tuple components on `w_L` and `w_R`,
-/// constants in coefficients, a product with constants.
+/// read a right wire (a witness folded into the right input of multiplier 0), tuple components
+/// on `w_L` and `w_R`, constants in coefficients, a product with constants.
 fn copies<CS: ConstraintSystem<Scalar>>(cs: &mut CS, V: &[Variable], p: Option<[u64; 3]>) -> Result<(), R1CSError> {
     let s = |x: u64| Scalar::from(x);
-    let a = cs.allocate(p.map(|p| s(p[0])))?; // MultiplierLeft(0)
-    let b = cs.allocate(p.map(|p| s(p[1])))?; // MultiplierRight(0)
+    let a = cs.witness(p.map(|p| s(p[0])))?;
+    let b = cs.witness(p.map(|p| s(p[1])))?;
+    cs.multiply(a.into(), b.into())?; // a, b: the left and right wires of multiplier 0
     let t = cs.table((0..8u64).map(|x| vec![x]).collect())?;
     cs.lookup(t, &[b.into()])?; // b < 8
     cs.lookup(t, &[a.into()])?;
     let w = cs.witness(p.map(|p| s(p[2])))?;
-    cs.constrain_product(a + 1u64, b.into(), w - V[0] + Scalar::ONE)?; // (a + 1) b = w - v + 1
+    cs.constrain_product(lc(a) + 1u64, b.into(), lc(w) - V[0] + Scalar::ONE)?; // (a + 1) b = w - v + 1
     // b / (X + (a, b)) - b / (X + (a, b)) + (2b - 10) / (X + (1, 2))
     let r = cs.reciprocal(2)?;
-    r.add_weighted(cs, b + 0u64, &[a.into(), b.into()])?;
+    r.add_weighted(cs, lc(b) + 0u64, &[a.into(), b.into()])?;
     r.add_weighted(cs, -Lc::from(b), &[a.into(), b.into()])?;
     r.add_public(cs, b * Scalar::from(2u64) - Scalar::from(10u64), &[1, 2]) // 0 for b = 5
 }
@@ -303,12 +305,12 @@ fn no_gates() {
     for backend in backends() {
         let g = |cs: &mut Prover<&mut Transcript, Ristretto>, x: Variable| {
             let w = cs.witness(Some(Scalar::from(4u64)))?;
-            cs.constrain(w - x);
+            cs.constrain(lc(w) - x);
             Ok(())
         };
         let gv = |cs: &mut Verifier<&mut Transcript, Ristretto>, x: Variable| {
             let w = cs.witness(None)?;
-            cs.constrain(w - x);
+            cs.constrain(lc(w) - x);
             Ok(())
         };
         let (proof, V, cost) = prove_small(backend, 4, g).unwrap();
@@ -331,11 +333,11 @@ fn bppp_builder_rules() {
     // randomized constraints are refused on both sides: r1cs::tests::randomized
     // a verifier without the builder operations rejects a builder proof, and conversely
     let plain_p = |cs: &mut Prover<&mut Transcript, Ristretto>, x: Variable| {
-        cs.constrain(x - 4u64);
+        cs.constrain(lc(x) - 4u64);
         Ok(())
     };
     let plain_v = |cs: &mut Verifier<&mut Transcript, Ristretto>, x: Variable| {
-        cs.constrain(x - 4u64);
+        cs.constrain(lc(x) - 4u64);
         Ok(())
     };
     assert!(verify_small(b, &proof, V, plain_v).is_err());
@@ -398,9 +400,10 @@ fn failed_operations_record_nothing() {
         let one = cs.table(vec![vec![0]]).unwrap();
         let before = cs.cost();
         assert!(cs.lookup_value(two, val).is_err());
-        assert!(cs.lookup(one, &[Variable::Witness(0).into()]).is_err(), "no witness 0");
+        let w0 = foreign(1, 0, 0).0[0];
+        assert!(cs.lookup(one, &[w0.into()]).is_err(), "no witness 0");
         assert_eq!(cs.cost(), before);
-        assert_eq!(cs.witness(val.map(Scalar::from)).unwrap(), Variable::Witness(0));
+        assert_eq!(cs.witness(val.map(Scalar::from)).unwrap(), w0);
     }
     go(&mut p, Some(0));
     go(&mut v, None);
@@ -411,24 +414,25 @@ fn failed_operations_record_nothing() {
 /// a `Witness` one past the last aliased the zero half of the last witness pair).
 #[test]
 fn constraints_on_missing_variables_are_errors() {
-    let bad = [Variable::Witness(1), Variable::Witness(1000), Variable::MultiplierLeft(7), Variable::Committed(1)];
+    let (w, o, c) = foreign(1001, 8, 2);
+    let bad = [w[1], w[1000], o[7], c[1]];
     for backend in backends() {
         for &y in &bad {
             let gp = move |cs: &mut Prover<&mut Transcript, Ristretto>, x: Variable| {
                 cs.witness(Some(Scalar::from(4u64)))?;
-                cs.constrain(y - x);
+                cs.constrain(lc(y) - x);
                 Ok(())
             };
             let gv = move |cs: &mut Verifier<&mut Transcript, Ristretto>, x: Variable| {
                 cs.witness(None)?;
-                cs.constrain(y - x);
+                cs.constrain(lc(y) - x);
                 Ok(())
             };
             assert!(matches!(prove_small(backend, 0, gp), Err(R1CSError::GadgetError { .. })), "{:?} {:?}", backend, y);
             // a proof of the honest statement, presented to a verifier with the bad constraint
             let ok = |cs: &mut Prover<&mut Transcript, Ristretto>, x: Variable| {
                 cs.witness(Some(Scalar::from(4u64)))?;
-                cs.constrain(x - 0u64);
+                cs.constrain(lc(x) - 0u64);
                 Ok(())
             };
             let (proof, V, _) = prove_small(backend, 0, ok).unwrap();
@@ -437,7 +441,7 @@ fn constraints_on_missing_variables_are_errors() {
     }
     // also without builder operations
     let gp = |cs: &mut Prover<&mut Transcript, Ristretto>, x: Variable| {
-        cs.constrain(Variable::MultiplierOutput(3) - x);
+        cs.constrain(lc(foreign(0, 4, 0).1[3]) - x);
         Ok(())
     };
     assert!(matches!(prove_small(Backend::Bp, 0, gp), Err(R1CSError::GadgetError { .. })));
@@ -449,24 +453,26 @@ fn constraints_on_missing_variables_are_errors() {
 fn failed_operations_leave_the_plain_proof() {
     let g = |cs: &mut Prover<&mut Transcript, Ristretto>, x: Variable| {
         assert!(cs.table(vec![vec![]]).is_err());
-        assert!(cs.constrain_product(Variable::Witness(3).into(), x.into(), x.into()).is_err());
+        let w = foreign(10, 0, 0).0;
+        assert!(cs.constrain_product(w[3].into(), x.into(), x.into()).is_err());
         let r = cs.reciprocal(1)?;
-        assert!(r.add(cs, &[Variable::Witness(9).into()]).is_err());
-        cs.constrain(x - 0u64);
+        assert!(r.add(cs, &[w[9].into()]).is_err());
+        cs.constrain(lc(x) - 0u64);
         Ok(())
     };
     let gv = |cs: &mut Verifier<&mut Transcript, Ristretto>, x: Variable| {
         assert!(cs.table(vec![vec![]]).is_err());
-        assert!(cs.constrain_product(Variable::Witness(3).into(), x.into(), x.into()).is_err());
+        let w = foreign(10, 0, 0).0;
+        assert!(cs.constrain_product(w[3].into(), x.into(), x.into()).is_err());
         let r = cs.reciprocal(1)?;
-        assert!(r.add(cs, &[Variable::Witness(9).into()]).is_err());
-        cs.constrain(x - 0u64);
+        assert!(r.add(cs, &[w[9].into()]).is_err());
+        cs.constrain(lc(x) - 0u64);
         Ok(())
     };
     let (proof, V, _) = prove_small(Backend::Bppp, 0, g).unwrap();
     verify_small(Backend::Bppp, &proof, V, gv).unwrap();
     let plain = |cs: &mut Prover<&mut Transcript, Ristretto>, x: Variable| {
-        cs.constrain(x - 0u64);
+        cs.constrain(lc(x) - 0u64);
         Ok(())
     };
     let (p2, _, _) = prove_small(Backend::Bppp, 0, plain).unwrap();
@@ -483,12 +489,12 @@ fn object_safe() {
     for backend in backends() {
         let p = |cs: &mut Prover<&mut Transcript, Ristretto>, x: Variable| {
             let y = gadget(cs, Some(3))?;
-            cs.constrain(y - x);
+            cs.constrain(lc(y) - x);
             Ok(())
         };
         let v = |cs: &mut Verifier<&mut Transcript, Ristretto>, x: Variable| {
             let y = gadget(cs, None)?;
-            cs.constrain(y - x);
+            cs.constrain(lc(y) - x);
             Ok(())
         };
         let (proof, V, _) = prove_small(backend, 3, p).unwrap();
@@ -537,7 +543,7 @@ fn xor32_with_unbounded_nibbles() {
             let (V1, vy) = p.commit(Scalar::from(y), Scalar::from(2u64));
             let z = xor32(&mut p, vx, vy, Some(nib))?;
             let (V2, vz) = p.commit(Scalar::from(x ^ y), Scalar::from(3u64));
-            p.constrain(z - vz);
+            p.constrain(lc(z) - vz);
             let cost = p.cost();
             Ok((p.prove_with_rng(&bp, &mut ChaCha20Rng::seed_from_u64(5))?, vec![V0, V1, V2], cost))
         };
@@ -548,7 +554,7 @@ fn xor32_with_unbounded_nibbles() {
             let (vx, vy) = (v.commit(V[0]), v.commit(V[1]));
             let z = xor32(&mut v, vx, vy, None)?;
             let vz = v.commit(V[2]);
-            v.constrain(z - vz);
+            v.constrain(lc(z) - vz);
             v.verify(proof, &pc, &bp)
         };
         let (proof, V, cost) = run(honest).unwrap();
@@ -579,4 +585,18 @@ fn cost_per_backend() {
     let c = Cost { bp_phase1: 7, bp_phase2: 3, bppp_gates: 5, bppp_linear: 4 };
     assert_eq!((c.gates(Backend::Bp), c.linear(Backend::Bp)), (10, 0));
     assert_eq!((c.gates(Backend::Bppp), c.linear(Backend::Bppp)), (5, 4));
+}
+
+/// Variables of another constraint system (`n_w` witnesses, `n` multiplier outputs, `k`
+/// committed inputs, in that order of creation): a constraint system with fewer of a kind must
+/// refuse them.
+fn foreign(n_w: usize, n: usize, k: usize) -> (Vec<Variable>, Vec<Variable>, Vec<Variable>) {
+    let pc = PedersenGens::<Ristretto>::default();
+    let mut t = Transcript::new(b"foreign");
+    let mut p = Prover::new(&pc, &mut t);
+    let one = || Some(Scalar::from(1u64));
+    let w = (0..n_w).map(|_| p.witness(one()).unwrap()).collect();
+    let o = (0..n).map(|_| p.multiply(Scalar::from(1u64).into(), Scalar::from(1u64).into()).unwrap()).collect();
+    let c = (0..k).map(|_| p.commit(Scalar::from(1u64), Scalar::from(1u64)).1).collect();
+    (w, o, c)
 }

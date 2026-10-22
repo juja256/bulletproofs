@@ -6,7 +6,7 @@ use group::Group;
 
 use super::{
     ConstraintSystem, LinearCombination, R1CSProof, RandomizableConstraintSystem,
-    RandomizedConstraintSystem, Variable,
+    RandomizedConstraintSystem, Var, Variable,
 };
 
 use crate::curve::Curve;
@@ -15,8 +15,8 @@ use crate::generators::{BulletproofGens, PedersenGens};
 use crate::transcript::{TranscriptBackend, TranscriptProtocol, TranscriptRef};
 use super::proof::ProofKind;
 use super::proof::BpppProof;
-use super::builder::{self, Builder, Cost, Counts, Reciprocal, TableId};
-use super::compact::{ConstraintStore, Flattened};
+use super::builder::{self, Builder, Cost, Counts, Reciprocal, TableId, Wire};
+use super::compact::{ConstraintStore, Flattened, Input};
 
 /// A [`ConstraintSystem`] implementation for use by the verifier.
 ///
@@ -48,8 +48,6 @@ pub struct Verifier<T: TranscriptRef, C: Curve> {
     deferred_constraints:
         Vec<Box<dyn FnOnce(&mut RandomizingVerifier<T, C>) -> Result<(), R1CSError>>>,
 
-    /// Index of a pending multiplier that's not fully assigned yet.
-    pending_multiplier: Option<usize>,
 
     /// The proof system used by `verify`.
     backend: super::Backend,
@@ -57,8 +55,8 @@ pub struct Verifier<T: TranscriptRef, C: Curve> {
     /// The circuit builder's record (spec §7).
     builder: Builder<C::Scalar>,
 
-    /// First multiplier of the witness pairs (BP lowering, spec §7.5).
-    witness_base: usize,
+    /// The BP multiplier input of every witness (BP lowering, spec §7.5).
+    witness_inputs: Vec<Input>,
 }
 
 /// Verifier in the randomizing phase (the second phase of the BP backend).
@@ -76,26 +74,9 @@ impl<T: TranscriptRef, C: Curve> ConstraintSystem<C::Scalar> for Verifier<T, C> 
     }
 
     fn multiply(&mut self, left: LinearCombination<C::Scalar>, right: LinearCombination<C::Scalar>) -> Result<Variable, R1CSError> {
-        Ok(self.multiplier(left, right).2)
-    }
-
-    fn allocate(&mut self, _: Option<C::Scalar>) -> Result<Variable, R1CSError> {
-        match self.pending_multiplier {
-            None => {
-                let i = self.num_vars;
-                self.num_vars += 1;
-                self.pending_multiplier = Some(i);
-                Ok(Variable::MultiplierLeft(i))
-            }
-            Some(i) => {
-                self.pending_multiplier = None;
-                Ok(Variable::MultiplierRight(i))
-            }
-        }
-    }
-
-    fn allocate_multiplier(&mut self, _: Option<(C::Scalar, C::Scalar)>) -> Result<(Variable, Variable, Variable), R1CSError> {
-        Ok(self.free_multiplier())
+        let i = self.num_vars;
+        let fold = (self.builder.fold(&left, Wire::Left(i)), self.builder.fold(&right, Wire::Right(i)));
+        Ok(self.multiplier(left, right, fold).2)
     }
 
     fn constrain_product(&mut self, l: LinearCombination<C::Scalar>, r: LinearCombination<C::Scalar>, out: LinearCombination<C::Scalar>) -> Result<(), R1CSError> {
@@ -160,7 +141,7 @@ impl<T: TranscriptRef, C: Curve> RandomizableConstraintSystem<C::Scalar> for Ver
 
 impl<T: TranscriptRef, C: Curve> RandomizedConstraintSystem<C::Scalar> for RandomizingVerifier<T, C> {
     fn multiply(&mut self, l: LinearCombination<C::Scalar>, r: LinearCombination<C::Scalar>) -> (Variable, Variable, Variable) {
-        self.verifier.multiplier(l, r)
+        self.verifier.multiplier(l, r, (false, false))
     }
 
     fn allocate_multiplier(&mut self, _: Option<(C::Scalar, C::Scalar)>) -> Result<(Variable, Variable, Variable), R1CSError> {
@@ -201,14 +182,18 @@ impl<T: TranscriptRef<Backend = crate::simplicity::CompileTranscript>> Verifier<
 }
 
 impl<T: TranscriptRef, C: Curve> Verifier<T, C> {
-    /// A BP multiplier with `left = l`, `right = r` (two linear constraints); returns
-    /// `(left, right, out)`.
-    fn multiplier(&mut self, mut l: LinearCombination<C::Scalar>, mut r: LinearCombination<C::Scalar>) -> (Variable, Variable, Variable) {
+    /// A BP multiplier with `left = l`, `right = r`; returns `(left, right, out)`. An input
+    /// that is a folded witness (`fold`) is the wire itself, without a linear constraint.
+    fn multiplier(&mut self, mut l: LinearCombination<C::Scalar>, mut r: LinearCombination<C::Scalar>, fold: (bool, bool)) -> (Variable, Variable, Variable) {
         let (l_var, r_var, o_var) = self.free_multiplier();
-        l.terms.push((l_var, -C::Scalar::ONE));
-        r.terms.push((r_var, -C::Scalar::ONE));
-        self.constraints.push(&l);
-        self.constraints.push(&r);
+        if !fold.0 {
+            l.terms.push((l_var, -C::Scalar::ONE));
+            self.constraints.push(&l);
+        }
+        if !fold.1 {
+            r.terms.push((r_var, -C::Scalar::ONE));
+            self.constraints.push(&r);
+        }
         (l_var, r_var, o_var)
     }
 
@@ -216,7 +201,7 @@ impl<T: TranscriptRef, C: Curve> Verifier<T, C> {
     fn free_multiplier(&mut self) -> (Variable, Variable, Variable) {
         let i = self.num_vars;
         self.num_vars += 1;
-        (Variable::MultiplierLeft(i), Variable::MultiplierRight(i), Variable::MultiplierOutput(i))
+        (Variable(Var::MultiplierLeft(i)), Variable(Var::MultiplierRight(i)), Variable(Var::MultiplierOutput(i)))
     }
 
     /// Construct an empty constraint system with specified external
@@ -244,10 +229,9 @@ impl<T: TranscriptRef, C: Curve> Verifier<T, C> {
             V: Vec::new(),
             constraints: ConstraintStore::new(true),
             deferred_constraints: Vec::new(),
-            pending_multiplier: None,
             backend: super::Backend::default(),
             builder: Builder::default(),
-            witness_base: 0,
+            witness_inputs: Vec::new(),
         }
     }
 
@@ -279,7 +263,7 @@ impl<T: TranscriptRef, C: Curve> Verifier<T, C> {
         // Add the commitment to the transcript.
         self.transcript.backend().append_point(b"V", &commitment);
 
-        Variable::Committed(i)
+        Variable(Var::Committed(i))
     }
 
     /// Use a challenge, `z`, to flatten the constraints in the
@@ -299,7 +283,7 @@ impl<T: TranscriptRef, C: Curve> Verifier<T, C> {
     /// because they're not needed to construct the proof).
     fn flattened_constraints(&mut self, z: &C::Scalar) -> Flattened<C::Scalar> {
         let (n, m) = (self.num_vars, self.V.len());
-        self.constraints.flatten(z, n, m, self.witness_base)
+        self.constraints.flatten(z, n, m, &self.witness_inputs)
     }
 
     fn counts(&self) -> Counts {
@@ -310,12 +294,15 @@ impl<T: TranscriptRef, C: Curve> Verifier<T, C> {
     fn lower_builder_bp(&mut self) -> Result<(), R1CSError> {
         // an empty record (a plain R1CS) adds nothing
         self.builder.finalize(None)?;
-        self.witness_base = self.num_vars;
-        self.num_vars += (self.builder.n_w + 1) / 2;
-        for (l, r, out) in core::mem::take(&mut self.builder.products) {
-            let (_, _, o) = self.multiplier(l, r);
+        let place = self.builder.placement();
+        let witness_base = self.num_vars;
+        self.num_vars += (place.n_free + 1) / 2;
+        let product_base = self.num_vars;
+        for ((l, r, out), fold) in core::mem::take(&mut self.builder.products).into_iter().zip(place.product_folded.iter().copied()) {
+            let (_, _, o) = self.multiplier(l, r, fold);
             self.constraints.push(&(o - out));
         }
+        self.witness_inputs = place.bp_inputs(witness_base, product_base);
         for arg in core::mem::take(&mut self.builder.args) {
             self.specify_randomized_constraints(move |cs| builder::logup(cs, arg))?;
         }
@@ -325,8 +312,6 @@ impl<T: TranscriptRef, C: Curve> Verifier<T, C> {
     /// Calls all remembered callbacks with an API that
     /// allows generating challenge scalars.
     fn create_randomized_constraints(mut self) -> Result<Self, R1CSError> {
-        // Clear the pending multiplier (if any) because it was committed into A_L/A_R/S.
-        self.pending_multiplier = None;
 
         if self.deferred_constraints.len() == 0 {
             self.transcript.backend().r1cs_1phase_domain_sep();
@@ -363,10 +348,12 @@ impl<T: TranscriptRef, C: Curve> Verifier<T, C> {
     /// Finalize the builder's record and lower it (spec §7.4, §7.6).
     pub(crate) fn lower_builder_bppp(&mut self) -> Result<crate::bppp::ReciprocalCircuit<C::Scalar>, R1CSError> {
         self.builder.finalize(None)?;
+        let place = self.builder.placement();
         let rec = super::backend::Record {
             n: self.num_vars,
             k: self.V.len(),
             n_w: self.builder.n_w,
+            place: &place,
             products: &self.builder.products,
             args: &self.builder.args,
         };

@@ -5,7 +5,8 @@
 
 use subtle::Choice;
 
-use super::{ConstraintSystem, LinearCombination, RandomizedConstraintSystem, Variable};
+use super::compact::Input;
+use super::{ConstraintSystem, LinearCombination, RandomizedConstraintSystem, Var, Variable};
 use crate::curve::Field;
 use crate::errors::R1CSError;
 
@@ -122,10 +123,115 @@ pub(super) struct Counts {
     pub(super) k: usize,
 }
 
+/// A product input wire that a free witness is folded into: the witness is the whole left or
+/// right input (coefficient 1, no constant) of the product, the first time it is one. Its
+/// input row is dropped, every other reference reads the wire, and it takes no slot of its own
+/// (BP: no half multiplier; BP++: no linear slot).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Wire {
+    /// An input of R1CS multiplier `i` (`multiply`).
+    Left(usize),
+    Right(usize),
+    /// An input of the builder's product `p` (`constrain_product`).
+    ProductLeft(usize),
+    ProductRight(usize),
+}
+
+impl Wire {
+    fn is_right(self) -> bool {
+        matches!(self, Wire::Right(_) | Wire::ProductRight(_))
+    }
+}
+
+/// Where every witness lives after folding: a wire, or a slot among the free witnesses
+/// (numbered densely in order; multiplicities, created at finalization, are free).
+pub(super) struct Placement {
+    folds: Vec<Option<Wire>>,
+    /// Per witness of `folds`: its free slot (meaningless for a folded one).
+    slot: Vec<usize>,
+    n_folded: usize,
+    /// Free witnesses, multiplicities included.
+    pub(super) n_free: usize,
+    /// Per product: whether its left and right inputs are folded witnesses.
+    pub(super) product_folded: Vec<(bool, bool)>,
+}
+
+impl Placement {
+    fn new(folds: &[Option<Wire>], n_w: usize, n_products: usize) -> Self {
+        let mut slot = Vec::with_capacity(folds.len());
+        let mut product_folded = vec![(false, false); n_products];
+        let mut n_free = 0;
+        for f in folds {
+            slot.push(n_free);
+            match f {
+                None => n_free += 1,
+                Some(Wire::ProductLeft(p)) => product_folded[*p].0 = true,
+                Some(Wire::ProductRight(p)) => product_folded[*p].1 = true,
+                Some(_) => {}
+            }
+        }
+        let n_folded = folds.len() - n_free;
+        Placement { folds: folds.to_vec(), slot, n_folded, n_free: n_w - n_folded, product_folded }
+    }
+
+    /// The wire a variable is, if any: a multiplier input, or a witness folded into one.
+    pub(super) fn wire(&self, x: Variable) -> Option<Wire> {
+        match x {
+            Variable(Var::MultiplierLeft(i)) => Some(Wire::Left(i)),
+            Variable(Var::MultiplierRight(i)) => Some(Wire::Right(i)),
+            Variable(Var::Witness(i)) => self.folds.get(i).copied().flatten(),
+            _ => None,
+        }
+    }
+
+    /// The free slot of witness `i` (not folded).
+    pub(super) fn slot(&self, i: usize) -> usize {
+        self.slot.get(i).copied().unwrap_or(i - self.n_folded)
+    }
+
+    /// The BP multiplier input of every witness: a folded one is the input of its product
+    /// (products are lowered from multiplier `product_base` on), free ones are packed in pairs
+    /// from multiplier `witness_base` on (spec §7.5).
+    pub(super) fn bp_inputs(&self, witness_base: usize, product_base: usize) -> Vec<Input> {
+        let n_w = self.n_folded + self.n_free;
+        (0..n_w)
+            .map(|i| match self.folds.get(i).copied().flatten() {
+                Some(Wire::Left(m)) => Input { multiplier: m, right: false },
+                Some(Wire::Right(m)) => Input { multiplier: m, right: true },
+                Some(Wire::ProductLeft(p)) => Input { multiplier: product_base + p, right: false },
+                Some(Wire::ProductRight(p)) => Input { multiplier: product_base + p, right: true },
+                None => {
+                    let j = self.slot(i);
+                    Input { multiplier: witness_base + j / 2, right: j % 2 == 1 }
+                }
+            })
+            .collect()
+    }
+
+    /// Whether witness `i` is free (not folded).
+    pub(super) fn is_free(&self, i: usize) -> bool {
+        self.folds.get(i).map_or(true, Option::is_none)
+    }
+
+    /// Whether `lc` reads a right input wire (BP++ copies of numerators and public
+    /// coefficients, spec §7.6).
+    pub(super) fn reads_right<F: Field>(&self, lc: &LinearCombination<F>) -> bool {
+        lc.terms.iter().any(|(x, _)| self.wire(*x).map_or(false, Wire::is_right))
+    }
+
+    /// Whether `lc` reads an input wire, left or right: a BP++ tuple component that does needs
+    /// a copy into `C_O` before the challenge `eta` (spec §7.6).
+    pub(super) fn reads_input<F: Field>(&self, lc: &LinearCombination<F>) -> bool {
+        lc.terms.iter().any(|(x, _)| self.wire(*x).is_some())
+    }
+}
+
 /// The backend-independent record of the builder operations (spec §7.2).
 pub(super) struct Builder<F: Field> {
     /// Witnesses so far (multiplicities included after finalization).
     pub(super) n_w: usize,
+    /// Per witness created by `witness`: the wire it is folded into.
+    folds: Vec<Option<Wire>>,
     pub(super) products: Vec<(LinearCombination<F>, LinearCombination<F>, LinearCombination<F>)>,
     pub(super) tables: Vec<Table<F>>,
     pub(super) args: Vec<Argument<F>>,
@@ -138,6 +244,7 @@ impl<F: Field> Default for Builder<F> {
     fn default() -> Self {
         Builder {
             n_w: 0,
+            folds: Vec::new(),
             products: Vec::new(),
             tables: Vec::new(),
             args: Vec::new(),
@@ -150,10 +257,10 @@ impl<F: Field> Default for Builder<F> {
 impl<F: Field> Builder<F> {
     fn check_var(&self, x: Variable, c: Counts) -> Result<(), R1CSError> {
         let ok = match x {
-            Variable::Committed(j) => j < c.k,
-            Variable::MultiplierLeft(i) | Variable::MultiplierRight(i) | Variable::MultiplierOutput(i) => i < c.n,
-            Variable::Witness(i) => i < self.n_w,
-            Variable::One() => true,
+            Variable(Var::Committed(j)) => j < c.k,
+            Variable(Var::MultiplierLeft(i)) | Variable(Var::MultiplierRight(i)) | Variable(Var::MultiplierOutput(i)) => i < c.n,
+            Variable(Var::Witness(i)) => i < self.n_w,
+            Variable(Var::One) => true,
         };
         if ok {
             Ok(())
@@ -176,15 +283,39 @@ impl<F: Field> Builder<F> {
 
     pub(super) fn witness(&mut self) -> Variable {
         self.n_w += 1;
-        Variable::Witness(self.n_w - 1)
+        self.folds.push(None);
+        Variable(Var::Witness(self.n_w - 1))
+    }
+
+    /// Fold `lc` into `wire` if it is exactly one free witness with coefficient 1 (the same
+    /// decision for the prover and the verifier: it depends on the calls only).
+    pub(super) fn fold(&mut self, lc: &LinearCombination<F>, wire: Wire) -> bool {
+        match lc.terms.as_slice() {
+            [(Variable(Var::Witness(i)), c)] if *c == F::ONE => match self.folds.get_mut(*i) {
+                Some(f @ None) => {
+                    *f = Some(wire);
+                    true
+                }
+                _ => false,
+            },
+            _ => false,
+        }
     }
 
     pub(super) fn constrain_product(&mut self, l: LinearCombination<F>, r: LinearCombination<F>, out: LinearCombination<F>, c: Counts) -> Result<(), R1CSError> {
         for lc in [&l, &r, &out] {
             self.check_lc(lc, c)?;
         }
+        let p = self.products.len();
+        self.fold(&l, Wire::ProductLeft(p));
+        self.fold(&r, Wire::ProductRight(p));
         self.products.push((l, r, out));
         Ok(())
+    }
+
+    /// Where the witnesses live (after finalization, multiplicities included).
+    pub(super) fn placement(&self) -> Placement {
+        Placement::new(&self.folds, self.n_w, self.products.len())
     }
 
     pub(super) fn table(&mut self, rows: Vec<Vec<u64>>) -> Result<TableId, R1CSError> {
@@ -253,13 +384,15 @@ impl<F: Field> Builder<F> {
     pub(super) fn cost(&self, n: usize, k: usize) -> Cost {
         let used = || self.tables.iter().filter(|t| !t.queries.is_empty());
         let n_w = self.n_w + used().map(|t| t.rows.len()).sum::<usize>();
+        let place = Placement::new(&self.folds, n_w, self.products.len());
+        let n_free = place.n_free;
         let n_p = self.args.iter().map(|a| a.private.len()).sum::<usize>() + used().map(|t| t.queries.len()).sum::<usize>();
         let n_prod = self.products.len();
         let n_r = if n == 0 && n_prod == 0 && n_p == 0 { 1 } else { n };
         // copies (spec §7.6): numerators and coefficients that read w_R, components of
         // tuples (m >= 2) that read w_L or w_R
-        let right = |lc: &LinearCombination<F>| lc.terms.iter().any(|(x, _)| matches!(x, Variable::MultiplierRight(_)));
-        let comp_copies = |m: usize, tuple: &[LinearCombination<F>]| if m >= 2 { tuple.iter().filter(|x| needs_early_copy(x)).count() } else { 0 };
+        let right = |lc: &LinearCombination<F>| place.reads_right(lc);
+        let comp_copies = |m: usize, tuple: &[LinearCombination<F>]| if m >= 2 { tuple.iter().filter(|x| place.reads_input(x)).count() } else { 0 };
         let copies: usize = self
             .args
             .iter()
@@ -271,10 +404,10 @@ impl<F: Field> Builder<F> {
             + used().map(|t| t.queries.iter().map(|q| comp_copies(t.m, q)).sum::<usize>()).sum::<usize>();
         let gates = n_p + n_r + n_prod;
         Cost {
-            bp_phase1: n + (n_w + 1) / 2 + n_prod,
+            bp_phase1: n + (n_free + 1) / 2 + n_prod,
             bp_phase2: n_p,
             bppp_gates: gates,
-            bppp_linear: (n_r + k + n_w + copies).saturating_sub(gates),
+            bppp_linear: (n_r + k + n_free + copies).saturating_sub(gates),
         }
     }
 
@@ -335,7 +468,7 @@ impl<F: Field> Builder<F> {
             let private = table.queries.into_iter().map(|q| (F::ONE.into(), q)).collect();
             let public = (0..table.rows.len())
                 .zip(table.rows)
-                .map(|(r, row)| (LinearCombination::from(Variable::Witness(first + r)) * (-F::ONE), row))
+                .map(|(r, row)| (LinearCombination::from(Variable(Var::Witness(first + r))) * (-F::ONE), row))
                 .collect();
             self.args.push(Argument { m: table.m, private, public });
         }
@@ -447,11 +580,6 @@ pub(super) fn logup<F: Field, CS: RandomizedConstraintSystem<F>>(cs: &mut CS, ar
     Ok(())
 }
 
-/// Whether a tuple component reads `w_L` or `w_R` and so needs a copy into `C_O` before the
-/// BP++ challenge `eta` (spec §7.6).
-pub(super) fn needs_early_copy<F: Field>(lc: &LinearCombination<F>) -> bool {
-    lc.terms.iter().any(|(x, _)| matches!(x, Variable::MultiplierLeft(_) | Variable::MultiplierRight(_)))
-}
 
 #[cfg(test)]
 mod tests {
@@ -490,27 +618,27 @@ mod tests {
     #[test]
     fn tuple_components_need_no_bound() {
         let (mut b, _) = four();
-        let (w0, w2) = (Variable::Witness(0), Variable::Witness(2));
+        let (w0, w2) = (Variable(Var::Witness(0)), Variable(Var::Witness(2)));
         let t2 = b.table(vec![vec![0, 0]]).unwrap();
         assert!(b.lookup(t2, &[w2.into(), w0.into()], C).is_ok());
         assert!(b.lookup(t2, &[w0 * (-Scalar::ONE), Scalar::from(1u128 << 100).into()], C).is_ok());
-        assert!(b.lookup(t2, &[Variable::MultiplierLeft(1).into(), Variable::MultiplierRight(0) - w0], C).is_ok());
+        assert!(b.lookup(t2, &[Variable(Var::MultiplierLeft(1)).into(), LinearCombination::from(Variable(Var::MultiplierRight(0))) - w0], C).is_ok());
         assert_eq!(b.tables[1].queries.len(), 3);
     }
 
     #[test]
     fn variables_must_exist() {
         let (mut b, t) = four();
-        assert!(b.lookup(t, &[Variable::Witness(4).into()], C).is_err());
-        assert!(b.lookup(t, &[Variable::MultiplierRight(2).into()], C).is_err());
-        assert!(b.lookup(t, &[Variable::MultiplierOutput(1).into()], C).is_ok());
-        assert!(b.lookup(t, &[Variable::Committed(1).into()], C).is_err());
-        assert!(b.constrain_product(Variable::Witness(9).into(), Scalar::ONE.into(), Scalar::ONE.into(), C).is_err());
+        assert!(b.lookup(t, &[Variable(Var::Witness(4)).into()], C).is_err());
+        assert!(b.lookup(t, &[Variable(Var::MultiplierRight(2)).into()], C).is_err());
+        assert!(b.lookup(t, &[Variable(Var::MultiplierOutput(1)).into()], C).is_ok());
+        assert!(b.lookup(t, &[Variable(Var::Committed(1)).into()], C).is_err());
+        assert!(b.constrain_product(Variable(Var::Witness(9)).into(), Scalar::ONE.into(), Scalar::ONE.into(), C).is_err());
         assert!(b.lookup(TableId(7), &[Scalar::ONE.into()], C).is_err());
         assert!(b.lookup(t, &[Scalar::ONE.into(), Scalar::ONE.into()], C).is_err(), "tuple length");
         assert!(b.lookup(t, &[], C).is_err(), "tuple length");
         let before = b.tables[t.0].queries.len();
-        assert!(b.lookup(t, &[Variable::Witness(4).into()], C).is_err());
+        assert!(b.lookup(t, &[Variable(Var::Witness(4)).into()], C).is_err());
         assert_eq!(b.tables[t.0].queries.len(), before, "a failed operation records nothing");
         let t2 = b.table(vec![vec![0, 0]]).unwrap();
         assert!(b.check_value_table(t2).is_err(), "lookup_value needs one column");
@@ -520,16 +648,16 @@ mod tests {
     #[test]
     fn reciprocals_are_validated() {
         let (mut b, _) = four();
-        let (w0, w1, w2) = (Variable::Witness(0), Variable::Witness(1), Variable::Witness(2));
+        let (w0, w1, w2) = (Variable(Var::Witness(0)), Variable(Var::Witness(1)), Variable(Var::Witness(2)));
         let one = || LinearCombination::from(Scalar::ONE);
         let r = b.reciprocal(2).unwrap();
         assert!(b.reciprocal_term(r, one(), &[w0.into(), w1.into()], C).is_ok());
         assert!(b.reciprocal_public(r, w2.into(), &[15, 1 << 40], C).is_ok());
         assert!(b.reciprocal_public(r, one(), &[1], C).is_err(), "row length");
         assert!(b.reciprocal_term(r, -one(), &[w2.into()], C).is_err(), "tuple length");
-        assert!(b.reciprocal_term(r, Variable::Witness(8).into(), &[w0.into(), w1.into()], C).is_err(), "unknown numerator variable");
-        assert!(b.reciprocal_term(r, one(), &[w0.into(), Variable::Witness(8).into()], C).is_err(), "unknown component variable");
-        assert!(b.reciprocal_public(r, Variable::Witness(8).into(), &[1, 2], C).is_err(), "unknown coefficient variable");
+        assert!(b.reciprocal_term(r, Variable(Var::Witness(8)).into(), &[w0.into(), w1.into()], C).is_err(), "unknown numerator variable");
+        assert!(b.reciprocal_term(r, one(), &[w0.into(), Variable(Var::Witness(8)).into()], C).is_err(), "unknown component variable");
+        assert!(b.reciprocal_public(r, Variable(Var::Witness(8)).into(), &[1, 2], C).is_err(), "unknown coefficient variable");
         assert_eq!((b.args[r.0].private.len(), b.args[r.0].public.len()), (1, 1), "a failed term records nothing");
         let x = b.reciprocal(1).unwrap();
         assert!(b.reciprocal_term(x, w2.into(), &[w2 * Scalar::from(7u64) + Scalar::ONE], C).is_ok());
@@ -552,14 +680,14 @@ mod tests {
         }
         let vals = [Scalar::from(1u64), Scalar::from(2u64), Scalar::from(1u64)];
         let eval = |lc: &LinearCombination<Scalar>| {
-            lc.terms.iter().map(|(x, c)| c * if let Variable::Witness(i) = x { vals[*i] } else { Scalar::ONE }).sum()
+            lc.terms.iter().map(|(x, c)| c * if let Variable(Var::Witness(i)) = x { vals[*i] } else { Scalar::ONE }).sum()
         };
         let cost = b.cost(0, 0);
         let m = b.finalize(Some(&eval)).unwrap();
         assert_eq!(m, vec![Scalar::from(2u64), Scalar::ONE, Scalar::ZERO]);
         assert_eq!(b.n_w, 6, "multiplicities of used tables only");
         assert_eq!(b.args.len(), 1);
-        assert_eq!(b.args[0].public[0].0, LinearCombination::from(Variable::Witness(3)) * (-Scalar::ONE));
+        assert_eq!(b.args[0].public[0].0, LinearCombination::from(Variable(Var::Witness(3))) * (-Scalar::ONE));
         assert_eq!(cost, Cost { bp_phase1: 3, bp_phase2: 3, bppp_gates: 3, bppp_linear: 3 });
         // a query equal to no row
         let mut b = Builder::default();
@@ -574,7 +702,7 @@ mod tests {
     /// tables included, not for one-component tuples (spec §7.6).
     #[test]
     fn cost_counts_component_copies() {
-        let (l, r, o) = (Variable::MultiplierLeft(0), Variable::MultiplierRight(1), Variable::MultiplierOutput(0));
+        let (l, r, o) = (Variable(Var::MultiplierLeft(0)), Variable(Var::MultiplierRight(1)), Variable(Var::MultiplierOutput(0)));
         let mut b = Builder::default();
         let t1 = b.table(vec![vec![0]]).unwrap();
         b.lookup(t1, &[l.into()], C).unwrap();
@@ -586,7 +714,7 @@ mod tests {
         assert_eq!(one.bppp_gates, base.bppp_gates + 1);
         assert_eq!(one.bppp_linear, base.bppp_linear + 1 + 1 - 1);
         let x = b.reciprocal(2).unwrap();
-        b.reciprocal_term(x, r.into(), &[r.into(), l + r], C).unwrap();
+        b.reciprocal_term(x, r.into(), &[r.into(), LinearCombination::from(l) + r], C).unwrap();
         let two = b.cost(2, 1);
         // + 1 pole, + 3 copies (numerator r, both components)
         assert_eq!(two.bppp_gates, one.bppp_gates + 1);
@@ -617,7 +745,7 @@ mod tests {
                 lc.terms
                     .iter()
                     .map(|(x, c)| match x {
-                        Variable::Witness(i) => c * Scalar::from(if i % 2 == 0 { vals[i / 2].0 } else { vals[i / 2].1 }),
+                        Variable(Var::Witness(i)) => c * Scalar::from(if i % 2 == 0 { vals[i / 2].0 } else { vals[i / 2].1 }),
                         _ => *c,
                     })
                     .sum()

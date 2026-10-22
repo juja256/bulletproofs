@@ -8,7 +8,7 @@ use zeroize::Zeroize;
 
 use super::{
     ConstraintSystem, LinearCombination, R1CSProof, RandomizableConstraintSystem,
-    RandomizedConstraintSystem, Variable,
+    RandomizedConstraintSystem, Var, Variable,
 };
 
 use crate::curve::{Curve, Field};
@@ -17,8 +17,8 @@ use crate::generators::{BulletproofGens, PedersenGens};
 use crate::inner_product_proof::InnerProductProof;
 use crate::transcript::{TranscriptBackend, TranscriptProtocol, TranscriptRef};
 use crate::util;
-use super::builder::{self, Builder, Cost, Counts, Reciprocal, TableId};
-use super::compact::{ConstraintStore, Flattened};
+use super::builder::{self, Builder, Cost, Counts, Reciprocal, TableId, Wire};
+use super::compact::{ConstraintStore, Flattened, Input};
 use super::proof::{BpProof, ProofKind};
 use super::proof::BpppProof;
 
@@ -49,12 +49,12 @@ fn eval_with<F: Field>(secrets: &Secrets<F>, lc: &LinearCombination<F>) -> F {
         .map(|(var, coeff)| {
             *coeff
                 * match var {
-                    Variable::MultiplierLeft(i) => secrets.a_L[*i],
-                    Variable::MultiplierRight(i) => secrets.a_R[*i],
-                    Variable::MultiplierOutput(i) => secrets.a_O[*i],
-                    Variable::Committed(i) => secrets.v[*i],
-                    Variable::Witness(i) => secrets.w[*i],
-                    Variable::One() => F::ONE,
+                    Variable(Var::MultiplierLeft(i)) => secrets.a_L[*i],
+                    Variable(Var::MultiplierRight(i)) => secrets.a_R[*i],
+                    Variable(Var::MultiplierOutput(i)) => secrets.a_O[*i],
+                    Variable(Var::Committed(i)) => secrets.v[*i],
+                    Variable(Var::Witness(i)) => secrets.w[*i],
+                    Variable(Var::One) => F::ONE,
                 }
         })
         .sum()
@@ -82,17 +82,14 @@ pub struct Prover<'g, T: TranscriptRef, C: Curve> {
     deferred_constraints:
         Vec<Box<dyn FnOnce(&mut RandomizingProver<'g, T, C>) -> Result<(), R1CSError>>>,
 
-    /// Index of a pending multiplier that's not fully assigned yet.
-    pending_multiplier: Option<usize>,
-
     /// The proof system used by `prove`.
     backend: super::Backend,
 
     /// The circuit builder's record (spec §7).
     builder: Builder<C::Scalar>,
 
-    /// First multiplier of the witness pairs (BP lowering, spec §7.5).
-    witness_base: usize,
+    /// The BP multiplier input of every witness (BP lowering, spec §7.5).
+    witness_inputs: Vec<Input>,
 }
 
 /// Separate struct to implement Drop trait for (for zeroing),
@@ -138,32 +135,9 @@ impl<'g, T: TranscriptRef, C: Curve> ConstraintSystem<C::Scalar> for Prover<'g, 
     }
 
     fn multiply(&mut self, left: LinearCombination<C::Scalar>, right: LinearCombination<C::Scalar>) -> Result<Variable, R1CSError> {
-        Ok(self.multiplier(left, right).2)
-    }
-
-    fn allocate(&mut self, assignment: Option<C::Scalar>) -> Result<Variable, R1CSError> {
-        let scalar = assignment.ok_or(R1CSError::MissingAssignment)?;
-
-        match self.pending_multiplier {
-            None => {
-                let i = self.secrets.a_L.len();
-                self.pending_multiplier = Some(i);
-                self.secrets.a_L.push(scalar);
-                self.secrets.a_R.push(C::Scalar::ZERO);
-                self.secrets.a_O.push(C::Scalar::ZERO);
-                Ok(Variable::MultiplierLeft(i))
-            }
-            Some(i) => {
-                self.pending_multiplier = None;
-                self.secrets.a_R[i] = scalar;
-                self.secrets.a_O[i] = self.secrets.a_L[i] * self.secrets.a_R[i];
-                Ok(Variable::MultiplierRight(i))
-            }
-        }
-    }
-
-    fn allocate_multiplier(&mut self, input_assignments: Option<(C::Scalar, C::Scalar)>) -> Result<(Variable, Variable, Variable), R1CSError> {
-        self.free_multiplier(input_assignments)
+        let i = self.secrets.a_L.len();
+        let fold = (self.builder.fold(&left, Wire::Left(i)), self.builder.fold(&right, Wire::Right(i)));
+        Ok(self.multiplier(left, right, fold).2)
     }
 
     fn constrain_product(&mut self, l: LinearCombination<C::Scalar>, r: LinearCombination<C::Scalar>, out: LinearCombination<C::Scalar>) -> Result<(), R1CSError> {
@@ -228,7 +202,7 @@ impl<'g, T: TranscriptRef, C: Curve> RandomizableConstraintSystem<C::Scalar> for
 
 impl<'g, T: TranscriptRef, C: Curve> RandomizedConstraintSystem<C::Scalar> for RandomizingProver<'g, T, C> {
     fn multiply(&mut self, l: LinearCombination<C::Scalar>, r: LinearCombination<C::Scalar>) -> (Variable, Variable, Variable) {
-        self.prover.multiplier(l, r)
+        self.prover.multiplier(l, r, (false, false))
     }
 
     fn allocate_multiplier(&mut self, input_assignments: Option<(C::Scalar, C::Scalar)>) -> Result<(Variable, Variable, Variable), R1CSError> {
@@ -249,15 +223,19 @@ impl<'g, T: TranscriptRef, C: Curve> RandomizedConstraintSystem<C::Scalar> for R
 }
 
 impl<'g, T: TranscriptRef, C: Curve> Prover<'g, T, C> {
-    /// A BP multiplier with `left = l`, `right = r` (two linear constraints); returns
-    /// `(left, right, out)`.
-    fn multiplier(&mut self, mut l: LinearCombination<C::Scalar>, mut r: LinearCombination<C::Scalar>) -> (Variable, Variable, Variable) {
+    /// A BP multiplier with `left = l`, `right = r`; returns `(left, right, out)`. An input
+    /// that is a folded witness (`fold`) is the wire itself, without a linear constraint.
+    fn multiplier(&mut self, mut l: LinearCombination<C::Scalar>, mut r: LinearCombination<C::Scalar>, fold: (bool, bool)) -> (Variable, Variable, Variable) {
         let (lv, rv) = (self.eval(&l), self.eval(&r));
         let (l_var, r_var, o_var) = self.push_multiplier(lv, rv);
-        l.terms.push((l_var, -C::Scalar::ONE));
-        r.terms.push((r_var, -C::Scalar::ONE));
-        self.constraints.push(&l);
-        self.constraints.push(&r);
+        if !fold.0 {
+            l.terms.push((l_var, -C::Scalar::ONE));
+            self.constraints.push(&l);
+        }
+        if !fold.1 {
+            r.terms.push((r_var, -C::Scalar::ONE));
+            self.constraints.push(&r);
+        }
         (l_var, r_var, o_var)
     }
 
@@ -272,7 +250,7 @@ impl<'g, T: TranscriptRef, C: Curve> Prover<'g, T, C> {
         self.secrets.a_L.push(l);
         self.secrets.a_R.push(r);
         self.secrets.a_O.push(l * r);
-        (Variable::MultiplierLeft(i), Variable::MultiplierRight(i), Variable::MultiplierOutput(i))
+        (Variable(Var::MultiplierLeft(i)), Variable(Var::MultiplierRight(i)), Variable(Var::MultiplierOutput(i)))
     }
 
     /// Construct an empty constraint system with specified external
@@ -315,10 +293,9 @@ impl<'g, T: TranscriptRef, C: Curve> Prover<'g, T, C> {
             // the witness (spec §6.2).
             constraints: ConstraintStore::new(false),
             deferred_constraints: Vec::new(),
-            pending_multiplier: None,
             backend: super::Backend::default(),
             builder: Builder::default(),
-            witness_base: 0,
+            witness_inputs: Vec::new(),
         }
     }
 
@@ -362,7 +339,7 @@ impl<'g, T: TranscriptRef, C: Curve> Prover<'g, T, C> {
         let V = C::compress(&self.pc_gens.commit(v, v_blinding));
         self.transcript.backend().append_point(b"V", &V);
 
-        (V, Variable::Committed(i))
+        (V, Variable(Var::Committed(i)))
     }
 
     /// Use a challenge, `z`, to flatten the constraints in the
@@ -378,7 +355,7 @@ impl<'g, T: TranscriptRef, C: Curve> Prover<'g, T, C> {
     /// where `w{L,R,O}` is \\( z \cdot z^Q \cdot W_{L,R,O} \\).
     fn flattened_constraints(&mut self, z: &C::Scalar) -> Flattened<C::Scalar> {
         let (n, m) = (self.secrets.a_L.len(), self.secrets.v.len());
-        self.constraints.flatten(z, n, m, self.witness_base)
+        self.constraints.flatten(z, n, m, &self.witness_inputs)
     }
 
     /// Returns the secret value of the linear combination.
@@ -397,17 +374,20 @@ impl<'g, T: TranscriptRef, C: Curve> Prover<'g, T, C> {
         let secrets = &self.secrets;
         let m = self.builder.finalize(Some(&|lc: &LinearCombination<C::Scalar>| eval_with(secrets, lc)))?;
         self.secrets.w.extend(m);
-        self.witness_base = self.secrets.a_L.len();
-        for pair in self.secrets.w.chunks(2) {
+        let place = self.builder.placement();
+        let witness_base = self.secrets.a_L.len();
+        let mut free: Vec<C::Scalar> = self.secrets.w.iter().enumerate().filter(|(i, _)| place.is_free(*i)).map(|(_, x)| *x).collect();
+        for pair in free.chunks(2) {
             let (l, r) = (pair[0], pair.get(1).copied().unwrap_or(C::Scalar::ZERO));
-            self.secrets.a_L.push(l);
-            self.secrets.a_R.push(r);
-            self.secrets.a_O.push(l * r);
+            self.push_multiplier(l, r);
         }
-        for (l, r, out) in core::mem::take(&mut self.builder.products) {
-            let (_, _, o) = self.multiplier(l, r);
+        free.zeroize();
+        let product_base = self.secrets.a_L.len();
+        for ((l, r, out), fold) in core::mem::take(&mut self.builder.products).into_iter().zip(place.product_folded.iter().copied()) {
+            let (_, _, o) = self.multiplier(l, r, fold);
             self.constraints.push(&(o - out));
         }
+        self.witness_inputs = place.bp_inputs(witness_base, product_base);
         for arg in core::mem::take(&mut self.builder.args) {
             self.specify_randomized_constraints(move |cs| builder::logup(cs, arg))?;
         }
@@ -417,9 +397,6 @@ impl<'g, T: TranscriptRef, C: Curve> Prover<'g, T, C> {
     /// Calls all remembered callbacks with an API that
     /// allows generating challenge scalars.
     fn create_randomized_constraints(mut self) -> Result<Self, R1CSError> {
-        // Clear the pending multiplier (if any) because it was committed into A_L/A_R/S.
-        self.pending_multiplier = None;
-
         if self.deferred_constraints.len() == 0 {
             self.transcript.backend().r1cs_1phase_domain_sep();
             Ok(self)
@@ -820,10 +797,12 @@ impl<'g, T: TranscriptRef, C: Curve> Prover<'g, T, C> {
         self.secrets.w.extend(m);
         let a = &self.secrets;
         let values = super::backend::Values { a_l: &a.a_L, a_r: &a.a_R, a_o: &a.a_O, v: &a.v, s: &a.v_blinding, w: &a.w };
+        let place = self.builder.placement();
         let rec = super::backend::Record {
             n: a.a_L.len(),
             k: a.v.len(),
             n_w: self.builder.n_w,
+            place: &place,
             products: &self.builder.products,
             args: &self.builder.args,
         };

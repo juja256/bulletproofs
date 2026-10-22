@@ -2,6 +2,7 @@
 //! only collide without the compression challenge, forged denominators and numerators. The
 //! verifier must reject each of them, on both backends where the cheat applies.
 
+use crate::r1cs::lc;
 use curve25519_dalek::scalar::Scalar;
 use merlin::Transcript;
 use rand_chacha::rand_core::SeedableRng;
@@ -64,8 +65,9 @@ impl<C: ConstraintSystem<Scalar>> Ops for C {
         self.witness(v)
     }
     fn product_wire(&mut self, v: Option<Scalar>, wire: &mut Option<super::Variable>) -> Result<(), R1CSError> {
-        let (l, _, o) = self.allocate_multiplier(v.map(|v| (v, Scalar::ONE)))?;
-        self.constrain(o - l);
+        let (l, one) = (self.witness(v)?, self.witness(v.map(|_| Scalar::ONE))?);
+        let o = self.multiply(l.into(), one.into())?;
+        self.constrain(lc(o) - l);
         *wire = Some(l);
         Ok(())
     }

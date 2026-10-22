@@ -205,17 +205,17 @@ mod identity {
     }
 }
 
-/// Upstream ristretto255 gadgets with integer constants of every width still compile.
+/// Integer constants of every width in linear combinations (`lc(a) * 2u32 + 1u8`).
 mod upstream_integers {
     use curve25519_dalek::scalar::Scalar;
-    use bulletproofs::r1cs::{ConstraintSystem, LinearCombination, Variable};
+    use bulletproofs::r1cs::{lc, ConstraintSystem, LinearCombination, Variable};
 
     #[allow(dead_code)]
     fn gadget<CS: ConstraintSystem<Scalar>>(cs: &mut CS, a: Variable, b: Variable) {
-        cs.constrain(a * 2u32 + 1u8 - b);
-        cs.constrain(a + 1u16 - (b - 1u128));
-        cs.constrain(LinearCombination::from(3u32) - a * 4u8);
-        cs.constrain(LinearCombination::from(a) * 2u16 - b * 7u128);
+        cs.constrain(lc(a) * 2u32 + 1u8 - b);
+        cs.constrain(lc(a) + 1u16 - (lc(b) - 1u128));
+        cs.constrain(LinearCombination::from(3u32) - lc(a) * 4u8);
+        cs.constrain(LinearCombination::from(a) * 2u16 - lc(b) * 7u128);
     }
 
     #[test]

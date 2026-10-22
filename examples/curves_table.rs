@@ -65,7 +65,9 @@ fn range<C: Curve>(runs: usize) {
 fn chain<C: Curve, CS: ConstraintSystem<C::Scalar>>(cs: &mut CS, x0: Variable, n: usize, pairs: Option<&[(C::Scalar, C::Scalar)]>) {
     let mut prev: LinearCombination<C::Scalar> = x0.into();
     for i in 0..n {
-        let (l, _, o) = cs.allocate_multiplier(pairs.map(|p| p[i])).unwrap();
+        let ab = pairs.map(|p| p[i]);
+        let (l, r) = (cs.witness(ab.map(|p| p.0)).unwrap(), cs.witness(ab.map(|p| p.1)).unwrap());
+        let o = cs.multiply(l.into(), r.into()).unwrap();
         cs.constrain(prev - l);
         prev = o.into();
     }

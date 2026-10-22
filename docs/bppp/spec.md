@@ -664,28 +664,43 @@ the same gadget code and therefore record the same operations.
 ### 7.1 Variables and linear combinations
 
 Variables are those of the R1CS front end — `Committed(j)` ($j < k$), `MultiplierLeft(i)`,
-`MultiplierRight(i)`, `MultiplierOutput(i)` ($i < n$, the R1CS multipliers of `multiply`,
-`allocate`, `allocate_multiplier`) and `One` — plus `Witness(i)` for the builder's witnesses
-($i < n_w$). A linear combination (LC) is a list of terms $(x, c)$, kept in the order given;
+`MultiplierRight(i)`, `MultiplierOutput(i)` ($i < n$, the R1CS multipliers of `multiply`) and
+`One` — plus `Witness(i)` for the builder's witnesses ($i < n_w$). *(2026-10-22: `allocate` and
+`allocate_multiplier` are gone; `Variable` is opaque to gadgets, which see the variables the
+operations return and `Variable::ONE`.)* A linear combination (LC) is a list of terms $(x, c)$, kept in the order given;
 its *constant* is the sum of the coefficients of its `One` terms.
 
 Every variable in an LC passed to a builder operation must exist when the operation is called
 ($j < k$, $i < n$, $i < n_w$ at that moment), otherwise the operation fails with
 `GadgetError`. Builder operations exist only in the first phase (the randomizing constraint
-systems do not implement `CircuitBuilder`), so every value the builder sees is committed in the
+systems are internal and have none), so every value the builder sees is committed in the
 first phase of BP and before $\alpha$ in BP++.
 
-The R1CS operations record what §6 needs: `multiply(l, r)` creates multiplier $i$ and appends the
-constraints $l - a_{L,i}$ and $r - a_{R,i}$ (the terms of $l$, then $(a_{L,i}, -1)$; likewise for
-$r$); `allocate` fills the left, then the right input of a pending multiplier (whose right
-input and output are 0 until then; `multiply` and `allocate_multiplier` neither use nor clear
-it, and it counts in $n$); `constrain` appends its LC. The variables of R1CS constraints are not
+The R1CS operations record what §6 needs: `multiply(l, r)` creates multiplier $i$, returns
+`MultiplierOutput(i)` and appends the constraints $l - a_{L,i}$ and $r - a_{R,i}$ (the terms of
+$l$, then $(a_{L,i}, -1)$; likewise for $r$), except for a folded input (§7.1.1); `constrain`
+appends its LC. The variables of R1CS constraints are not
 checked at the call: both lowerings check them against the final counts (multiplicity witnesses
 included; for BP also the second-phase multipliers) and fail with `GadgetError`, as §6.1 does.
 
 Values are read when they are needed, at finalization and lowering (so with the final values of
 the multipliers). LCs are lowered as given: terms are neither merged nor dropped (zero
 coefficients and repeated variables stay).
+
+#### 7.1.1 Folding (2026-10-22)
+
+An input LC of `multiply` or `constrain_product` that is exactly one term `(Witness(i), 1)` (no
+constant) with witness $i$ not yet folded *folds*: witness $i$ becomes that input wire — the left
+or right input of R1CS multiplier $i'$ (`multiply`), or of product $g$ (`constrain_product`) — and
+the input's linear constraint (§7.1 for `multiply`, §7.6 linear rows 3 for products) is not
+emitted. Every reference to `Witness(i)`, before or after, denotes the wire. A witness folds at
+most once, into the first input where it stands alone; elsewhere it is read through the wire
+(for example the other input of the same multiplier gets the constraint $a_{L,i'} - a_{R,i'}$).
+The decision depends on the calls only, so prover and verifier fold alike. The other witnesses
+(and the multiplicities, §7.4) are *free*, numbered densely in order ($n_{free}$ of them).
+
+This replaces upstream's `allocate_multiplier`: two fresh witnesses multiplied are a multiplier
+with free inputs, at the cost of one multiplier (BP) or one gate and no linear slot (BP++).
 
 ### 7.2 Operations
 
@@ -696,7 +711,7 @@ or bound (§7.3).
 - `witness(v)` → `Witness(n_w)`, $n_w \mathrel{+}= 1$. The prover must supply $v$
   (`MissingAssignment` otherwise).
 - `constrain_product(l, r, out)` records the constraint $l \cdot r = out$ (no variables are
-  allocated).
+  allocated); its lone free witness inputs fold (§7.1.1).
 - `table(rows)` → a table id ($0, 1, \dots$ in call order). Fails unless there is at least one row,
   the first row has $m \ge 1$ entries and every row has $m$ entries.
 - `lookup(t, tuple)` records that the tuple of $m$ LCs is a row of table $t$. Fails if $t$ does not
@@ -753,10 +768,12 @@ number of private terms of all arguments.
 
 After finalization, still in the first phase:
 
-1. Witness multipliers: for $q < \lceil n_w / 2 \rceil$, multiplier $n + q$ has left input
-   `Witness(2q)`, right input `Witness(2q + 1)` (0 if absent) and their product as output; no
-   constraint. Wherever `Witness(i)` appears it denotes that wire.
-2. For each product in order: $(a, b, o)$ = `multiply(l, r)`, then `constrain(o - out)`.
+1. Witness multipliers: for $q < \lceil n_{free} / 2 \rceil$, multiplier $n + q$ has left input
+   free witness $2q$, right input free witness $2q + 1$ (0 if absent) and their product as
+   output; no constraint. Wherever a free witness appears it denotes that wire.
+2. For each product $g$ in order: multiplier $n + \lceil n_{free}/2 \rceil + g$ with inputs $l$, $r$
+   (constraints $l - a_L$, $r - a_R$ except for folded inputs, which denote these wires), then
+   `constrain(o - out)`.
 3. For each argument in $\mathcal A$, a randomized constraint (in order): challenges `"logup alpha"`
    (only if $m > 1$; else $\alpha = 1$) and `"logup c"`; $d(x) = c + \sum_j \alpha^j x_j$. For each
    private term $(num, x)$: $(r, d', o)$ = `allocate_multiplier`$(num/d(x), d(x))$,
@@ -764,7 +781,7 @@ After finalization, still in the first phase:
    `constrain`$(\sum r + \sum_{\text{public}} coeff \cdot d(row)^{-1}) = 0$ (both sides fail if
    $d(row) = 0$).
 
-Cost in multipliers: $n + \lceil n_w/2 \rceil + n_{prod}$ in the first phase and $N_p$ in the second
+Cost in multipliers: $n + \lceil n_{free}/2 \rceil + n_{prod}$ in the first phase and $N_p$ in the second
 (before BP's padding to a power of two). A public term is free.
 
 ### 7.6 Lowering to BP++ (reciprocal form, §4)
@@ -775,20 +792,21 @@ $N_m = n_r + n_{prod}$, $N'_m = N_p + N_m$; $N_v = 1$, $k$ inputs, $f_l = [k > 0
 **Columns.** $w' = w_D \| w_L \| w_P \| w_R \| w_O$ (§4.1). Pole $i$ is the $i$-th private term in the
 order of $\mathcal A$ (argument by argument, terms in order). Gate $i < n_r$ is R1CS multiplier $i$
 ($w_{L,i} = a_{L,i}$, $w_{R,i} = a_{R,i}$), gate $n_r + g$ is product $g$ ($w_L$, $w_R$ = the values of
-$l$ and $r$). $w_O$ is $a_O$ ($n_r$ entries), then the input copies $c_j$ ($k$), then the witnesses
-($n_w$, multiplicities included), then the *copies* below, $N_O$ elements in all. Element $e$ of
+$l$ and $r$). $w_O$ is $a_O$ ($n_r$ entries), then the input copies $c_j$ ($k$), then the free
+witnesses ($n_{free}$, multiplicities included), then the *copies* below, $N_O$ elements in all. Element $e$ of
 $w_O$ goes to slot $(n_O, e)$ if $e < N'_m$, else $(l_O, e - N'_m)$; $N_{lin} = \max(0, N_O - N'_m)$.
 A variable maps to a column: `MultiplierLeft(i)` → $w_{L,i}$, `MultiplierRight(i)` → $w_{R,i}$,
-`MultiplierOutput(i)` → $w_{O,i}$, `Committed(j)` → $w_{O, n_r + j}$, `Witness(i)` →
-$w_{O, n_r + k + i}$. Lowering an LC maps each non-`One` term $(x, c)$, in order, to
+`MultiplierOutput(i)` → $w_{O,i}$, `Committed(j)` → $w_{O, n_r + j}$, a free witness with dense
+index $f$ → $w_{O, n_r + k + f}$, a folded witness → its wire ($w_{L,i'}$ or $w_{R,i'}$ of multiplier
+$i'$, $w_{L, n_r + g}$ or $w_{R, n_r + g}$ of product $g$). Lowering an LC maps each non-`One` term $(x, c)$, in order, to
 (column of $x$, $c$); its constant goes to the affine term.
 
 **Copies.** A numerator or a public coefficient must read initial columns only (§4.1), and $w_R$
 is committed after $\alpha$; a component of a tuple pole must read early columns only, and $w_L$,
 $w_R$ are committed after $\eta$. So, for each argument in $\mathcal A$, for its private terms in
 order — first the numerator, then, if $m \ge 2$, the components $j = 0..m-1$ — then its public
-terms in order: if the numerator (coefficient) has a `MultiplierRight` term, or the component
-has a `MultiplierLeft` or `MultiplierRight` term (any, whatever its coefficient), it is replaced by
+terms in order: if the numerator (coefficient) reads a right wire, or the component reads a left
+or right wire (any term, whatever its coefficient; a folded witness reads its wire), it is replaced by
 a new copy $y$ (the next element of $w_O$; the prover sets $y$ to the LC's value), and the LC
 $[(y, 1)]$ is used instead. (Copies are in $w_O$, slots $n_O$ or $l_O$: early columns.)
 
@@ -802,6 +820,7 @@ $out$ of product $g$ (its constant in $a_m$).
 2. the R1CS constraints in order, lowered (the prover recomputes their constants as in §6.2);
 3. for each product $g$: $[(w_{L, n_r + g}, 1)] \| (-l)$ and then $[(w_{R, n_r + g}, 1)] \| (-r)$, where
    $-l$ is the lowered $l$ with negated coefficients and the affine term is $-$(constant of $l$);
+   a folded input has no row;
 4. for each pole $i$ of an argument with $m = 1$, tuple $(x_0)$: $[(w_{D,i}, 1)] \| (-x_0)$, affine term
    $-$(constant of $x_0$) (poles of arguments with $m \ge 2$ are tuple poles, below);
 5. for each copy $y$ of an LC $u$: $[(y, 1)] \| (-u)$, affine term $-$(constant of $u$).
@@ -836,9 +855,9 @@ likewise: the copy $y$ is early, fixed before $\eta$, and the row ties the compo
 $n_r = 0$ (a circuit of lookups only has $N_m = 0$). Nothing depends on $\alpha$, so the one-phase
 prover suffices (a builder operation that exposed reciprocals would need the two-phase prover of
 §4.3). Randomized constraints are refused (`GadgetError`), as in §6: mapping a challenge to the slot
-between $C_O$ and $C_R$ would leave `MultiplierRight` values of `allocate` unbound there.
+between $C_O$ and $C_R$ would leave right-wire values (free inputs of multipliers) unbound there.
 
-Cost in gates: $N'_m = N_p + n_r + n_{prod}$. Witnesses, multiplicities and copies cost no gate (a
+Cost in gates: $N'_m = N_p + n_r + n_{prod}$. Free witnesses, multiplicities and copies cost no gate (a
 slot in $n_O$ while $N_O \le N'_m$, then a linear slot), nor do public terms, nor the number of
 columns $m$ (a component is a row term; one that reads $w_L$ or $w_R$ costs a copy).
 
@@ -851,7 +870,7 @@ encoding for every constraint system).
 
 | operation | BP multipliers | BP++ gates |
 |---|---|---|
-| `witness` | 1/2 | 0 |
+| `witness` | 1/2 (0 if folded) | 0 (no slot if folded) |
 | `product` | 1 | 1 |
 | `lookup`, private reciprocal term | 1 (second phase) | 1 |
 | `lookup_value` | 1/2 + 1 | 1 |

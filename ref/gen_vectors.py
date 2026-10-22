@@ -1038,13 +1038,10 @@ class Prog:
         return self._op({"op": "commit", "v": hx(v), "s": hx(s)})
 
     def multiply(self, l, r):
-        return self._op({"op": "multiply", "l": l, "r": r})
-
-    def allocate(self, v):
-        return self._op({"op": "allocate", "v": hx(v)})
-
-    def allocate_multiplier(self, a, b):
-        return self._op({"op": "allocate_multiplier", "l": hx(a), "r": hx(b)})
+        """The operation returns the output; the program may also name the multiplier's
+        input wires."""
+        o = self._op({"op": "multiply", "l": l, "r": r})
+        return ("L", o[1]), ("R", o[1]), o
 
     def constrain(self, x):
         return self._op({"op": "constrain", "lc": x})
@@ -1150,23 +1147,25 @@ def builder_cases(rng):
     P.constrain(lc(V0, (w, L - 1)))
     add("no-gates-committed-input", P)
 
-    # R1CS operations mixed with builder operations; pending allocate; committed inputs in
-    # tuples and numerators; MultiplierRight in numerators (copies)
+    # R1CS operations mixed with builder operations; witnesses folded into multiplier wires;
+    # committed inputs in tuples and numerators; a folded right wire in numerators (copies)
     P = Prog()
     V0, V1 = P.commit(5, s()), P.commit(s(), s())
     L0, R0, O0 = P.multiply(lc(V0, 2), lc(V1))
     xv, yv = s(), s()
-    L1 = P.allocate(xv)
-    L2, R2, O2 = P.multiply(lc((O0, 3)), lc(V0, (V1, 2)))  # leaves multiplier 1 pending
-    R1 = P.allocate(yv)                                     # fills multiplier 1
-    L3 = P.allocate(9)                                      # multiplier 3 stays pending
+    L1, R1 = P.witness(xv), P.witness(yv)
+    _, _, O1 = P.multiply(lc(L1), lc(R1))                   # both folded into multiplier 1
+    L2, R2, O2 = P.multiply(lc((O0, 3)), lc(V0, (V1, 2)))
+    L3, R3 = P.witness(9), P.witness(0)
+    _, _, O3 = P.multiply(lc(L3), lc(R3))                   # 9 * 0, folded
     pl, pr = s(), s()
-    L4, R4, O4 = P.allocate_multiplier(pl, pr)
+    L4, R4 = P.witness(pl), P.witness(pr)
+    _, _, O4 = P.multiply(lc(L4), lc(R4))
     P.constrain(lc(O4, (L4, -pr % L)))
-    P.constrain(lc(("O", 1), (R1, -xv % L)))
+    P.constrain(lc(O1, (R1, -xv % L)))
     P.constrain(lc(L3, -9 % L))
-    P.constrain(lc(("O", 3)))
-    P.constrain(lc(("R", 3), 0))
+    P.constrain(lc(O3))
+    P.constrain(lc(R3, 0))
     wv = 7 * P.val(lc(V1)) % L
     W0 = P.witness(wv)
     P.constrain(lc(W0, (V1, L - 7)))
@@ -1176,14 +1175,44 @@ def builder_cases(rng):
     P.product(lc(L3), lc(R1, (L1, 2)), lc(W3, (L1, 2 * 9 % L), (R1, 0)))
     P.reciprocal(1, [(lc(V0), [lc(W1)]), (lc((V0, L - 1)), [lc(V1)]),
                        (lc(R1, 4), [lc(L1)]), (lc((R1, L - 1), (ONE, L - 4)), [lc(W2)])])
-    add("r1cs-mixed-pending-copies", P)
+    add("r1cs-mixed-folded-copies", P)
 
-    # a single allocate (pending: a_R = a_O = 0) used by a product
+    # folding into a product: both inputs; the out witness stays free
     P = Prog()
-    Lp = P.allocate(7)
+    A, B = P.witness(7), P.witness(3)
     W0 = P.witness(21)
-    P.product(lc(Lp), lc(("R", 0), 3), lc(W0))
-    add("allocate-once-pending", P)
+    P.product(lc(A), lc(B), lc(W0))
+    add("fold-into-product", P)
+
+    # a witness alone in two products folds into the first only (the second reads the wire
+    # through its input row); an input with a coefficient or a constant does not fold
+    P = Prog()
+    av = s()
+    A = P.witness(av)
+    _, _, O0 = P.multiply(lc(A), lc(A))                    # left folds, right reads L0
+    P.constrain(lc(O0, -(av * av) % L))
+    B, C = P.witness(5), P.witness(5 * av % L)
+    P.product(lc(A), lc(B), lc(C))                          # A folded already, B folds
+    D = P.witness(4)
+    P.product(lc((D, 2)), lc(D, 1), lc(40))                 # no fold: 2D, D + 1
+    P.product(lc(D), lc(D), lc(16))                         # D folds (left) here
+    add("fold-first-product-only", P)
+
+    # a witness read before it is folded: by a constraint, a one-column lookup, a component
+    # of a two-column tuple and a numerator; folded as a right wire, the component and the
+    # numerator need copies (spec 7.6)
+    P = Prog()
+    tr = P.table([[i] for i in range(8)])
+    t2 = P.table([[i, 2 * i] for i in range(8)])
+    X, Y = P.witness(3), P.witness(6)
+    P.constrain(lc(Y, (X, L - 2)))
+    P.lookup(tr, [lc(X)])
+    P.lookup(t2, [lc(X), lc(Y)])
+    P.reciprocal(1, [(lc(X), [lc(Y)]), (lc((X, L - 1)), [lc(Y)])])
+    F = P.witness(5)
+    _, _, O = P.multiply(lc(F), lc(X))                      # F left, X right: folded now
+    P.constrain(lc(O, L - 15))
+    add("fold-after-reads-copies", P)
 
     # products with constants in l, r, out, and out reading other variables
     P = Prog()
@@ -1254,7 +1283,8 @@ def builder_cases(rng):
     # (copy, m >= 2)
     P = Prog()
     tr = range_table(P, 4)
-    Lm, Rm, Om = P.allocate_multiplier(5, 3)
+    Lm, Rm = P.witness(5), P.witness(3)
+    _, _, Om = P.multiply(lc(Lm), lc(Rm))      # folded: Lm, Rm are multiplier 0's wires
     P.lookup(tr, [lc(Rm)])
     P.lookup(tr, [lc(Lm)])
     a0, v0 = P.lookup_value(tr, 1), P.lookup_value(tr, 9)
@@ -1337,11 +1367,12 @@ def builder_cases(rng):
     P = Prog()
     V0 = P.commit(6, s())
     L0, R0, O0 = P.multiply(lc(V0), lc(7))     # 6 * 7 = 42
-    L1 = P.allocate(3)                          # pending: R1 = O1 = 0
+    L1, Z1 = P.witness(3), P.witness(0)
+    P.multiply(lc(L1), lc(Z1))                  # folded: 3 * 0
     tq = P.table([[42, 6, 7], [6, 7, 42], [0, 3, 1]])
     P.lookup(tq, [lc(O0), lc(L0), lc(R0)])
     P.lookup(tq, [lc((L0, 1)), lc(R0), lc(O0)])
-    P.lookup(tq, [lc((R0, 0), ("R", 1)), lc(L1), lc(V0, (R0, L - 1), 2)])
+    P.lookup(tq, [lc((R0, 0), Z1), lc(L1), lc(V0, (R0, L - 1), 2)])
     tr = P.table([[i] for i in range(8)])
     P.lookup(tr, [lc(R0)])
     P.lookup(tr, [lc(L1, 4)])
@@ -1484,8 +1515,8 @@ def builder_cases(rng):
         P.fail("reciprocal", 0, [])
     err("err-reciprocal-zero-columns", e_recip_zero)
 
-    # -- plain R1CS programs, no builder operation (spec 6.1, option B: lowered by 7.6 to the
-    # circuit of 6.1, N_p = 0, no reciprocal rows; checked against 6.1 built directly)
+    # bits as b (1 - b) = 0: each a product with the bit folded into its left wire (one gate,
+    # no slot), next to a multiplier of committed inputs
     P = Prog()
     av, bv, xv = s(), s(), 11
     V0, V1, V2 = P.commit(av, s()), P.commit(bv, s()), P.commit(xv, s())
@@ -1493,16 +1524,16 @@ def builder_cases(rng):
     P.constrain(lc(O0, -(av * (bv + 3)) % L))
     bits = []
     for i in range(4):
-        bi = (xv >> i) & 1
-        Lb, Rb, Ob = P.allocate_multiplier(bi, 1 - bi)
-        P.constrain(lc(Ob))
-        P.constrain(lc(Lb, Rb, L - 1))
-        bits.append(Lb)
+        B = P.witness((xv >> i) & 1)
+        P.product(lc(B), lc((B, L - 1), 1), lc())
+        bits.append(B)
     P.constrain(lc(*[(bits[i], 2**i) for i in range(4)], (V2, L - 1)))
-    La = P.allocate(7)  # a lone allocate: pending, right input and output 0
+    La = P.witness(7)  # a lone free witness
     P.constrain(lc(La, L - 7))
-    P.constrain(lc(("R", La[1]), ("O", La[1])))
-    add("plain-r1cs-mul-and-bits", P)
+    add("r1cs-mul-and-bits", P)
+
+    # -- plain R1CS programs, no builder operation (spec 6.1, option B: lowered by 7.6 to the
+    # circuit of 6.1, N_p = 0, no reciprocal rows; checked against 6.1 built directly)
 
     P = Prog()  # n = 0: one zero padding gate
     av, bv = s(), s()
@@ -1515,12 +1546,11 @@ def builder_cases(rng):
     L0, R0, O0 = P.multiply(lc(3), lc(5))
     P.constrain(lc(O0, L - 15))
     xv, yv = s(), s()
-    L1, R1, O1 = P.allocate_multiplier(xv, yv)
+    L1, R1, O1 = P.multiply(lc(xv), lc(yv))
     P.constrain(lc(O1, (L1, -yv % L)))
     x2, y2 = s(), s()
-    L2 = P.allocate(x2)
-    R2 = P.allocate(y2)  # fills multiplier 2
-    P.constrain(lc(("O", 2), -(x2 * y2) % L))
+    L2, R2, O2 = P.multiply(lc(x2), lc((L1, 0), y2))
+    P.constrain(lc(O2, -(x2 * y2) % L))
     add("plain-r1cs-no-inputs", P)
 
     # a violated linear constraint: the prover recomputes the constants (spec 6.2) and proves

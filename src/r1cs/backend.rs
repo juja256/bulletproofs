@@ -76,9 +76,9 @@ mod bppp_backend {
 
     use crate::curve::{Curve, Field};
 
-    use super::super::builder::{gadget_error, needs_early_copy, Argument};
+    use super::super::builder::{gadget_error, Argument, Placement, Wire};
     use super::super::compact::ConstraintStore;
-    use super::super::{LinearCombination, Variable};
+    use super::super::{LinearCombination, Var, Variable};
     use crate::bppp::{
         CircuitProof, Component, Pole, ReciprocalCircuit, ReciprocalRow, ReciprocalWitness, Slot,
         SparseMatrix, TuplePole,
@@ -106,12 +106,12 @@ mod bppp_backend {
     impl<'a, F: Field> Values<'a, F> {
         fn var(&self, x: Variable) -> F {
             match x {
-                Variable::MultiplierLeft(i) => self.a_l[i],
-                Variable::MultiplierRight(i) => self.a_r[i],
-                Variable::MultiplierOutput(i) => self.a_o[i],
-                Variable::Committed(j) => self.v[j],
-                Variable::Witness(i) => self.w[i],
-                Variable::One() => F::ONE,
+                Variable(Var::MultiplierLeft(i)) => self.a_l[i],
+                Variable(Var::MultiplierRight(i)) => self.a_r[i],
+                Variable(Var::MultiplierOutput(i)) => self.a_o[i],
+                Variable(Var::Committed(j)) => self.v[j],
+                Variable(Var::Witness(i)) => self.w[i],
+                Variable(Var::One) => F::ONE,
             }
         }
 
@@ -127,12 +127,10 @@ mod bppp_backend {
         pub(crate) k: usize,
         /// Witnesses, multiplicities included.
         pub(crate) n_w: usize,
+        /// Where they live: folded into product wires or free.
+        pub(crate) place: &'a Placement,
         pub(crate) products: &'a [(LinearCombination<F>, LinearCombination<F>, LinearCombination<F>)],
         pub(crate) args: &'a [Argument<F>],
-    }
-
-    fn has_right<F: Field>(lc: &LinearCombination<F>) -> bool {
-        lc.terms.iter().any(|(x, _)| matches!(x, Variable::MultiplierRight(_)))
     }
 
     /// The reciprocal form circuit of the builder's record (spec §7.6) and, with `values`
@@ -143,7 +141,8 @@ mod bppp_backend {
         rec: &Record<F>,
         values: Option<&Values<F>>,
     ) -> Result<(ReciprocalCircuit<F>, Option<ReciprocalWitness<F>>), R1CSError> {
-        let (n, k, n_w) = (rec.n, rec.k, rec.n_w);
+        let (n, k, n_w, place) = (rec.n, rec.k, rec.n_w, rec.place);
+        let n_free = place.n_free;
         let n_p: usize = rec.args.iter().map(|a| a.private.len()).sum();
         let n_prod = rec.products.len();
         let n_r = if n == 0 && n_prod == 0 && n_p == 0 { 1 } else { n };
@@ -159,7 +158,7 @@ mod bppp_backend {
         let mut pub_copy = Vec::with_capacity(rec.args.len());
         for a in rec.args {
             for (num, tuple) in &a.private {
-                num_copy.push(if has_right(num) {
+                num_copy.push(if place.reads_right(num) {
                     copies.push(num);
                     Some(copies.len() - 1)
                 } else {
@@ -169,7 +168,7 @@ mod bppp_backend {
                     tuple
                         .iter()
                         .map(|x| {
-                            if a.m >= 2 && needs_early_copy(x) {
+                            if a.m >= 2 && place.reads_input(x) {
                                 copies.push(x);
                                 Some(copies.len() - 1)
                             } else {
@@ -181,7 +180,7 @@ mod bppp_backend {
             }
             let mut pc = Vec::with_capacity(a.public.len());
             for (coeff, _) in &a.public {
-                pc.push(if has_right(coeff) {
+                pc.push(if place.reads_right(coeff) {
                     copies.push(coeff);
                     Some(copies.len() - 1)
                 } else {
@@ -190,20 +189,26 @@ mod bppp_backend {
             }
             pub_copy.push(pc);
         }
-        let n_o = n_r + k + n_w + copies.len();
+        let n_o = n_r + k + n_free + copies.len();
         let n_lin = n_o.saturating_sub(n_mm);
         let n_cols = 2 * n_mm + n_o;
         let (col_d, col_l, col_p, col_r) = (|i: usize| i, |i: usize| n_p + i, |i: usize| n_mm + i, |i: usize| n_mm + n_p + i);
         let col_o = |e: usize| 2 * n_mm + e;
-        let col_copy = |q: usize| col_o(n_r + k + n_w + q);
+        let col_copy = |q: usize| col_o(n_r + k + n_free + q);
         let unknown = || gadget_error("a constraint uses a variable outside the constraint system");
         let col = |x: Variable| -> Result<usize, R1CSError> {
             match x {
-                Variable::MultiplierLeft(i) if i < n => Ok(col_l(i)),
-                Variable::MultiplierRight(i) if i < n => Ok(col_r(i)),
-                Variable::MultiplierOutput(i) if i < n => Ok(col_o(i)),
-                Variable::Committed(j) if j < k => Ok(col_o(n_r + j)),
-                Variable::Witness(i) if i < n_w => Ok(col_o(n_r + k + i)),
+                Variable(Var::MultiplierLeft(i)) if i < n => Ok(col_l(i)),
+                Variable(Var::MultiplierRight(i)) if i < n => Ok(col_r(i)),
+                Variable(Var::MultiplierOutput(i)) if i < n => Ok(col_o(i)),
+                Variable(Var::Committed(j)) if j < k => Ok(col_o(n_r + j)),
+                Variable(Var::Witness(i)) if i < n_w => Ok(match place.wire(x) {
+                    Some(Wire::Left(m)) => col_l(m),
+                    Some(Wire::Right(m)) => col_r(m),
+                    Some(Wire::ProductLeft(p)) => col_l(n_r + p),
+                    Some(Wire::ProductRight(p)) => col_r(n_r + p),
+                    None => col_o(n_r + k + place.slot(i)),
+                }),
                 _ => Err(unknown()),
             }
         };
@@ -213,7 +218,7 @@ mod bppp_backend {
             let mut constant = F::ZERO;
             for (x, c) in &lc.terms {
                 match x {
-                    Variable::One() => constant += *c * scale,
+                    Variable(Var::One) => constant += *c * scale,
                     _ => terms.push((col(*x)?, *c * scale)),
                 }
             }
@@ -273,7 +278,7 @@ mod bppp_backend {
                 let mut constant = F::ZERO;
                 for (x, c) in store.row(q) {
                     match (x, values) {
-                        (Variable::One(), _) => constant += c,
+                        (Variable::ONE, _) => constant += c,
                         (_, v) => {
                             terms.push((col(x)?, c));
                             if let Some(v) = v {
@@ -308,9 +313,14 @@ mod bppp_backend {
             a_l.push(c);
             Ok(())
         };
-        for (g, (l, r, _)) in rec.products.iter().enumerate() {
-            push_eq(&mut w_l, &mut a_l, col_l(n_r + g), l)?;
-            push_eq(&mut w_l, &mut a_l, col_r(n_r + g), r)?;
+        // product inputs, but not those of folded witnesses (the input is the wire)
+        for (g, ((l, r, _), (fl, fr))) in rec.products.iter().zip(&place.product_folded).enumerate() {
+            if !fl {
+                push_eq(&mut w_l, &mut a_l, col_l(n_r + g), l)?;
+            }
+            if !fr {
+                push_eq(&mut w_l, &mut a_l, col_r(n_r + g), r)?;
+            }
         }
         // Poles of one-column arguments: w_D,i - x_0 = 0. Poles of arguments with m >= 2 are
         // tuple poles (spec §4.1), over early columns.
@@ -357,7 +367,7 @@ mod bppp_backend {
                     None => {
                         let (lt, c) = lower(coeff, F::ONE)?;
                         terms.extend(lt.into_iter().map(|(col, v)| (col, v, t.clone())));
-                        if coeff.terms.iter().any(|(x, _)| *x == Variable::One()) {
+                        if coeff.terms.iter().any(|(x, _)| *x == Variable::ONE) {
                             consts.push((c, t));
                         }
                     }
@@ -406,8 +416,8 @@ mod bppp_backend {
                 w_l.push(v.lc(l));
                 w_r.push(v.lc(r));
             }
-            let w_o: Vec<F> =
-                pad(v.a_o).into_iter().chain(v.v.iter().copied()).chain(v.w.iter().copied()).chain(copies.iter().map(|u| v.lc(u))).collect();
+            let free = v.w.iter().enumerate().filter(|(i, _)| place.wire(Variable(Var::Witness(*i))).is_none()).map(|(_, x)| *x);
+            let w_o: Vec<F> = pad(v.a_o).into_iter().chain(v.v.iter().copied()).chain(free).chain(copies.iter().map(|u| v.lc(u))).collect();
             ReciprocalWitness { w_d, w_l, w_r, w_o, v: v.v.iter().map(|x| vec![*x]).collect(), s: v.s.to_vec() }
         });
         Ok((circuit, witness))

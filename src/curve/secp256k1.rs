@@ -353,11 +353,11 @@ mod tests {
     /// A scalar on the left of a variable or a linear combination, as with ristretto255.
     #[test]
     fn scalar_operators_with_variables() {
-        use crate::r1cs::{LinearCombination, Variable};
-        let (two, v) = (Scalar::from(2u64), Variable::Committed(0));
+        use crate::r1cs::{LinearCombination, Var, Variable};
+        let (two, v) = (Scalar::from(2u64), Variable(Var::Committed(0)));
         let lc = |t: &[(Variable, Scalar)]| t.iter().collect::<LinearCombination<Scalar>>();
-        assert_eq!(two + v, lc(&[(Variable::One(), two), (v, Scalar::ONE)]));
-        assert_eq!(two - v, lc(&[(Variable::One(), two), (v, -Scalar::ONE)]));
+        assert_eq!(two + v, lc(&[(Variable::ONE, two), (v, Scalar::ONE)]));
+        assert_eq!(two - v, lc(&[(Variable::ONE, two), (v, -Scalar::ONE)]));
         assert_eq!(two * v, v * two);
         assert_eq!(two * LinearCombination::from(v), v * two);
     }

@@ -88,15 +88,17 @@ fn circuit(g: &Gates) -> (ArithmeticCircuit<Scalar>, CircuitWitness<Scalar>) {
 }
 
 fn r1cs<CS: ConstraintSystem<Scalar>>(cs: &mut CS, g: &Gates, prover: bool) {
-    let mut vars = vec![Variable::One(); 3 * g.n];
+    let mut vars = vec![Variable::ONE; 3 * g.n];
     for i in 0..g.n {
-        let (l, r, o) = cs.allocate_multiplier(if prover { Some((g.w_l[i], g.w_r[i])) } else { None }).unwrap();
+        let ab = if prover { Some((g.w_l[i], g.w_r[i])) } else { None };
+        let (l, r) = (cs.witness(ab.map(|p| p.0)).unwrap(), cs.witness(ab.map(|p| p.1)).unwrap());
+        let o = cs.multiply(l.into(), r.into()).unwrap();
         vars[i] = l;
         vars[g.n + i] = r;
         vars[2 * g.n + i] = o;
     }
     for (terms, constant) in &g.rows {
-        let lc: LinearCombination<Scalar> = terms.iter().map(|(c, v)| (vars[*c], *v)).chain(Some((Variable::One(), *constant))).collect();
+        let lc: LinearCombination<Scalar> = terms.iter().map(|(c, v)| (vars[*c], *v)).chain(Some((Variable::ONE, *constant))).collect();
         cs.constrain(lc);
     }
 }

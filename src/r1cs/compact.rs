@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 use crate::curve::Field;
 
-use super::{LinearCombination, Variable};
+use super::{LinearCombination, Var, Variable};
 
 const TAG_SHIFT: u32 = 29;
 const INDEX_MASK: u32 = (1 << TAG_SHIFT) - 1;
@@ -26,6 +26,13 @@ const TAG_WITNESS: u32 = 5;
 /// Indices of the pre-seeded coefficients.
 const COEFF_ONE: u32 = 0;
 const COEFF_MINUS_ONE: u32 = 1;
+
+/// An input of a BP multiplier: the left or the right one of multiplier `multiplier`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Input {
+    pub(super) multiplier: usize,
+    pub(super) right: bool,
+}
 
 /// The flattened constraint weights `(wL, wR, wO, wV, wc)`.
 pub(super) type Flattened<F> = (Vec<F>, Vec<F>, Vec<F>, Vec<F>, F);
@@ -54,13 +61,13 @@ impl<F: Field> ConstraintStore<F> {
     pub(super) fn push(&mut self, lc: &LinearCombination<F>) {
         for (var, coeff) in &lc.terms {
             let packed = match *var {
-                Variable::MultiplierLeft(i) => pack(TAG_LEFT, i),
-                Variable::MultiplierRight(i) => pack(TAG_RIGHT, i),
-                Variable::MultiplierOutput(i) => pack(TAG_OUTPUT, i),
-                Variable::Committed(i) => pack(TAG_COMMITTED, i),
-                Variable::Witness(i) => pack(TAG_WITNESS, i),
-                Variable::One() if self.keep_constants => pack(TAG_ONE, 0),
-                Variable::One() => continue,
+                Variable(Var::MultiplierLeft(i)) => pack(TAG_LEFT, i),
+                Variable(Var::MultiplierRight(i)) => pack(TAG_RIGHT, i),
+                Variable(Var::MultiplierOutput(i)) => pack(TAG_OUTPUT, i),
+                Variable(Var::Committed(i)) => pack(TAG_COMMITTED, i),
+                Variable(Var::Witness(i)) => pack(TAG_WITNESS, i),
+                Variable::ONE if self.keep_constants => pack(TAG_ONE, 0),
+                Variable(Var::One) => continue,
             };
             // ±1 (most terms) without hashing; plain byte comparison of public values.
             let bytes = coeff.to_bytes32();
@@ -83,13 +90,13 @@ impl<F: Field> ConstraintStore<F> {
 
     /// $w_X[i] = \sum_q z^{q+1} W_X[q][i]$ for the multiplier columns, $-\ldots$ for the
     /// committed column and the constant (zero if constants are not kept); frees the storage.
-    /// `Witness(i)` is the left (`i` even) or right input of multiplier `witness_base + i / 2`
-    /// (spec §7.5).
+    /// `Witness(i)` is the multiplier input `witnesses[i]` (spec §7.5: a free witness is half
+    /// of a packed multiplier, a folded one the input of its product).
     ///
     /// With `parallel`, every thread owns a range of variable indices and scans all terms,
     /// recomputing the powers of `z` itself: no extra memory, and each sum is accumulated in
     /// the same order as in the serial code.
-    pub(super) fn flatten(&mut self, z: &F, n: usize, m: usize, witness_base: usize) -> Flattened<F> {
+    pub(super) fn flatten(&mut self, z: &F, n: usize, m: usize, witnesses: &[Input]) -> Flattened<F> {
         let mut wL = vec![F::ZERO; n];
         let mut wR = vec![F::ZERO; n];
         let mut wO = vec![F::ZERO; n];
@@ -104,8 +111,9 @@ impl<F: Field> ConstraintStore<F> {
                 for &(packed, c) in &self.terms[start..end] {
                     let (mut tag, mut i) = (packed >> TAG_SHIFT, (packed & INDEX_MASK) as usize);
                     if tag == TAG_WITNESS {
-                        tag = if i % 2 == 0 { TAG_LEFT } else { TAG_RIGHT };
-                        i = witness_base + i / 2;
+                        let w = witnesses[i];
+                        tag = if w.right { TAG_RIGHT } else { TAG_LEFT };
+                        i = w.multiplier;
                     }
                     if !wanted(tag, i) {
                         continue;
@@ -199,12 +207,12 @@ impl<F: Field> ConstraintStore<F> {
         self.terms[start..self.ends[q]].iter().map(move |&(packed, c)| {
             let i = (packed & INDEX_MASK) as usize;
             let var = match packed >> TAG_SHIFT {
-                TAG_LEFT => Variable::MultiplierLeft(i),
-                TAG_RIGHT => Variable::MultiplierRight(i),
-                TAG_OUTPUT => Variable::MultiplierOutput(i),
-                TAG_COMMITTED => Variable::Committed(i),
-                TAG_WITNESS => Variable::Witness(i),
-                _ => Variable::One(),
+                TAG_LEFT => Variable(Var::MultiplierLeft(i)),
+                TAG_RIGHT => Variable(Var::MultiplierRight(i)),
+                TAG_OUTPUT => Variable(Var::MultiplierOutput(i)),
+                TAG_COMMITTED => Variable(Var::Committed(i)),
+                TAG_WITNESS => Variable(Var::Witness(i)),
+                _ => Variable::ONE,
             };
             (var, self.coeffs[c as usize])
         })

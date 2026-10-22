@@ -7,22 +7,33 @@ use std::ops::{Add, Mul, Neg, Sub};
 
 use crate::curve::Field;
 
-/// Represents a variable in a constraint system.
+/// A variable of a constraint system: an input committed with `commit`, a witness, the
+/// product returned by `multiply`, or the constant [`Variable::ONE`]. Variables are made by
+/// the constraint system and belong to it.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub enum Variable {
-    /// Represents an external input specified by a commitment.
+pub struct Variable(pub(crate) Var);
+
+impl Variable {
+    /// The constant 1.
+    pub const ONE: Variable = Variable(Var::One);
+}
+
+/// The kinds of variables, private to the backends.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Var {
+    /// An external input specified by a commitment.
     Committed(usize),
-    /// Represents the left input of a multiplication gate.
+    /// The left input of a multiplication gate.
     MultiplierLeft(usize),
-    /// Represents the right input of a multiplication gate.
+    /// The right input of a multiplication gate.
     MultiplierRight(usize),
-    /// Represents the output of a multiplication gate.
+    /// The output of a multiplication gate.
     MultiplierOutput(usize),
-    /// A witness of the circuit builder (spec §7): half a multiplier in BP, a slot of `w_O`
-    /// in BP++.
+    /// A witness (spec §7): folded into a product's input wire, or free (half a multiplier in
+    /// BP, a slot of `w_O` in BP++).
     Witness(usize),
-    /// Represents the constant 1.
-    One(),
+    /// The constant 1.
+    One,
 }
 
 impl<F: Field> LinearCombination<F> {
@@ -43,9 +54,8 @@ impl<F: Field> LinearCombination<F> {
     }
 }
 
-/// `v` as a linear combination over `F`: the way to start arithmetic on variables in code
-/// generic over the field, where `a + b` of two [`Variable`]s (ristretto255 only) does not
-/// apply: `lc(a) + b`.
+/// `v` as a linear combination over `F`: the way to start arithmetic on variables, `lc(a) + b`
+/// (a variable names no field, so two variables or a variable and an integer do not add).
 pub fn lc<F: Field>(v: impl Into<LinearCombination<F>>) -> LinearCombination<F> {
     v.into()
 }
@@ -58,14 +68,13 @@ impl<F: Field> From<Variable> for LinearCombination<F> {
 
 impl<F: Field> From<F> for LinearCombination<F> {
     fn from(s: F) -> LinearCombination<F> {
-        LinearCombination { terms: vec![(Variable::One(), s)] }
+        LinearCombination { terms: vec![(Variable::ONE, s)] }
     }
 }
 
 
-// Arithmetic on variables produces linear combinations: generic over the field when the
-// other operand names it (a linear combination or a field element), over ristretto255's
-// scalars otherwise (two variables, an integer), as before the curve became a parameter.
+// Arithmetic on a variable produces a linear combination when the other operand names the
+// field (a linear combination or a field element).
 
 impl<F: Field> Add<LinearCombination<F>> for Variable {
     type Output = LinearCombination<F>;
@@ -107,50 +116,14 @@ impl<F: Field> Mul<F> for Variable {
     }
 }
 
-/// Two variables make a linear combination over ristretto255's scalars (the field cannot be
-/// inferred from two variables; in generic code write `lc(a) + b`).
-///
-/// ```
-/// use bulletproofs::r1cs::{LinearCombination, Variable};
-/// use curve25519_dalek::scalar::Scalar;
-///
-/// let (a, b) = (Variable::Committed(0), Variable::Committed(1));
-/// let sum: LinearCombination<Scalar> = a + b;
-/// assert_eq!(sum, LinearCombination::from(a) + LinearCombination::from(b));
-/// ```
-impl Add<Variable> for Variable {
-    type Output = LinearCombination<Scalar>;
-
-    fn add(self, other: Variable) -> Self::Output {
-        LinearCombination::from(self) + other
-    }
-}
-
-impl Sub<Variable> for Variable {
-    type Output = LinearCombination<Scalar>;
-
-    fn sub(self, other: Variable) -> Self::Output {
-        LinearCombination::from(self) - other
-    }
-}
-
-
-impl Neg for Variable {
-    type Output = LinearCombination<Scalar>;
-
-    fn neg(self) -> Self::Output {
-        -LinearCombination::from(self)
-    }
-}
-
 // Arithmetic on scalars with variables produces linear combinations (a foreign type on the
-// left takes one impl per field: ristretto255's here)
+// left takes one impl per field: ristretto255's here, secp256k1's in `curve::secp256k1`)
 
 impl Add<Variable> for Scalar {
     type Output = LinearCombination<Scalar>;
 
     fn add(self, other: Variable) -> Self::Output {
-        LinearCombination { terms: vec![(Variable::One(), self), (other, Scalar::ONE)] }
+        LinearCombination { terms: vec![(Variable::ONE, self), (other, Scalar::ONE)] }
     }
 }
 
@@ -158,7 +131,7 @@ impl Sub<Variable> for Scalar {
     type Output = LinearCombination<Scalar>;
 
     fn sub(self, other: Variable) -> Self::Output {
-        LinearCombination { terms: vec![(Variable::One(), self), (other, -Scalar::ONE)] }
+        LinearCombination { terms: vec![(Variable::ONE, self), (other, -Scalar::ONE)] }
     }
 }
 
@@ -252,13 +225,13 @@ impl<F: Field> Mul<F> for LinearCombination<F> {
     }
 }
 
-/// Integer constants of every width, as upstream (`From<S: Into<Scalar>>`): generic for
-/// linear combinations, ristretto255 with a variable on the left.
+/// Integer constants of every width in linear combinations, as upstream
+/// (`From<S: Into<Scalar>>`).
 macro_rules! integer_constants {
     ($($t:ty),*) => {$(
         impl<F: Field> From<$t> for LinearCombination<F> {
             fn from(s: $t) -> LinearCombination<F> {
-                LinearCombination { terms: vec![(Variable::One(), crate::util::from_u128(s as u128))] }
+                LinearCombination { terms: vec![(Variable::ONE, crate::util::from_u128(s as u128))] }
             }
         }
 
@@ -270,29 +243,8 @@ macro_rules! integer_constants {
             }
         }
 
-        impl Add<$t> for Variable {
-            type Output = LinearCombination<Scalar>;
 
-            fn add(self, other: $t) -> Self::Output {
-                LinearCombination::from(self) + other
-            }
-        }
 
-        impl Sub<$t> for Variable {
-            type Output = LinearCombination<Scalar>;
-
-            fn sub(self, other: $t) -> Self::Output {
-                LinearCombination::from(self) - other
-            }
-        }
-
-        impl Mul<$t> for Variable {
-            type Output = LinearCombination<Scalar>;
-
-            fn mul(self, other: $t) -> Self::Output {
-                self * Scalar::from(other)
-            }
-        }
     )*};
 }
 

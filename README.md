@@ -491,10 +491,8 @@ calls *is* the statement.
 | method | what it does |
 |---|---|
 | `witness(v)` | A free variable with the prover's value `v` and no constraint. The default choice for values you constrain yourself. |
-| `multiply(l, r)` | The product `l * r` of two linear combinations as a new variable. |
+| `multiply(l, r)` | The product `l * r` of two linear combinations as a new variable. A free witness that is the whole of `l` or `r` becomes the gate's input wire (below). |
 | `constrain_product(l, r, out)` | Asserts `l * r = out` for three linear combinations, without a new variable. Use it when the product already has a name (for example `out` is a witness). |
-| `allocate(v)` | Creates one new wire with the prover's value `v` and no constraint on it. Two consecutive `allocate`s share one multiplication gate (as its left and right inputs). Constrain the wire yourself. |
-| `allocate_multiplier(Some((a, b)))` | Creates a multiplication gate from the values `a`, `b` directly: wires `(left, right, out)` with `out = a * b`, without linear combinations as inputs. |
 | `constrain(lc)` | Asserts `lc = 0`. Free on both backends: it adds a row to the linear part, no gate. |
 | `eval(lc)` | The value of a linear combination: `Some` for the prover, `None` for the verifier. For computing the witness inside a gadget. |
 | `table(rows)` | Declares a public table: a list of rows of equal length (`u64` entries), such as all bytes `{0..255}` or all triples `(a, b, a ^ b)`. Returns a `TableId`. Costs nothing until it is looked up; create each table once and share it. |
@@ -541,11 +539,9 @@ A gadget written as `fn g<F: Field, CS: ConstraintSystem<F>>(..)` (with
 curve25519-dalek's `Scalar` is a ristretto255 gadget. In generic code:
 
 - values are `F::from(u64)`, linear combinations `LinearCombination<F>`;
-- `lc ± var`, `lc ± F`, `lc ± u64`, `lc * F`, `var * F`, `var ± lc` and `var ± F` are
-  generic;
-- `var ± var`, `-var`, `var ± u64`, `var * u64` (any integer width) and `Scalar ± * var`
-  produce ristretto255 linear combinations (they do not name a field): write `lc(a) + b`
-  with `bulletproofs::r1cs::lc`;
+- `lc ± var`, `lc ± F`, `lc ± u64`, `lc * F`, `lc * u64`, `var * F`, `var ± lc` and `var ± F`
+  make linear combinations; a variable alone names no field, so start with
+  `bulletproofs::r1cs::lc`: `lc(a) + b`, `lc(a) - 1u64`, `-lc(a)`;
 - `Prover::new(&pc, ..)` takes its curve from the Pedersen generators,
   `Verifier::<_, C>::new(..)` names it.
 
@@ -615,9 +611,9 @@ rejects it. Accepting either backend means trusting both.
 
 | operation | BP | BP++ |
 |---|---|---|
-| `multiply`, `allocate_multiplier` | 1 multiplier | 1 gate |
-| `allocate` | ½ multiplier | ½ gate (paired into a real gate; reading its wire in a tuple or numerator costs a linear slot) |
+| `multiply` | 1 multiplier | 1 gate |
 | `witness`, `lookup_value`'s witness | ½ multiplier | no gate (a free slot of `w_O`: a spare output slot of a gate, else a linear slot) |
+| a witness folded into a product (below) | free | free (reading its wire in a tuple of 2+ columns or, for a right wire, a numerator costs a linear slot) |
 | `constrain_product(l, r, out)` | 1 multiplier (as `multiply` + `constrain`) | 1 gate, no linear rows |
 | `constrain(lc)` | free (a row of the randomized combination) | free |
 | `lookup` | 1 second-phase multiplier | 1 gate (+ a linear slot per component that reads a multiplier wire, for 2+ columns) |
@@ -629,6 +625,15 @@ rejects it. Accepting either backend means trusting both.
 the verifier can compute it without the witness. BP's capacity is the multipliers rounded up
 to a power of two. BP++'s is `max(gates, linear + 6)`. Proof size grows with the logarithm of
 both.
+
+**Folding.** A free witness that is the whole left or right input of a product (`multiply` or
+`constrain_product`, coefficient 1 and no constant) becomes that input wire, the first time it
+is one: its input constraint disappears and every other use reads the wire. So
+`let (a, b) = (cs.witness(x)?, cs.witness(y)?); cs.multiply(a.into(), b.into())?` costs one
+multiplier and nothing else, and a bit is `let b = cs.witness(v)?;
+cs.constrain_product(b.into(), lc(Variable::ONE) - b, LinearCombination::default())?` (one
+multiplier, one gate, no linear slot). Prover and verifier fold alike: the decision depends on
+the calls, not on values.
 
 ### Rules and pitfalls
 
@@ -656,8 +661,9 @@ both.
   transcript before `Prover::new` (as `product` above).
 - **Constant time.** Computing the witness values in your gadget is your code: keep it constant
   time in the secrets. The builder's own multiplicity counting is constant time.
-- **Compatibility.** `Variable::Witness` is a new variant: exhaustive `match`es on `Variable`
-  in downstream code need an arm for it.
+- **Variables belong to their constraint system.** `Variable` is opaque: gadgets get variables
+  from `commit`, `witness`, `multiply` and `lookup_value`, and `Variable::ONE`. A variable of
+  another constraint system that does not exist in this one is a `GadgetError`.
 
 ### Testing
 

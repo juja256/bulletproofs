@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use super::builder::{Cost, TableId};
 use super::ConstraintSystem;
-use super::{Backend, LinearCombination, Prover, R1CSError, Variable, Verifier};
+use super::{Backend, LinearCombination, Prover, R1CSError, Var, Variable, Verifier};
 use crate::bppp::testutil;
 use crate::curve::{Curve, Field, Ristretto};
 use crate::{BulletproofGens, PedersenGens};
@@ -22,12 +22,12 @@ fn var(v: &Value) -> Variable {
     let a = v.as_array().unwrap();
     let i = || a[1].as_u64().unwrap() as usize;
     match a[0].as_str().unwrap() {
-        "V" => Variable::Committed(i()),
-        "L" => Variable::MultiplierLeft(i()),
-        "R" => Variable::MultiplierRight(i()),
-        "O" => Variable::MultiplierOutput(i()),
-        "W" => Variable::Witness(i()),
-        "1" => Variable::One(),
+        "V" => Variable(Var::Committed(i())),
+        "L" => Variable(Var::MultiplierLeft(i())),
+        "R" => Variable(Var::MultiplierRight(i())),
+        "O" => Variable(Var::MultiplierOutput(i())),
+        "W" => Variable(Var::Witness(i())),
+        "1" => Variable::ONE,
         x => panic!("variable {}", x),
     }
 }
@@ -61,12 +61,6 @@ fn run<F: Field, CS: ConstraintSystem<F>>(
                 }
                 "multiply" => {
                     cs.multiply(lc(&op["l"]), lc(&op["r"]))?;
-                }
-                "allocate" => {
-                    cs.allocate(val(op, "v"))?;
-                }
-                "allocate_multiplier" => {
-                    cs.allocate_multiplier(if prover { Some((testutil::sc(&op["l"]), testutil::sc(&op["r"]))) } else { None })?;
                 }
                 "constrain" => cs.constrain(lc(&op["lc"])),
                 "witness" => {

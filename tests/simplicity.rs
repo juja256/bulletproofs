@@ -144,7 +144,7 @@ fn gadgets<CS: ConstraintSystem<Scalar>>(cs: &mut CS, x: Variable, y: Variable, 
     let l = cs.lookup_value(t, if prover { Some(3) } else { None }).unwrap();
     cs.constrain(lc(l) - lc(x));
     let w = cs.witness(if prover { Some(Scalar::from(7u64)) } else { None }).unwrap();
-    cs.constrain_product(lc(w), lc(y), lc(Variable::One()) * Scalar::from(35u64)).unwrap();
+    cs.constrain_product(lc(w), lc(y), lc(Variable::ONE) * Scalar::from(35u64)).unwrap();
 }
 
 #[test]

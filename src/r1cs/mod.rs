@@ -27,6 +27,7 @@ pub use self::builder::{Cost, Reciprocal, TableId};
 pub use self::constraint_system::ConstraintSystem;
 pub(crate) use self::constraint_system::{RandomizableConstraintSystem, RandomizedConstraintSystem};
 pub use self::linear_combination::{lc, LinearCombination, Variable};
+pub(crate) use self::linear_combination::Var;
 pub use self::proof::R1CSProof;
 pub use self::prover::Prover;
 pub use self::verifier::Verifier;

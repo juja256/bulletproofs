@@ -3,6 +3,7 @@
 
 #![allow(non_snake_case)]
 
+use bulletproofs::r1cs::lc;
 use bulletproofs::bppp::{self, MactEntry, MactStatement, RangeStatement};
 use bulletproofs::r1cs::{Backend, ConstraintSystem, Prover, R1CSProof, Verifier};
 use bulletproofs::{BulletproofGens, PedersenGens};
@@ -72,7 +73,7 @@ fn gadget<CS: ConstraintSystem<Scalar>>(cs: &mut CS, x: bulletproofs::r1cs::Vari
     let t = cs.table((0..16u64).map(|i| vec![i]).collect()).unwrap();
     let a = cs.lookup_value(t, v.map(|v| v & 15)).unwrap();
     let b = cs.lookup_value(t, v.map(|v| v >> 4)).unwrap();
-    cs.constrain(x - a - b * Scalar::from(16u64));
+    cs.constrain(lc(x) - a - b * Scalar::from(16u64));
     cs.multiply(a.into(), b.into()).unwrap();
 }
 

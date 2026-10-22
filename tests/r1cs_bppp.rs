@@ -15,23 +15,25 @@ use rand_chacha::ChaCha20Rng;
 use bulletproofs::curve::Ristretto;
 
 /// The statement: committed `x, y, z` with `x * y = z`, and a committed `v` with an `n`-bit
-/// decomposition (`b (1 - b) = 0`, `sum 2^i b_i = v`), plus one lone `allocate()` that leaves a
-/// pending multiplier, constrained to 3.
+/// decomposition (`a b = 0`, `a + b = 1`, `sum 2^i b_i = v`), plus one lone free witness,
+/// constrained to 3.
 fn gadget<CS: ConstraintSystem<Scalar>>(cs: &mut CS, vars: &[Variable], bits: Option<u64>, n: usize) -> Result<(), R1CSError> {
     let o = cs.multiply(vars[0].into(), vars[1].into()).unwrap();
-    cs.constrain(o - vars[2]);
+    cs.constrain(lc(o) - vars[2]);
     let mut sum = LinearCombination::default();
     let mut pow = Scalar::ONE;
     for i in 0..n {
         let bit = bits.map(|v| Scalar::from((v >> i) & 1));
-        let (a, b, o) = cs.allocate_multiplier(bit.map(|b| (Scalar::ONE - b, b)))?;
+        let a = cs.witness(bit.map(|b| Scalar::ONE - b))?;
+        let b = cs.witness(bit)?;
+        let o = cs.multiply(a.into(), b.into())?;
         cs.constrain(o.into());
-        cs.constrain(a + b - Scalar::ONE);
+        cs.constrain(lc(a) + b - Scalar::ONE);
         sum = sum + b * pow;
         pow += pow;
     }
     cs.constrain(sum - vars[3]);
-    let lone = cs.allocate(bits.map(|_| Scalar::from(3u64)))?;
+    let lone = cs.witness(bits.map(|_| Scalar::from(3u64)))?;
     cs.constrain(lone - Scalar::from(3u64));
     Ok(())
 }
@@ -124,12 +126,14 @@ fn several_constants_in_one_constraint() {
 fn foreign_variables_are_gadget_errors() {
     let pc = PedersenGens::<Ristretto>::default();
     let bp = BulletproofGens::new(16, 1);
-    for var in [Variable::MultiplierLeft(1), Variable::MultiplierOutput(5), Variable::Committed(1)] {
+    let (w, o, c) = foreign(3, 6, 2);
+    for var in [o[5], c[1], w[2]] {
         let mut t = Transcript::new(b"foreign");
         let mut prover = Prover::new(&pc, &mut t);
         prover.set_backend(Backend::Bppp);
         let (_, x) = prover.commit(Scalar::from(5u64), Scalar::from(1u64));
-        let (_, _, o) = prover.allocate_multiplier(Some((Scalar::from(2u64), Scalar::from(3u64)))).unwrap();
+        let (a, b) = (prover.witness(Some(Scalar::from(2u64))).unwrap(), prover.witness(Some(Scalar::from(3u64))).unwrap());
+        let o = prover.multiply(a.into(), b.into()).unwrap();
         prover.constrain(o - Scalar::from(6u64) + x - Scalar::from(5u64) + var);
         match prover.prove(&bp) {
             Err(R1CSError::GadgetError { .. }) => {}
@@ -142,18 +146,20 @@ fn foreign_variables_are_gadget_errors() {
 fn no_commitments_and_no_multipliers() {
     let pc = PedersenGens::<Ristretto>::default();
     let bp = BulletproofGens::new(16, 1);
-    // no commitments: a product of allocated values
+    // no commitments: a product of free witnesses
     let run = |backend: Backend| {
         let mut t = Transcript::new(b"k0");
         let mut prover = Prover::new(&pc, &mut t);
         prover.set_backend(backend);
-        let (_, _, o) = prover.allocate_multiplier(Some((Scalar::from(3u64), Scalar::from(5u64)))).unwrap();
+        let (a, b) = (prover.witness(Some(Scalar::from(3u64))).unwrap(), prover.witness(Some(Scalar::from(5u64))).unwrap());
+        let o = prover.multiply(a.into(), b.into()).unwrap();
         prover.constrain(o - Scalar::from(15u64));
         let proof = prover.prove(&bp).unwrap();
         let mut t = Transcript::new(b"k0");
         let mut verifier = Verifier::new(&mut t);
         verifier.set_backend(backend);
-        let (_, _, o) = verifier.allocate_multiplier(None).unwrap();
+        let (a, b) = (verifier.witness(None).unwrap(), verifier.witness(None).unwrap());
+        let o = verifier.multiply(a.into(), b.into()).unwrap();
         verifier.constrain(o - Scalar::from(15u64));
         verifier.verify(&proof, &pc, &bp)
     };
@@ -165,13 +171,13 @@ fn no_commitments_and_no_multipliers() {
     prover.set_backend(Backend::Bppp);
     let (a, x) = prover.commit(Scalar::from(9u64), Scalar::from(1u64));
     let (b, y) = prover.commit(Scalar::from(9u64), Scalar::from(2u64));
-    prover.constrain(x - y);
+    prover.constrain(lc(x) - y);
     let proof = prover.prove(&bp).unwrap();
     let mut t = Transcript::new(b"m0");
     let mut verifier = Verifier::new(&mut t);
     verifier.set_backend(Backend::Bppp);
     let (x, y) = (verifier.commit(a), verifier.commit(b));
-    verifier.constrain(x - y);
+    verifier.constrain(lc(x) - y);
     verifier.verify(&proof, &pc, &bp).unwrap();
 }
 
@@ -224,8 +230,9 @@ fn one_encoding_for_every_constraint_system() {
     let (proof, V) = prove(Backend::Bppp, [6, 7, 42, 200], 8, &pc, &bp).unwrap();
     let bytes = proof.to_bytes();
     let u = |i: usize| u64::from_le_bytes(bytes[i..i + 8].try_into().unwrap());
-    // n = 1 (multiply) + 8 (bits) + 1 (allocate), k = 4
-    assert_eq!((bytes[0], u(1), u(9)), (4, 10, 4));
+    // n = 1 (multiply) + 8 (bits, their witnesses folded into the wires), k = 4 and one free
+    // witness in the linear part
+    assert_eq!((bytes[0], u(1), u(9)), (4, 9, 5));
     verify(Backend::Bppp, &R1CSProof::from_bytes(&bytes).unwrap(), &V, 8, &pc, &bp).unwrap();
     // the tags of the BP++ encodings before option B (2: §3 proof of a plain R1CS with the same
     // header and body layout, 3: builder) are format errors, not proofs that fail later
@@ -241,7 +248,7 @@ fn one_encoding_for_every_constraint_system() {
     p.set_backend(Backend::Bppp);
     let (vx, x) = p.commit(Scalar::from(4u64), Scalar::from(1u64));
     let w = p.witness(Some(Scalar::from(4u64))).unwrap();
-    p.constrain(w - x);
+    p.constrain(lc(w) - x);
     let b = p.prove(&bp).unwrap().to_bytes();
     assert_eq!(b[0], 4);
     let mut t = Transcript::new(b"one");
@@ -249,7 +256,7 @@ fn one_encoding_for_every_constraint_system() {
     v.set_backend(Backend::Bppp);
     let x = v.commit(vx);
     let w = v.witness(None).unwrap();
-    v.constrain(w - x);
+    v.constrain(lc(w) - x);
     v.verify(&R1CSProof::from_bytes(&b).unwrap(), &pc, &bp).unwrap();
 }
 
@@ -276,12 +283,26 @@ fn plain_corner_cases() {
     let mut p = Prover::new(&pc, &mut t);
     p.set_backend(Backend::Bppp);
     let (V, x) = p.commit(Scalar::from(1u64), Scalar::from(2u64));
-    p.constrain(x - Variable::Witness(0));
+    p.constrain(lc(x) - foreign(1, 0, 0).0[0]);
     assert!(matches!(p.prove(&bp), Err(R1CSError::GadgetError { .. })));
     let mut t = Transcript::new(b"w");
     let mut v = Verifier::new(&mut t);
     v.set_backend(Backend::Bppp);
     let x = v.commit(V);
-    v.constrain(x - Variable::Witness(0));
+    v.constrain(lc(x) - foreign(1, 0, 0).0[0]);
     assert!(matches!(v.verify(&proof, &pc, &bp), Err(R1CSError::GadgetError { .. })));
+}
+
+/// Variables of another constraint system (`n_w` witnesses, `n` multiplier outputs, `k`
+/// committed inputs, in that order of creation): a constraint system with fewer of a kind must
+/// refuse them.
+fn foreign(n_w: usize, n: usize, k: usize) -> (Vec<Variable>, Vec<Variable>, Vec<Variable>) {
+    let pc = PedersenGens::<Ristretto>::default();
+    let mut t = Transcript::new(b"foreign");
+    let mut p = Prover::new(&pc, &mut t);
+    let one = || Some(Scalar::from(1u64));
+    let w = (0..n_w).map(|_| p.witness(one()).unwrap()).collect();
+    let o = (0..n).map(|_| p.multiply(Scalar::from(1u64).into(), Scalar::from(1u64).into()).unwrap()).collect();
+    let c = (0..k).map(|_| p.commit(Scalar::from(1u64), Scalar::from(1u64)).1).collect();
+    (w, o, c)
 }

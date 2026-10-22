@@ -126,16 +126,18 @@ fn r1cs_bench(
     fn constrain<CS: ConstraintSystem<Scalar>>(cs: &mut CS, g: &Gates, vars: &[Variable]) {
         for (terms, constant) in &g.rows {
             let lc: LinearCombination<Scalar> =
-                terms.iter().map(|(col, v)| (vars[*col], *v)).chain(core::iter::once((Variable::One(), *constant))).collect();
+                terms.iter().map(|(col, v)| (vars[*col], *v)).chain(core::iter::once((Variable::ONE, *constant))).collect();
             cs.constrain(lc);
         }
     }
     let prove = || {
         let mut t = Transcript::new(b"bench");
         let mut prover = Prover::new(pc, &mut t);
-        let mut vars = vec![Variable::One(); 3 * g.n];
+        let mut vars = vec![Variable::ONE; 3 * g.n];
         for i in 0..g.n {
-            let (l, r, o) = prover.allocate_multiplier(Some((g.w_l[i], g.w_r[i]))).unwrap();
+            let ab = Some((g.w_l[i], g.w_r[i]));
+            let (l, r) = (prover.witness(ab.map(|p| p.0)).unwrap(), prover.witness(ab.map(|p| p.1)).unwrap());
+            let o = prover.multiply(l.into(), r.into()).unwrap();
             vars[i] = l;
             vars[g.n + i] = r;
             vars[2 * g.n + i] = o;
@@ -149,9 +151,11 @@ fn r1cs_bench(
         let mut t = Transcript::new(b"bench");
         let mut prover = Prover::new(pc, &mut t);
         prover.set_backend(bulletproofs::r1cs::Backend::Bppp);
-        let mut vars = vec![Variable::One(); 3 * g.n];
+        let mut vars = vec![Variable::ONE; 3 * g.n];
         for i in 0..g.n {
-            let (l, r, o) = prover.allocate_multiplier(Some((g.w_l[i], g.w_r[i]))).unwrap();
+            let ab = Some((g.w_l[i], g.w_r[i]));
+            let (l, r) = (prover.witness(ab.map(|p| p.0)).unwrap(), prover.witness(ab.map(|p| p.1)).unwrap());
+            let o = prover.multiply(l.into(), r.into()).unwrap();
             vars[i] = l;
             vars[g.n + i] = r;
             vars[2 * g.n + i] = o;
@@ -166,9 +170,11 @@ fn r1cs_bench(
         b.iter(|| {
             let mut t = Transcript::new(b"bench");
             let mut verifier = Verifier::new(&mut t);
-            let mut vars = vec![Variable::One(); 3 * g.n];
+            let mut vars = vec![Variable::ONE; 3 * g.n];
             for i in 0..g.n {
-                let (l, r, o) = verifier.allocate_multiplier(None).unwrap();
+                let ab: Option<(Scalar, Scalar)> = None;
+                let (l, r) = (verifier.witness(ab.map(|p| p.0)).unwrap(), verifier.witness(ab.map(|p| p.1)).unwrap());
+                let o = verifier.multiply(l.into(), r.into()).unwrap();
                 vars[i] = l;
                 vars[g.n + i] = r;
                 vars[2 * g.n + i] = o;

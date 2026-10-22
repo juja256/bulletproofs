@@ -354,8 +354,8 @@ Liquid node would run it (`SimplicityVerifier::execute`).
 The compiler traces the crate's own verifier, normalises the result (products of squares,
 balanced sums), stores only values worth keeping between steps and recomputes the rest where it
 is read, with the final multiscalar multiplication as one balanced tree. Circuits up to about
-1 024 gates fit a standard Liquid transaction (400 kWU): 30 kWU at 64 gates, 193 kWU at 512 gates,
-398 kWU at 1 024 gates.
+1 024 gates fit a standard Liquid transaction (400 kWU): 30 kWU at 64 gates, 194 kWU at 512 gates,
+399 kWU at 1 024 gates.
 The compiler builds several programs (generators as points or as x and parity, ways to decide
 what to store) and keeps the lightest. The jets of the multiscalar
 multiplication alone put the ceiling near 5 000 gates. For comparison, simple-groth16's verifier

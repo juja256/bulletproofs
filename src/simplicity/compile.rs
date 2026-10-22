@@ -421,10 +421,12 @@ pub(crate) fn compile_with<R: rand_core::RngCore + rand_core::CryptoRng>(
             *m = lightest(&cands, &ws).expect("the mode's best");
         }
     }
-    let (_, k, opts) = lightest(&per_mode.iter().flatten().map(|&(_, k, o)| (k, o)).collect::<Vec<_>>(), &per_mode.iter().flatten().map(|&(w, ..)| Some(w)).collect::<Vec<_>>())
+    let (weight, k, opts) = lightest(&per_mode.iter().flatten().map(|&(_, k, o)| (k, o)).collect::<Vec<_>>(), &per_mode.iter().flatten().map(|&(w, ..)| Some(w)).collect::<Vec<_>>())
         .ok_or_else(|| gadget_err("no program within the cell limit"))?;
     let (compressed, msm_count) = (modes[k], progs[k].1);
     let low = progs[k].0.lower(&opts);
+    // lowering is deterministic: the winner lowered again is the program that was weighed
+    debug_assert_eq!(weight_of(&low.term, &dummy).ok().map(|w| w.0), Some(weight), "the winner lowered again differs");
     let term = low.term;
     let commit = term.commit().map_err(|e| gadget_err(&format!("the generated program does not type: {}", e)))?;
     let cmr = commit.cmr();

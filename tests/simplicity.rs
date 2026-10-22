@@ -397,10 +397,17 @@ fn stage4_not_heavier_than_stage3() {
 /// the same CMR and choice.
 #[test]
 fn program_does_not_depend_on_the_threads() {
+    // the setting is process-wide: back to the default even on a panic
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            bulletproofs::simplicity::set_compile_threads(4);
+        }
+    }
+    let _reset = Reset;
     let env = dummy_env();
     let (a, _) = { bulletproofs::simplicity::set_compile_threads(1); table_program(16, 4, &env) };
     let (b, _) = { bulletproofs::simplicity::set_compile_threads(0); table_program(16, 4, &env) };
-    bulletproofs::simplicity::set_compile_threads(4);
     assert_eq!(a.cmr(), b.cmr());
     assert_eq!(a.stats().lowering, b.stats().lowering);
 }

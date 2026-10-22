@@ -26,7 +26,7 @@ Entries are listed in reverse chronological order.
   tables); the compiler weighs 18 candidate programs (generators as points or x and parity,
   1 to 3 role passes, a hot/cold environment, small constant words, shared functions) and keeps
   the lightest, on 4 threads by default (`simplicity::set_compile_threads`); new `Stats.lowering`. Signed exponents
-  (inverses of monomials, non-adjacent form): 1 024 gates fit a standard transaction (398 kWU).
+  (inverses of monomials, non-adjacent form): 1 024 gates fit a standard transaction (399 kWU).
 * Earlier fork changes (Bulletproofs++, the circuit builder, the secp256k1 curve, Elements
   commitments) are described in the README.
 

@@ -1,7 +1,6 @@
 //! The example of the README section "Writing gadgets for both backends": the same gadget code
 //! proven with Bulletproofs and with Bulletproofs++.
 
-#![cfg(feature = "yoloproofs")]
 
 use bulletproofs::curve::{Curve, Field, Ristretto};
 use bulletproofs::r1cs::{
@@ -109,7 +108,6 @@ fn verify<C: Curve>(proof: &R1CSProof<C>, commitments: &[C::Compressed], product
 fn backends() -> Vec<Backend> {
     #[allow(unused_mut)]
     let mut b = vec![Backend::Bp];
-    #[cfg(feature = "bppp")]
     b.push(Backend::Bppp);
     b
 }
@@ -154,7 +152,6 @@ fn the_guide_example_rejects_false_statements() {
 }
 
 
-#[cfg(feature = "secp256k1")]
 #[test]
 fn the_guide_example_on_secp256k1() {
     proves_on_both_backends::<bulletproofs::curve::Secp256k1>();

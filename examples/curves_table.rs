@@ -2,7 +2,7 @@
 //! 64-bit range proof (BP and BP++) and R1CS circuits of 2^10 and 2^14 multiplications on both
 //! backends, over ristretto255 and secp256k1.
 //!
-//! `cargo run --release --example curves_table --features "yoloproofs bppp secp256k1"`
+//! `cargo run --release --example curves_table`
 //! (add `parallel` for multi-threaded numbers).
 
 use std::time::Instant;

@@ -15,7 +15,6 @@ use crate::generators::{BulletproofGens, PedersenGens};
 use crate::r1cs::Metrics;
 use crate::transcript::{TranscriptBackend, TranscriptProtocol, TranscriptRef};
 use super::proof::ProofKind;
-#[cfg(feature = "bppp")]
 use super::proof::BpppProof;
 use super::builder::{self, Builder, CircuitBuilder, Cost, Counts, Reciprocal, TableId};
 use super::compact::{ConstraintStore, Flattened};
@@ -425,7 +424,6 @@ impl<T: TranscriptRef, C: Curve> Verifier<T, C> {
             .map(|_| ())
     }
     /// Finalize the builder's record and lower it (spec §7.4, §7.6).
-    #[cfg(feature = "bppp")]
     pub(crate) fn lower_builder_bppp(&mut self) -> Result<crate::bppp::ReciprocalCircuit<C::Scalar>, R1CSError> {
         self.builder.finalize(None)?;
         let rec = super::backend::Record {
@@ -440,7 +438,6 @@ impl<T: TranscriptRef, C: Curve> Verifier<T, C> {
 
     /// The BP++ backend (spec §6, §7.6): lower the constraint system (with the builder's record,
     /// empty for a plain R1CS) and verify.
-    #[cfg(feature = "bppp")]
     fn verify_bppp(mut self, p: &BpppProof<C>, pc_gens: &PedersenGens<C>, bp_gens: &BulletproofGens<C>) -> Result<T, R1CSError> {
         use crate::bppp::{reciprocal, BpppGens, BpppTranscript};
         super::backend::refuse_randomized(self.deferred_constraints.len())?;
@@ -465,7 +462,6 @@ impl<T: TranscriptRef, C: Curve> Verifier<T, C> {
         // a proof of the other backend is rejected
         let proof = match (self.backend, &proof.0) {
             (super::Backend::Bp, ProofKind::Bp(p)) => p,
-            #[cfg(feature = "bppp")]
             (super::Backend::Bppp, ProofKind::Bppp(p)) => return self.verify_bppp(p, pc_gens, bp_gens),
             #[allow(unreachable_patterns)]
             _ => return Err(R1CSError::VerificationError),

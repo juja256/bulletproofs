@@ -25,7 +25,6 @@ use rand_core::{CryptoRng, RngCore};
 
 use crate::util;
 
-#[cfg(feature = "std")]
 use rand::thread_rng;
 
 use super::messages::*;
@@ -299,7 +298,6 @@ impl<'a, 'b, C: Curve, X: TranscriptBackend + Clone> DealerAwaitingProofShares<'
     ///
     /// This is a convenience wrapper around receive_shares_with_rng
     ///
-    #[cfg(feature = "std")]
     pub fn receive_shares(self, proof_shares: &[ProofShare<C>]) -> Result<RangeProof<C>, MPCError> {
         self.receive_shares_with_rng(proof_shares, &mut thread_rng())
     }

@@ -42,12 +42,10 @@ pub(super) enum ProofKind<C: Curve> {
     Bp(BpProof<C>),
     /// A Bulletproofs++ proof of the lowered reciprocal form circuit (spec §6, §7.6), for every
     /// constraint system.
-    #[cfg(feature = "bppp")]
     Bppp(BpppProof<C>),
 }
 
 /// A Bulletproofs++ proof: the dimensions of the lowered reciprocal form circuit and its proof.
-#[cfg(feature = "bppp")]
 #[derive(Clone, Debug)]
 pub(super) struct BpppProof<C: Curve> {
     /// `N'_m = N_p + N_m`.
@@ -59,7 +57,6 @@ pub(super) struct BpppProof<C: Curve> {
 
 /// Tag of a BP++ proof (spec §6.2). BP proofs use 0 and 1; 2 and 3 are retired encodings
 /// (format errors).
-#[cfg(feature = "bppp")]
 const BPPP_TAG: u8 = 4;
 
 impl<C: Curve> R1CSProof<C> {
@@ -68,7 +65,6 @@ impl<C: Curve> R1CSProof<C> {
     pub fn backend(&self) -> super::Backend {
         match &self.0 {
             ProofKind::Bp(_) => super::Backend::Bp,
-            #[cfg(feature = "bppp")]
             ProofKind::Bppp(_) => super::Backend::Bppp,
         }
     }
@@ -79,7 +75,6 @@ impl<C: Curve> R1CSProof<C> {
     pub fn to_bytes(&self) -> Vec<u8> {
         match &self.0 {
             ProofKind::Bp(p) => p.to_bytes(),
-            #[cfg(feature = "bppp")]
             ProofKind::Bppp(p) => {
                 let mut out = alloc::vec![BPPP_TAG];
                 out.extend_from_slice(&(p.n_mm as u64).to_le_bytes());
@@ -94,14 +89,12 @@ impl<C: Curve> R1CSProof<C> {
     pub fn serialized_size(&self) -> usize {
         match &self.0 {
             ProofKind::Bp(p) => p.serialized_size(),
-            #[cfg(feature = "bppp")]
             ProofKind::Bppp(_) => self.to_bytes().len(),
         }
     }
 
     /// Deserializes a proof of either backend.
     pub fn from_bytes(slice: &[u8]) -> Result<R1CSProof<C>, R1CSError> {
-        #[cfg(feature = "bppp")]
         {
             let tag = slice.first().copied();
             if tag == Some(BPPP_TAG) {
@@ -309,12 +302,7 @@ impl<'de, C: Curve> Deserialize<'de> for R1CSProof<C> {
             {
                 // Using Error::custom requires T: Display, which our error
                 // type only implements when it implements std::error::Error.
-                #[cfg(feature = "std")]
                 return R1CSProof::<C>::from_bytes(v).map_err(serde::de::Error::custom);
-                // In no-std contexts, drop the error message.
-                #[cfg(not(feature = "std"))]
-                return R1CSProof::<C>::from_bytes(v)
-                    .map_err(|_| serde::de::Error::custom("deserialization error"));
             }
         }
 

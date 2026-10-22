@@ -129,7 +129,6 @@ fn matches_reference_vectors() {
     reference_vectors::<crate::curve::Ristretto>();
 }
 
-#[cfg(feature = "secp256k1")]
 #[test]
 fn matches_reference_vectors_secp256k1() {
     reference_vectors::<crate::curve::Secp256k1>();

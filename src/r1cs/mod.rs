@@ -1,6 +1,4 @@
-#![cfg_attr(feature = "docs", doc(include = "../../docs/r1cs-docs-example.md"))]
 
-#[cfg_attr(feature = "docs", doc(include = "../../docs/cs-proof.md"))]
 mod notes {}
 
 mod backend;
@@ -13,9 +11,9 @@ mod oblivious;
 mod proof;
 mod prover;
 mod verifier;
-#[cfg(all(test, feature = "bppp"))]
+#[cfg(test)]
 mod soundness;
-#[cfg(all(test, feature = "bppp"))]
+#[cfg(test)]
 mod vectors;
 
 pub use self::backend::{Backend, UnknownBackend};

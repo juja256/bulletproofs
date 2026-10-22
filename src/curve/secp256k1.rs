@@ -183,7 +183,6 @@ impl Curve for Secp256k1 {
 
 // A scalar on the left of a variable or a linear combination (the generic impls have the
 // variable or the linear combination on the left).
-#[cfg(feature = "yoloproofs")]
 mod r1cs_ops {
     use core::ops::{Add, Mul, Sub};
     use k256::Scalar;
@@ -352,7 +351,6 @@ mod tests {
     }
 
     /// A scalar on the left of a variable or a linear combination, as with ristretto255.
-    #[cfg(feature = "yoloproofs")]
     #[test]
     fn scalar_operators_with_variables() {
         use crate::r1cs::{LinearCombination, Variable};

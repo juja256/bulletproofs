@@ -39,7 +39,6 @@ impl Cost {
     pub fn gates(&self, backend: super::Backend) -> usize {
         match backend {
             super::Backend::Bp => self.bp_phase1 + self.bp_phase2,
-            #[cfg(feature = "bppp")]
             super::Backend::Bppp => self.bppp_gates,
         }
     }
@@ -48,7 +47,6 @@ impl Cost {
     pub fn linear(&self, backend: super::Backend) -> usize {
         match backend {
             super::Backend::Bp => 0,
-            #[cfg(feature = "bppp")]
             super::Backend::Bppp => self.bppp_linear,
         }
     }
@@ -59,7 +57,6 @@ impl Cost {
     pub fn gens_capacity(&self, backend: super::Backend) -> usize {
         match backend {
             super::Backend::Bp => (self.bp_phase1 + self.bp_phase2).next_power_of_two(),
-            #[cfg(feature = "bppp")]
             super::Backend::Bppp => crate::bppp::gens_capacity(self.bppp_linear, self.bppp_gates),
         }
     }

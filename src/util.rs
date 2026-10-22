@@ -1,7 +1,5 @@
 #![deny(missing_docs)]
 #![allow(non_snake_case)]
-// Some helpers serve only the optional R1CS and BP++ code.
-#![cfg_attr(not(any(feature = "bppp", feature = "yoloproofs")), allow(dead_code))]
 
 extern crate alloc;
 
@@ -143,7 +141,6 @@ pub struct Poly2<F: Field = Scalar>(pub F, pub F, pub F);
 
 /// Represents a degree-6 scalar polynomial, without the zeroth degree
 /// \\(a \cdot x + b \cdot x^2 + c \cdot x^3 + d \cdot x^4 + e \cdot x^5 + f \cdot x^6\\)
-#[cfg(feature = "yoloproofs")]
 pub struct Poly6<F: Field = Scalar> {
     pub t1: F,
     pub t2: F,
@@ -230,7 +227,6 @@ impl<F: Field> Poly2<F> {
     }
 }
 
-#[cfg(feature = "yoloproofs")]
 impl<F: Field> Poly6<F> {
     pub fn eval(&self, x: F) -> F {
         x * (self.t1 + x * (self.t2 + x * (self.t3 + x * (self.t4 + x * (self.t5 + x * self.t6)))))
@@ -256,7 +252,6 @@ impl<F: Field> Drop for Poly2<F> {
     }
 }
 
-#[cfg(feature = "yoloproofs")]
 impl<F: Field> Drop for Poly6<F> {
     fn drop(&mut self) {
         self.t1.zeroize();

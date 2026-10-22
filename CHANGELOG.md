@@ -4,6 +4,12 @@ Entries are listed in reverse chronological order.
 
 ## Unreleased (this fork)
 
+* Breaking changes (API refactor, 2026-10-22).
+  * Features: only `parallel`, `simplicity` and `cheats` remain. R1CS (`yoloproofs`),
+    Bulletproofs++ (`bppp`), the curve secp256k1 (`secp256k1`) and `Sha256Transcript`
+    (`sha256-transcript`) are always compiled; `std` is always on (no no_std); `nightly` and
+    `docs` are gone. The BP++ norm argument always runs in variable time (the former
+    `bppp-vartime`; same proofs).
 * Transcripts: every protocol takes its Fiat–Shamir transcript as `&mut T` for any
   `T: TranscriptBackend`; `merlin::Transcript` stays the default with byte-identical proofs.
   New `Sha256Transcript` (feature `sha256-transcript`, on with `secp256k1`): a transcript on

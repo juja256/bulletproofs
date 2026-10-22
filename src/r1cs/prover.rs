@@ -21,7 +21,6 @@ use crate::util;
 use super::builder::{self, Builder, CircuitBuilder, Cost, Counts, Reciprocal, TableId};
 use super::compact::{ConstraintStore, Flattened};
 use super::proof::{BpProof, ProofKind};
-#[cfg(feature = "bppp")]
 use super::proof::BpppProof;
 
 /// Index chunk for the polynomial passes of the prover.
@@ -524,7 +523,6 @@ impl<'g, T: TranscriptRef, C: Curve> Prover<'g, T, C> {
         bp_gens: &BulletproofGens<C>,
         external_rng: &mut R,
     ) -> Result<(R1CSProof<C>, T), R1CSError> {
-        #[cfg(feature = "bppp")]
         {
             if self.backend == super::Backend::Bppp {
                 return self.prove_bppp(bp_gens, external_rng);
@@ -870,7 +868,6 @@ impl<'g, T: TranscriptRef, C: Curve> Prover<'g, T, C> {
 
     /// Finalize the builder's record and lower it to a reciprocal form circuit and its
     /// witness (spec §7.4, §7.6).
-    #[cfg(feature = "bppp")]
     pub(crate) fn lower_builder_bppp(&mut self) -> Result<(crate::bppp::ReciprocalCircuit<C::Scalar>, crate::bppp::ReciprocalWitness<C::Scalar>), R1CSError> {
         let secrets = &self.secrets;
         let m = self.builder.finalize(Some(&|lc: &LinearCombination<C::Scalar>| eval_with(secrets, lc)))?;
@@ -890,7 +887,6 @@ impl<'g, T: TranscriptRef, C: Curve> Prover<'g, T, C> {
 
     /// The BP++ backend (spec §6, §7.6): finalize the builder's record (empty for a plain R1CS),
     /// lower the constraint system to a reciprocal form circuit and prove it (§4).
-    #[cfg(feature = "bppp")]
     fn prove_bppp<R: RngCore + CryptoRng>(
         mut self,
         bp_gens: &BulletproofGens<C>,

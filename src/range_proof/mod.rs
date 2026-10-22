@@ -1,11 +1,8 @@
 #![allow(non_snake_case)]
-#![cfg_attr(feature = "docs", doc(include = "../../docs/range-proof-protocol.md"))]
 
 extern crate alloc;
-#[cfg(feature = "std")]
 extern crate rand;
 
-#[cfg(feature = "std")]
 use self::rand::thread_rng;
 use alloc::vec::Vec;
 
@@ -157,7 +154,6 @@ impl<C: Curve> RangeProof<C> {
     /// blinding scalar `v_blinding`.
     /// This is a convenience wrapper around [`RangeProof::prove_single_with_rng`],
     /// passing in a threadsafe RNG.
-    #[cfg(feature = "std")]
     pub fn prove_single<X: TranscriptBackend + Clone>(
         bp_gens: &BulletproofGens<C>,
         pc_gens: &PedersenGens<C>,
@@ -290,7 +286,6 @@ impl<C: Curve> RangeProof<C> {
     /// Create a rangeproof for a set of values.
     /// This is a convenience wrapper around [`RangeProof::prove_multiple_with_rng`],
     /// passing in a threadsafe RNG.
-    #[cfg(feature = "std")]
     pub fn prove_multiple<X: TranscriptBackend + Clone>(
         bp_gens: &BulletproofGens<C>,
         pc_gens: &PedersenGens<C>,
@@ -329,7 +324,6 @@ impl<C: Curve> RangeProof<C> {
     ///
     /// This is a convenience wrapper around [`RangeProof::verify_single_with_rng`],
     /// passing in a threadsafe RNG.
-    #[cfg(feature = "std")]
     pub fn verify_single<X: TranscriptBackend + ?Sized>(
         &self,
         bp_gens: &BulletproofGens<C>,
@@ -459,7 +453,6 @@ impl<C: Curve> RangeProof<C> {
     /// Verifies an aggregated rangeproof for the given value commitments.
     /// This is a convenience wrapper around [`RangeProof::verify_multiple_with_rng`],
     /// passing in a threadsafe RNG.
-    #[cfg(feature = "std")]
     pub fn verify_multiple<X: TranscriptBackend + ?Sized>(
         &self,
         bp_gens: &BulletproofGens<C>,
@@ -568,12 +561,7 @@ impl<'de, C: Curve> Deserialize<'de> for RangeProof<C> {
                 }
                 // Using Error::custom requires T: Display, which our error
                 // type only implements when it implements std::error::Error.
-                #[cfg(feature = "std")]
                 return RangeProof::<C>::from_bytes(&*vec).map_err(serde::de::Error::custom);
-                // In no-std contexts, drop the error message.
-                #[cfg(not(feature = "std"))]
-                return RangeProof::<C>::from_bytes(&*vec)
-                    .map_err(|_| serde::de::Error::custom("deserialization error"));
             }
 
             fn visit_bytes<E>(self, v: &[u8]) -> Result<RangeProof<C>, E>
@@ -582,12 +570,7 @@ impl<'de, C: Curve> Deserialize<'de> for RangeProof<C> {
             {
                 // Using Error::custom requires T: Display, which our error
                 // type only implements when it implements std::error::Error.
-                #[cfg(feature = "std")]
                 return RangeProof::<C>::from_bytes(v).map_err(serde::de::Error::custom);
-                // In no-std contexts, drop the error message.
-                #[cfg(not(feature = "std"))]
-                return RangeProof::<C>::from_bytes(v)
-                    .map_err(|_| serde::de::Error::custom("deserialization error"));
             }
         }
 

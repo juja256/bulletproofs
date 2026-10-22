@@ -16,7 +16,6 @@ type Lc = LinearCombination;
 fn backends() -> Vec<Backend> {
     #[allow(unused_mut)]
     let mut b = vec![Backend::Bp];
-    #[cfg(feature = "bppp")]
     b.push(Backend::Bppp);
     b
 }
@@ -322,7 +321,6 @@ fn no_gates() {
     }
 }
 
-#[cfg(feature = "bppp")]
 #[test]
 fn bppp_builder_rules() {
     let b = Backend::Bppp;
@@ -373,7 +371,6 @@ fn bppp_builder_rules() {
     }
 }
 
-#[cfg(feature = "bppp")]
 #[test]
 fn proof_sizes() {
     let bp = BulletproofGens::new(2048, 1);
@@ -386,7 +383,6 @@ fn proof_sizes() {
 }
 
 /// Size of the norm argument (spec §2.2, §2.5) for lengths `a`, `b`.
-#[cfg(feature = "bppp")]
 fn bppp_wnla(mut a: usize, mut b: usize) -> usize {
     let mut rounds = 0;
     while a / 2 + b / 2 >= 3 {
@@ -458,7 +454,6 @@ fn constraints_on_missing_variables_are_errors() {
 
 /// Failed builder operations record nothing (spec §7.2): a statement whose only builder
 /// operations failed gives the proof of the plain constraint system, byte for byte.
-#[cfg(feature = "bppp")]
 #[test]
 fn failed_operations_leave_the_plain_proof() {
     let g = |cs: &mut Prover<&mut Transcript>, x: Variable| {
@@ -585,7 +580,6 @@ fn backends_parse_and_print() {
     assert_eq!(Backend::Bp.to_string(), "bp");
     assert!("bpp".parse::<Backend>().is_err());
     assert!("BP".parse::<Backend>().is_err());
-    #[cfg(feature = "bppp")]
     assert_eq!("bppp".parse::<Backend>().unwrap(), Backend::Bppp);
 }
 
@@ -593,6 +587,5 @@ fn backends_parse_and_print() {
 fn cost_per_backend() {
     let c = Cost { bp_phase1: 7, bp_phase2: 3, bppp_gates: 5, bppp_linear: 4 };
     assert_eq!((c.gates(Backend::Bp), c.linear(Backend::Bp)), (10, 0));
-    #[cfg(feature = "bppp")]
     assert_eq!((c.gates(Backend::Bppp), c.linear(Backend::Bppp)), (5, 4));
 }

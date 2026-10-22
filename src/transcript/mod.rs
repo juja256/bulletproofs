@@ -3,9 +3,7 @@
 
 use merlin::Transcript;
 
-#[cfg(feature = "sha256-transcript")]
 mod sha256;
-#[cfg(feature = "sha256-transcript")]
 pub use self::sha256::Sha256Transcript;
 
 use crate::curve::{Curve, Field, PointEncoding};

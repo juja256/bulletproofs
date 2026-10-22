@@ -226,7 +226,6 @@ fn builder_matches_reference_vectors() {
     builder_vectors::<Ristretto>();
 }
 
-#[cfg(feature = "secp256k1")]
 #[test]
 fn builder_matches_reference_vectors_secp256k1() {
     builder_vectors::<crate::curve::Secp256k1>();

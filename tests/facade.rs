@@ -1,7 +1,6 @@
 //! The `bulletproofs::secp256k1` facade: a BP++ 64-bit range proof, a BP range proof and an
 //! R1CS proof over secp256k1 without naming the curve parameter.
 
-#![cfg(all(feature = "secp256k1", feature = "bppp", feature = "yoloproofs"))]
 
 use bulletproofs::curve::ff::Field;
 use bulletproofs::secp256k1::{self, BulletproofGens, PedersenGens, Scalar};

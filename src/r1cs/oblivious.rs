@@ -191,7 +191,7 @@ mod tests {
 
 #[cfg(test)]
 mod timing {
-    /// `cargo test --release --features yoloproofs --lib oblivious::timing -- --ignored --nocapture`
+    /// `cargo test --release --lib oblivious::timing -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn crossover() {

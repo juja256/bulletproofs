@@ -28,7 +28,7 @@ This library provides implementations of:
   
 * A programmable constraint system API for expressing rank-1
   constraint systems, and proving and verifying proofs of arbitrary
-  statements (unstable, under development with the `yoloproofs` feature);
+  statements (unstable);
   
 * Online multi-party computation for aggregated constraint system proofs
   (planned future work).
@@ -40,14 +40,9 @@ implementation changes.
 The development roadmap can be found in the
 [Milestones][gh_milestones] section of the [Github repo][gh_repo].
 
-The constraint system API is provided **FOR EXPERIMENTS ONLY**, and must be
-enabled by specifying the `yoloproofs` feature.  It is not covered by semver
-compatibility and is **SUBJECT TO CHANGE WITHOUT NOTICE**.  
-
-Currently, the `yoloproofs` feature is disabled in the published version of the
-crate, so it can only be used by specifying a git dependency on the `develop`
-branch.  This means that it is not possible to publish a crate using the R1CS
-API, because it is **FOR EXPERIMENTS ONLY**.
+The constraint system API is provided **FOR EXPERIMENTS ONLY**. It is not covered by semver
+compatibility and is **SUBJECT TO CHANGE WITHOUT NOTICE**. In this fork it is always compiled
+(upstream hid it behind the feature `yoloproofs`).
 
 ## Documentation
   
@@ -147,13 +142,7 @@ assert!(
 ```
 ## Building
 
-To compile successfully, you will need to have nightly Rust installed, rather than stable.
-
-You can install nightly Rust with rustup:
-
-```text
-rustup default nightly
-```
+Stable Rust; the crate needs `std`.
 
 ## Tests and Benchmarks
 
@@ -162,28 +151,22 @@ uses [criterion.rs][criterion] for benchmarks.
 
 ## Features
 
-The `yoloproofs` feature enables support for rank-1 constraint system proofs.
-It is **UNSTABLE AND UNSUITABLE FOR DEPLOYMENT**, and **PROVIDED FOR TESTING
-ONLY**.
+Everything is compiled by default: range proofs, R1CS proofs (**UNSTABLE AND UNSUITABLE FOR
+DEPLOYMENT**), Bulletproofs++ (`bulletproofs::bppp`, a second backend of the R1CS front end, see
+[Bulletproofs++](#bulletproofs-experimental) and
+[Writing gadgets for both backends](#writing-gadgets-for-both-backends)), both curves
+ristretto255 and secp256k1 (see [Curves](#curves)) and both transcripts, merlin and
+`Sha256Transcript` (see [Transcripts](#transcripts)). The BP++ norm argument runs in variable
+time: its inputs are uniformly random given the transcript; the commitments to the witness stay
+constant time. Three features remain.
 
 The `parallel` feature (this fork) runs the prover and verifier on all threads with
 [rayon](https://crates.io/crates/rayon): chunked multiscalar multiplications, the
 polynomial passes and constraint flattening, the inner-product argument and generator
 derivation. Proofs are identical to the serial ones.
 
-The `bppp` feature (this fork) adds Bulletproofs++: its protocols in `bulletproofs::bppp` and a
-second backend of the R1CS front end and the circuit builder (see
-[Bulletproofs++](#bulletproofs-experimental) and
-[Writing gadgets for both backends](#writing-gadgets-for-both-backends)).
-`bppp-vartime` computes the BP++ norm argument in variable time (its inputs are uniformly
-random given the transcript; same proofs, faster proving; constant time is the default).
-`cheats` is for tests only: `r1cs::cheats::with_unchecked_prover` makes the prover skip its
+The `cheats` feature is for tests only: `r1cs::cheats::with_unchecked_prover` makes the prover skip its
 own checks, so that a soundness test can check that the verifier rejects the result.
-
-The `secp256k1` feature (this fork) adds the curve secp256k1 (see [Curves](#curves)).
-
-The `sha256-transcript` feature (this fork, on with `secp256k1`) adds `Sha256Transcript`, a
-Fiat–Shamir transcript on SHA-256 alone (see [Transcripts](#transcripts)).
 
 The `simplicity` feature (this fork, experimental) compiles R1CS circuits into Simplicity
 verifiers (see [Simplicity verifier](#simplicity-verifier-experimental)).
@@ -246,13 +229,12 @@ let (proof, committed) = RangeProof::prove_single(&bp_gens, &pc_gens, &mut trans
   transcript of a curve other than ristretto255 absorbs the curve's name.
 - Commitments to secrets go through k256's constant-time multiscalar multiplication
   (`lincomb`, GLV); public scalars through a variable-time Pippenger with batch-affine bucket
-  sums. As upstream on ristretto255, the inner-product argument (and the BP++ norm argument
-  with `bppp-vartime`) handles its blinded vectors `l(x)`, `r(x)` in variable time.
+  sums. As upstream on ristretto255, the inner-product argument (and the BP++ norm argument) handles its blinded vectors `l(x)`, `r(x)` in variable time.
 - Gadgets for both curves: `fn g<F: Field, CS: CircuitBuilder<F>>` (see
   [Writing gadgets for both backends](#writing-gadgets-for-both-backends)).
 
 Proof sizes and times on one core of an Apple M4 Pro
-(`cargo run --release --example curves_table --features "yoloproofs bppp secp256k1"`; R1CS:
+(`cargo run --release --example curves_table`; R1CS:
 a chain of multiplications):
 
 | curve | proof | backend | size | prove | verify |
@@ -311,8 +293,7 @@ Every protocol takes its Fiat–Shamir transcript as `&mut T` for any `T: Transc
 passes a `merlin::Transcript` is unchanged and its proofs are byte-identical to upstream.
 
 - **`merlin::Transcript`** (the default): STROBE over Keccak-f, as upstream.
-- **`Sha256Transcript`** (feature `sha256-transcript`, on with `secp256k1`; also
-  `bulletproofs::secp256k1::Sha256Transcript`): a running SHA-256 with length-prefixed
+- **`Sha256Transcript`**: a running SHA-256 with length-prefixed
   records. It is for verifiers that have SHA-256 but no Keccak, such as a Simplicity program
   on Liquid. The byte format, the constants a verifier embeds and the cost of a challenge are
   in [docs/sha256-transcript.md](docs/sha256-transcript.md).
@@ -422,7 +403,7 @@ example a 64-bit proof in base 256 is 704 B.
   proves the tuple is a row component by component, with no range checks on the components.
   `cost()` reports the multipliers, gates and generator capacity of either backend.
 
-`cargo bench --features bppp --bench bppp -- "range|mact"`:
+`cargo bench --bench bppp -- "range|mact"`:
 
 | | proof | prove | verify |
 |---|---|---|---|
@@ -434,9 +415,9 @@ The inaccuracies found in the paper are collected in
 [`docs/bppp/bppp-paper-errors.tex`](docs/bppp/bppp-paper-errors.tex).
 
 ```sh
-cargo test --release --features bppp --lib bppp
+cargo test --release --lib bppp
 python3 ref/gen_vectors.py            # regenerate the vectors (deterministic)
-cargo bench --features bppp --bench bppp
+cargo bench --bench bppp
 ```
 
 | WNLA, $\lvert l\rvert = 16$ | prove | verify |
@@ -445,7 +426,7 @@ cargo bench --features bppp --bench bppp
 | $\lvert n\rvert = 2^{14}$ | 591 ms | 30.5 ms |
 
 The same circuit in both backends: $n$ multiplications $w_L w_R = w_O$ and $n$ random linear
-constraints with three terms each (`cargo bench --features "bppp yoloproofs" --bench bppp -- circuit`):
+constraints with three terms each (`cargo bench --bench bppp -- circuit`):
 
 | $n$ | proof BP++ / BP | prove BP++ / BP | verify BP++ / BP |
 |---|---|---|---|
@@ -456,7 +437,7 @@ Verification is about a third faster and proofs about a fifth smaller (these row
 prover optimisations; see the large circuits below).
 
 The circuit builder, $n$ committed values range-checked to 32 bits through a byte table (four
-lookups each; `cargo bench --features "bppp yoloproofs" --bench bppp -- builder`; this machine,
+lookups each; `cargo bench --bench bppp -- builder`; this machine,
 4 cores, measured single-threaded):
 
 | $n$ | proof BP++ / BP | prove BP++ / BP | verify BP++ / BP |
@@ -468,7 +449,8 @@ At small $n$ BP++ pays for its linear slots: witnesses and multiplicities beyond
 $N_p + N_m$ norm slots lengthen $H$.
 
 Large circuits (`examples/bppp_profile.rs`, one process per row for the peak memory; Xeon
-2.1 GHz, one thread; *vt* = feature `bppp-vartime`):
+2.1 GHz, one thread; *vt* = the norm argument in variable time, now the only mode; the constant-time column is
+the former default):
 
 | circuit | proof BP / BP++ | prove BP / BP++ / BP++ vt | verify BP / BP++ | peak RSS BP / BP++ |
 |---|---|---|---|---|

@@ -81,20 +81,17 @@ mod bp {
         linear_roundtrip::<Ristretto>();
     }
 
-    #[cfg(feature = "secp256k1")]
     #[test]
     fn range_proofs_secp256k1() {
         range_roundtrip::<bulletproofs::curve::Secp256k1>();
     }
 
-    #[cfg(feature = "secp256k1")]
     #[test]
     fn linear_proofs_secp256k1() {
         linear_roundtrip::<bulletproofs::curve::Secp256k1>();
     }
 }
 
-#[cfg(feature = "bppp")]
 mod bppp {
     use bulletproofs::bppp::{BatchVerifier, RangeProof, RangeStatement};
     use bulletproofs::curve::ff::Field as _;
@@ -150,7 +147,6 @@ mod bppp {
         mact_roundtrip::<Ristretto>();
     }
 
-    #[cfg(feature = "secp256k1")]
     #[test]
     fn bppp_range_proofs_secp256k1() {
         bppp_range_roundtrip::<bulletproofs::curve::Secp256k1>();
@@ -161,7 +157,6 @@ mod bppp {
 /// The identity's encoding (the `Curve` contract): `compress` is total, the identity encodes as
 /// `Compressed::default()`, which decodes back to it and is the only encoding `is_identity`
 /// accepts. One-phase R1CS proofs send the identity for the second-phase commitments.
-#[cfg(feature = "yoloproofs")]
 mod identity {
     use bulletproofs::curve::group::Group;
     use bulletproofs::curve::{Curve, PointEncoding, Ristretto};
@@ -203,7 +198,6 @@ mod identity {
         one_phase_r1cs::<Ristretto>();
     }
 
-    #[cfg(feature = "secp256k1")]
     #[test]
     fn secp256k1_identity_contract() {
         identity_contract::<bulletproofs::curve::Secp256k1>();
@@ -212,7 +206,6 @@ mod identity {
 }
 
 /// Upstream ristretto255 gadgets with integer constants of every width still compile.
-#[cfg(feature = "yoloproofs")]
 mod upstream_integers {
     use bulletproofs::r1cs::{ConstraintSystem, LinearCombination, Variable};
 
@@ -230,7 +223,6 @@ mod upstream_integers {
 
 /// Malformed points and scalars in every kind of proof on secp256k1 are errors (when parsing
 /// or verifying), never panics (Review Focus 1, 3).
-#[cfg(all(feature = "secp256k1", feature = "yoloproofs", feature = "bppp"))]
 mod malformed {
     use bulletproofs::bppp::{MactEntry, MactProof, MactStatement, RangeProof as BpppRangeProof, RangeStatement};
     use bulletproofs::curve::ff::Field as _;
@@ -365,7 +357,6 @@ mod malformed {
 /// A proof of one curve given to the other does not parse (the lengths differ), and the same
 /// statement on the two curves draws different challenges (the `curve` label in the
 /// transcript) (Review Focus 2).
-#[cfg(all(feature = "secp256k1", feature = "yoloproofs"))]
 mod bound_to_curve {
     use bulletproofs::curve::{Curve, Ristretto, Secp256k1};
     use bulletproofs::r1cs::{Backend, ConstraintSystem, Prover, R1CSError, R1CSProof};
@@ -397,7 +388,6 @@ mod bound_to_curve {
     #[test]
     fn proofs_are_bound_to_the_curve() {
         let mut backends = vec![Backend::Bp];
-        #[cfg(feature = "bppp")]
         backends.push(Backend::Bppp);
         for backend in backends {
             let r = product_proof::<Ristretto>(backend);

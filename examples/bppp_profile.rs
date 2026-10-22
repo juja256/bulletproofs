@@ -2,10 +2,10 @@
 //! (so that the peak RSS is that of this configuration):
 //!
 //! ```sh
-//! cargo run --release --features "bppp yoloproofs" --example bppp_profile -- circuit 14
-//! cargo run --release --features "bppp yoloproofs" --example bppp_profile -- wnla 14
-//! cargo run --release --features "bppp yoloproofs" --example bppp_profile -- r1cs 14 bppp
-//! cargo run --release --features "bppp yoloproofs" --example bppp_profile -- builder 1024 bp
+//! cargo run --release --example bppp_profile -- circuit 14
+//! cargo run --release --example bppp_profile -- wnla 14
+//! cargo run --release --example bppp_profile -- r1cs 14 bppp
+//! cargo run --release --example bppp_profile -- builder 1024 bp
 //! ```
 
 #![allow(non_snake_case)]

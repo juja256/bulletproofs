@@ -1,7 +1,6 @@
 //! Range proofs over Elements / secp256k1-zkp Pedersen commitments: `value * A + r * G` for a
 //! (blinded) asset generator `A`, exchanged in secp256k1-zkp's 33-byte encoding.
 
-#![cfg(all(feature = "secp256k1", feature = "bppp"))]
 
 use bulletproofs::bppp::{RangeProof as BpppRangeProof, RangeStatement};
 use bulletproofs::curve::ff::Field;

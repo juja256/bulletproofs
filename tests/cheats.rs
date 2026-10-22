@@ -2,7 +2,7 @@
 //! unsatisfied circuits) must produce proofs that the verifier rejects, on both backends.
 //! Downstream crates (bpvm) use it for soundness tests of whole circuits.
 
-#![cfg(all(feature = "cheats", feature = "yoloproofs"))]
+#![cfg(feature = "cheats")]
 
 use bulletproofs::r1cs::*;
 use bulletproofs::{BulletproofGens, PedersenGens};
@@ -14,7 +14,6 @@ type Lc = LinearCombination;
 fn backends() -> Vec<Backend> {
     #[allow(unused_mut)]
     let mut b = vec![Backend::Bp];
-    #[cfg(feature = "bppp")]
     b.push(Backend::Bppp);
     b
 }
@@ -89,7 +88,6 @@ fn honest_prover_refuses_a_lookup_equal_to_no_row() {
     // BP++ also refuses an unsatisfied reciprocal argument (BP proves it, as upstream proves
     // violated constraints). A violated linear constraint is proven by both: the constants are
     // derived from the witness, so the proof is of another circuit and fails verification.
-    #[cfg(feature = "bppp")]
     assert!(prove(Backend::Bppp, Fault::Reciprocal).is_err());
 }
 

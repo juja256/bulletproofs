@@ -101,7 +101,6 @@ fn a_delegating_backend_gives_merlin_linear_proofs() {
     assert!(counting_proof.verify(&mut Counting::new(b"l"), &C, &G, &F, &B, b).is_ok());
 }
 
-#[cfg(feature = "yoloproofs")]
 mod r1cs {
     use super::*;
     use bulletproofs::r1cs::{Backend, ConstraintSystem, LinearCombination, Prover, R1CSProof, Verifier};
@@ -156,7 +155,6 @@ mod r1cs {
         equals_merlin(Backend::Bp);
     }
 
-    #[cfg(feature = "bppp")]
     #[test]
     fn r1cs_bppp_backend_through_a_delegating_backend_equals_merlin() {
         equals_merlin(Backend::Bppp);
@@ -185,7 +183,6 @@ mod r1cs {
     }
 }
 
-#[cfg(feature = "sha256-transcript")]
 mod sha256 {
     use super::*;
     use bulletproofs::curve::{Curve, Field};
@@ -236,15 +233,7 @@ mod sha256 {
                         hex(&d)
                     }
                     "scalar_ristretto" => scalar_hex::<Ristretto>(&mut t, label()),
-                    #[cfg(feature = "secp256k1")]
                     "scalar_secp256k1" => scalar_hex::<bulletproofs::curve::Secp256k1>(&mut t, label()),
-                    #[cfg(not(feature = "secp256k1"))]
-                    "scalar_secp256k1" => {
-                        let mut d = [0u8; 64];
-                        t.challenge_bytes(label(), &mut d);
-                        k += 1;
-                        continue;
-                    }
                     // the prover's RNG seed is not public; the next challenge checks that
                     // deriving it leaves the transcript unchanged
                     "rng_digest" => {
@@ -277,7 +266,6 @@ mod sha256 {
 
 /// Every protocol over both transcripts and both curves: prove and verify with one transcript;
 /// the same proof fails under the other transcript type and under another label.
-#[cfg(feature = "sha256-transcript")]
 mod all_protocols {
     use bulletproofs::curve::ff::Field as _;
     use bulletproofs::curve::{Curve, Ristretto};
@@ -303,7 +291,6 @@ mod all_protocols {
             fn $name() {
                 $f::<Ristretto, _, _>(sha, mer);
                 $f::<Ristretto, _, _>(mer, sha);
-                #[cfg(feature = "secp256k1")]
                 {
                     $f::<bulletproofs::curve::Secp256k1, _, _>(sha, mer);
                     $f::<bulletproofs::curve::Secp256k1, _, _>(mer, sha);
@@ -375,7 +362,6 @@ mod all_protocols {
 
     /// `x · y = 15` and, in the second phase, `(x - z)(y - z) = 15 - 8z + z²` for a challenge
     /// `z`, with committed `x = 3`, `y = 5`.
-    #[cfg(feature = "yoloproofs")]
     fn r1cs_with<C: Curve, T: TranscriptBackend + Clone, U: TranscriptBackend>(t: Mk<T>, u: Mk<U>, backend: bulletproofs::r1cs::Backend, two_phase: bool) {
         use bulletproofs::r1cs::{lc, ConstraintSystem as _, Prover, RandomizableConstraintSystem, RandomizedConstraintSystem, Variable, Verifier};
         fn gadget<C: Curve, CS: RandomizableConstraintSystem<C::Scalar>>(cs: &mut CS, x: Variable, y: Variable, two_phase: bool) {
@@ -424,24 +410,19 @@ mod all_protocols {
         assert!(!run(b"other", false));
     }
 
-    #[cfg(feature = "yoloproofs")]
     fn r1cs_bp<C: Curve, T: TranscriptBackend + Clone, U: TranscriptBackend>(t: Mk<T>, u: Mk<U>) {
         r1cs_with::<C, T, U>(t, u, bulletproofs::r1cs::Backend::Bp, false);
         r1cs_with::<C, T, U>(t, u, bulletproofs::r1cs::Backend::Bp, true);
     }
-    #[cfg(feature = "yoloproofs")]
     both!(sha256_r1cs_bp_round_trips_and_binds, r1cs_bp);
 
     /// R1CS on BP++ runs the reciprocal argument (and its norm argument) under the transcript;
     /// one phase only (BP++ has no randomized constraints).
-    #[cfg(all(feature = "yoloproofs", feature = "bppp"))]
     fn r1cs_bppp<C: Curve, T: TranscriptBackend + Clone, U: TranscriptBackend>(t: Mk<T>, u: Mk<U>) {
         r1cs_with::<C, T, U>(t, u, bulletproofs::r1cs::Backend::Bppp, false);
     }
-    #[cfg(all(feature = "yoloproofs", feature = "bppp"))]
     both!(sha256_r1cs_bppp_round_trips_and_binds, r1cs_bppp);
 
-    #[cfg(feature = "bppp")]
     fn bppp_range<C: Curve, T: TranscriptBackend + Clone, U: TranscriptBackend>(t: Mk<T>, u: Mk<U>) {
         use bulletproofs::bppp::{BatchVerifier, RangeProof, RangeStatement};
         let mut rng = ChaCha20Rng::seed_from_u64(9);
@@ -461,10 +442,8 @@ mod all_protocols {
         let added = batch.add_range(&proof, &st, &V, &mut u(b"rt"));
         assert!(added.is_err() || batch.verify().is_err());
     }
-    #[cfg(feature = "bppp")]
     both!(sha256_bppp_range_and_batch_round_trip_and_bind, bppp_range);
 
-    #[cfg(feature = "bppp")]
     fn bppp_mact<C: Curve, T: TranscriptBackend + Clone, U: TranscriptBackend>(t: Mk<T>, u: Mk<U>) {
         use bulletproofs::bppp::{MactEntry, MactProof, MactStatement};
         let mut rng = ChaCha20Rng::seed_from_u64(11);
@@ -480,11 +459,9 @@ mod all_protocols {
         assert!(proof.verify(&st, &pc, &bp, &V, &mut u(b"rt")).is_err());
         assert!(proof.verify(&st, &pc, &bp, &V, &mut t(b"other")).is_err());
     }
-    #[cfg(feature = "bppp")]
     both!(sha256_bppp_mact_round_trips_and_binds, bppp_mact);
 
     /// The arithmetic-circuit protocol: `n` products `w_L w_R = w_O` and one linear row each.
-    #[cfg(feature = "bppp")]
     fn bppp_circuit<C: Curve, T: TranscriptBackend + Clone, U: TranscriptBackend>(t: Mk<T>, u: Mk<U>) {
         use bulletproofs::bppp::{ArithmeticCircuit, BpppGens, CircuitProof, CircuitWitness, Slot, SparseMatrix};
         let n = 4;
@@ -527,11 +504,9 @@ mod all_protocols {
         assert!(p.verify(&c, &gens, &[], &mut u(b"rt")).is_err());
         assert!(p.verify(&c, &gens, &[], &mut t(b"other")).is_err());
     }
-    #[cfg(feature = "bppp")]
     both!(sha256_bppp_circuit_round_trips_and_binds, bppp_circuit);
 
     /// BP and BP++ range proofs over an Elements commitment (a blinded asset generator).
-    #[cfg(all(feature = "secp256k1", feature = "bppp"))]
     #[test]
     fn sha256_elements_range_round_trips_and_binds() {
         use bulletproofs::curve::Secp256k1;
@@ -557,7 +532,6 @@ mod all_protocols {
 /// Full secp256k1 proofs under the SHA-256 transcript with the trace of every message and
 /// challenge (`tests/vectors/transcript/secp256k1-*.json`): test vectors for a Simplicity
 /// verifier. `ref/sha256_transcript.py --check-trace` recomputes the challenges independently.
-#[cfg(all(feature = "secp256k1", feature = "bppp", feature = "yoloproofs"))]
 mod full_proofs {
     use bulletproofs::curve::{Curve, PointEncoding, Secp256k1};
     use bulletproofs::r1cs::{lc, Backend, ConstraintSystem, Prover, R1CSProof, Variable, Verifier};
@@ -690,7 +664,6 @@ mod full_proofs {
 }
 
 /// The example of README's «Transcripts», through the facade.
-#[cfg(all(feature = "secp256k1", feature = "bppp"))]
 #[test]
 fn readme_transcripts_example() {
     use bulletproofs::bppp::RangeStatement;
@@ -706,7 +679,6 @@ fn readme_transcripts_example() {
 
 /// A gadget can bind a nested proof to the constraint system's transcript: every verifier
 /// (and every prover that does not clone) takes the leased `&mut dyn TranscriptBackend`.
-#[cfg(all(feature = "yoloproofs", feature = "bppp"))]
 #[test]
 fn gadgets_can_pass_the_leased_transcript_to_protocols() {
     use bulletproofs::r1cs::{ConstraintSystem, Prover};
@@ -725,7 +697,6 @@ fn gadgets_can_pass_the_leased_transcript_to_protocols() {
     assert!(nested2.verify(&st, &pc, &bp2, &V, p.transcript()).is_err());
 }
 
-#[cfg(feature = "sha256-transcript")]
 mod sha256_more {
     use rand_chacha::rand_core::{RngCore, SeedableRng};
     use rand_chacha::ChaCha20Rng;
@@ -765,7 +736,6 @@ mod sha256_more {
         assert_ne!(c, [0u8; 32]);
     }
 
-    #[cfg(feature = "bppp")]
     #[test]
     fn sha256_methods_are_unambiguous_with_both_traits() {
         #[allow(unused_imports)]
@@ -787,7 +757,6 @@ mod sha256_more {
 
     /// Challenges drawn after an R1CS proof agree between prover and verifier and depend on
     /// the proof.
-    #[cfg(feature = "yoloproofs")]
     #[test]
     fn sha256_challenges_after_a_proof_depend_on_it() {
         use bulletproofs::r1cs::{lc, ConstraintSystem, Prover, Verifier};

@@ -27,8 +27,5 @@ fn msm<C: Curve>(c: &mut Criterion) {
     group.finish();
 }
 
-#[cfg(feature = "secp256k1")]
 criterion_group!(curves, msm::<Ristretto>, msm::<bulletproofs::curve::Secp256k1>);
-#[cfg(not(feature = "secp256k1"))]
-criterion_group!(curves, msm::<Ristretto>);
 criterion_main!(curves);

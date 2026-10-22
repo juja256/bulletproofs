@@ -194,7 +194,6 @@ impl<F: Field> ConstraintStore<F> {
     }
 
     /// The terms of constraint `q`, decoded (constants appear only if they are kept).
-    #[cfg(feature = "bppp")]
     pub(super) fn row(&self, q: usize) -> impl Iterator<Item = (Variable, F)> + '_ {
         let start = if q == 0 { 0 } else { self.ends[q - 1] };
         self.terms[start..self.ends[q]].iter().map(move |&(packed, c)| {

@@ -56,7 +56,6 @@ impl Default for PedersenGens<Ristretto> {
 }
 
 /// Elements / secp256k1-zkp commitments `value * gen + blinding * G`.
-#[cfg(feature = "secp256k1")]
 impl PedersenGens<crate::curve::Secp256k1> {
     /// Generators for commitments to a value of the asset with generator `gen` (an
     /// `elements::generator_generate(_blinded)` output, the asset tag of a Liquid output; or

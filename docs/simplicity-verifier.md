@@ -1,6 +1,6 @@
 # Simplicity verifier (experimental)
 
-Feature `simplicity` (implies `secp256k1`, `bppp`, `yoloproofs`). An R1CS circuit on the BP++
+Feature `simplicity`. An R1CS circuit on the BP++
 backend over secp256k1, with the [SHA-256 transcript](sha256-transcript.md), compiles into a
 [Simplicity](https://github.com/BlockstreamResearch/simplicity) program that verifies its proofs
 and is bound to the spending transaction. The program runs as a Liquid node would run it. Stage 1

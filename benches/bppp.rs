@@ -110,12 +110,10 @@ fn circuit_bench(c: &mut Criterion) {
         c.bench_function(&format!("circuit n=2^{} BP++ verify", k), |b| {
             b.iter(|| proof.verify(&circ, &gens, &[], &mut Transcript::new(b"bench")).unwrap())
         });
-        #[cfg(feature = "yoloproofs")]
         r1cs_bench(c, k, &g, &pc, &bp);
     }
 }
 
-#[cfg(feature = "yoloproofs")]
 fn r1cs_bench(
     c: &mut Criterion,
     k: usize,
@@ -226,7 +224,6 @@ fn range_bench(c: &mut Criterion) {
 
 /// `n` 32-bit range checks of committed values through a byte table (spec §7), on both
 /// backends of the circuit builder.
-#[cfg(feature = "yoloproofs")]
 fn builder_bench(c: &mut Criterion) {
     use bulletproofs::r1cs::{Backend, CircuitBuilder, ConstraintSystem, LinearCombination, Prover, R1CSError, Variable, Verifier};
     fn gadget<CS: CircuitBuilder>(cs: &mut CS, vars: &[Variable], vals: Option<&[u64]>) -> Result<(), R1CSError> {
@@ -270,9 +267,6 @@ fn builder_bench(c: &mut Criterion) {
         }
     }
 }
-
-#[cfg(not(feature = "yoloproofs"))]
-fn builder_bench(_: &mut Criterion) {}
 
 criterion_group! {
     name = bppp;

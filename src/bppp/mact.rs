@@ -367,7 +367,6 @@ mod tests {
         reference_vectors::<Ristretto>();
     }
 
-    #[cfg(feature = "secp256k1")]
     #[test]
     fn matches_reference_vectors_secp256k1() {
         reference_vectors::<crate::curve::Secp256k1>();

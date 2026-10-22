@@ -32,7 +32,6 @@ impl TestScalar for Scalar {
 }
 
 /// k256: 32 big-endian bytes, rejection sampling (a canonical encoding is accepted at once).
-#[cfg(feature = "secp256k1")]
 impl TestScalar for k256::Scalar {
     fn random_bytes(&self) -> Vec<u8> {
         self.to_bytes32().to_vec()

@@ -24,7 +24,6 @@ use crate::errors::MPCError;
 use crate::generators::{BulletproofGens, PedersenGens};
 use crate::util;
 
-#[cfg(feature = "std")]
 use rand::thread_rng;
 
 use super::messages::*;
@@ -74,7 +73,6 @@ pub struct PartyAwaitingPosition<'a, C: Curve = Ristretto> {
 impl<'a, C: Curve> PartyAwaitingPosition<'a, C> {
     /// Assigns a position in the aggregated proof to this party,
     /// allowing the party to commit to the bits of their value.
-    #[cfg(feature = "std")]
     pub fn assign_position(
         self,
         j: usize,
@@ -170,7 +168,6 @@ pub struct PartyAwaitingBitChallenge<'a, C: Curve = Ristretto> {
 impl<'a, C: Curve> PartyAwaitingBitChallenge<'a, C> {
     /// Receive a [`BitChallenge`] from the dealer and use it to
     /// compute commitments to the party's polynomial coefficients.
-    #[cfg(feature = "std")]
     pub fn apply_challenge(
         self,
         vc: &BitChallenge<C>,

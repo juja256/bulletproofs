@@ -1,11 +1,3 @@
-#![cfg_attr(not(feature = "std"), no_std)]
-#![cfg_attr(feature = "docs", feature(external_doc))]
-#![cfg_attr(feature = "docs", deny(missing_docs))]
-#![cfg_attr(feature = "docs", doc(include = "../README.md"))]
-#![cfg_attr(
-    feature = "docs",
-    doc(html_root_url = "https://docs.rs/bulletproofs/5.0.0")
-)]
 
 extern crate alloc;
 
@@ -14,13 +6,9 @@ extern crate serde_derive;
 
 mod util;
 
-#[cfg_attr(feature = "docs", doc(include = "../docs/notes-intro.md"))]
 mod notes {
-    #[cfg_attr(feature = "docs", doc(include = "../docs/notes-ipp.md"))]
     mod inner_product_proof {}
-    #[cfg_attr(feature = "docs", doc(include = "../docs/notes-rp.md"))]
     mod range_proof {}
-    #[cfg_attr(feature = "docs", doc(include = "../docs/notes-r1cs.md"))]
     mod r1cs_proof {}
 }
 
@@ -38,10 +26,8 @@ pub use crate::generators::{BulletproofGens, BulletproofGensShare, PedersenGens}
 pub use crate::linear_proof::LinearProof;
 pub use crate::range_proof::RangeProof;
 pub use crate::transcript::{TranscriptBackend, TranscriptRef};
-#[cfg(feature = "sha256-transcript")]
 pub use crate::transcript::Sha256Transcript;
 
-#[cfg_attr(feature = "docs", doc(include = "../docs/aggregation-api.md"))]
 pub mod range_proof_mpc {
     pub use crate::errors::MPCError;
     pub use crate::range_proof::dealer;
@@ -49,14 +35,10 @@ pub mod range_proof_mpc {
     pub use crate::range_proof::party;
 }
 
-#[cfg(feature = "yoloproofs")]
-#[cfg(feature = "std")]
 pub mod r1cs;
 
-#[cfg(feature = "bppp")]
 pub mod bppp;
 
-#[cfg(feature = "secp256k1")]
 pub mod elements;
 
 #[cfg(feature = "simplicity")]
@@ -69,8 +51,6 @@ pub mod simplicity;
 /// A 64-bit Bulletproofs++ range proof:
 ///
 /// ```
-/// # #[cfg(feature = "bppp")]
-/// # {
 /// use bulletproofs::bppp::RangeStatement;
 /// use bulletproofs::curve::ff::Field;
 /// use bulletproofs::secp256k1::{bppp::RangeProof, BulletproofGens, PedersenGens, Scalar};
@@ -86,9 +66,7 @@ pub mod simplicity;
 /// let bytes = proof.to_bytes();
 /// let proof = RangeProof::from_bytes(&bytes, &st).unwrap();
 /// assert!(proof.verify(&st, &pc, &bp, &commitments, &mut Transcript::new(b"doc")).is_ok());
-/// # }
 /// ```
-#[cfg(feature = "secp256k1")]
 pub mod secp256k1 {
     pub use crate::curve::{Secp256k1, Secp256k1Compressed};
     pub use crate::elements;
@@ -110,7 +88,6 @@ pub mod secp256k1 {
     pub type LinearProof = crate::LinearProof<Secp256k1>;
 
     /// R1CS and the circuit builder over secp256k1 (gadgets: `CircuitBuilder<Scalar>`).
-    #[cfg(feature = "yoloproofs")]
     pub mod r1cs {
         use super::Secp256k1;
 
@@ -125,7 +102,6 @@ pub mod secp256k1 {
     }
 
     /// Bulletproofs++ over secp256k1.
-    #[cfg(feature = "bppp")]
     pub mod bppp {
         use super::Secp256k1;
 

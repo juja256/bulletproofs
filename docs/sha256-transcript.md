@@ -1,6 +1,6 @@
 # The SHA-256 transcript
 
-`Sha256Transcript` (feature `sha256-transcript`, on with `secp256k1`) is a Fiat–Shamir transcript
+`Sha256Transcript` is a Fiat–Shamir transcript
 built on SHA-256 alone. Every protocol of the crate takes it in place of `merlin::Transcript`. It
 exists for verifiers that have SHA-256 but no Keccak, so no Merlin; the motivating one is a
 Simplicity program on Liquid, which recomputes the challenges with the `sha_256_ctx_8_*` jets and

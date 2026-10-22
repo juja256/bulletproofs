@@ -58,12 +58,12 @@ optimised); the same circuit through the R1CS front end on BP++ 817 B at 2^10.
 Commands:
 
 ```sh
-cargo test --release --features "bppp parallel yoloproofs"   # everything (≈150 tests)
-cargo test --release --features yoloproofs                    # BP only, incl. golden
+cargo test --release --features parallel   # everything (2026-10-22: features bppp, yoloproofs and the rest are gone)
+cargo test --release --test golden         # BP golden vectors
 cargo test --release                                          # default features
 python3 -I ref/gen_vectors.py && git diff --stat tests/vectors # must be empty
 python3 -I ref/xcheck_secp256k1_zkp.py                        # 5/5 and 13/13
-cargo bench --features "bppp yoloproofs" --bench bppp
+cargo bench --bench bppp
 ```
 
 ## Method (used for every phase)

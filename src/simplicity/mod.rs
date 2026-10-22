@@ -20,5 +20,5 @@ pub const SIGHASH_LABEL: &[u8] = b"sighash";
 
 pub use self::sha::CompileTranscript;
 
-pub use self::compile::{SimplicityVerifier, SimplicityWitness, Stats};
+pub use self::compile::{set_compile_threads, SimplicityVerifier, SimplicityWitness, Stats};
 pub(crate) use self::compile::compile;

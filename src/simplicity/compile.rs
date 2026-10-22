@@ -15,7 +15,7 @@ use crate::curve::{Curve, Field, PointEncoding, Secp256k1, Secp256k1Compressed};
 use crate::errors::R1CSError;
 use crate::generators::{BulletproofGens, PedersenGens};
 use crate::r1cs::R1CSProof;
-use crate::simplicity::ir::{Lowered, Op, Options, Prog, Ty, Val};
+use crate::simplicity::ir::{Op, Options, Prog, Ty, Val};
 use crate::simplicity::point::{assert_infinity, const_gej, const_gej_compressed, ge_to_gej, msm, witness_point, witness_scalar, WitPoint};
 use crate::simplicity::run::{bit_value, execute_term, weight_of, word_value, Env, ExecError, Report, MAX_CELLS};
 use crate::simplicity::term::Term;
@@ -151,6 +151,44 @@ pub(crate) fn dummy_proof<R: rand_core::RngCore + rand_core::CryptoRng>(c: &Reci
 thread_local! {
     /// Tests: compile with these generators (compressed or not) and options only.
     pub(crate) static FORCE: std::cell::RefCell<Option<(bool, Options)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Threads compiling a program ([`set_compile_threads`]).
+static COMPILE_THREADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(4);
+
+/// Threads the compiler weighs its candidate programs on: 4 by default, 0 for every core. Each
+/// holds one candidate (fib from bpvm: about 0.7 GB), so more threads trade memory for time:
+/// fib compiles in 26 s on 1 thread, 10 s on 4 (3.4 GB), 7 s on 8 or more (6 to 7.5 GB). The
+/// program does not depend on it.
+pub fn set_compile_threads(n: usize) {
+    COMPILE_THREADS.store(n, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// `f` on every item, on up to [`set_compile_threads`] threads (a scoped pool taking items in turn); the results in
+/// the items' order.
+fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let threads = match COMPILE_THREADS.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => cores,
+        n => n.min(cores),
+    }
+    .min(items.len())
+    .max(1);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let slots: Vec<std::sync::Mutex<Option<R>>> = items.iter().map(|_| std::sync::Mutex::new(None)).collect();
+    std::thread::scope(|s| {
+        for _ in 0..threads {
+            s.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if i >= items.len() {
+                    break;
+                }
+                let r = f(&items[i]);
+                *slots[i].lock().expect("a result slot") = Some(r);
+            });
+        }
+    });
+    slots.into_iter().map(|m| m.into_inner().expect("a result slot").expect("every item mapped")).collect()
 }
 
 /// The lowerings the compiler tries; it keeps the lightest program (ties to the first).
@@ -318,56 +356,75 @@ pub(crate) fn compile_with<R: rand_core::RngCore + rand_core::CryptoRng>(
     // the lightest program: generators as constants or compressed, times the lowerings (their
     // weights from the dummy proof's witness: the same types, so the same bytes and cost)
     let dummy = witness_map(&points, &scalars)?;
-    // (weight, program, generators compressed, options); a candidate that needs more cells than
-    // consensus allows is never kept (an honest proof could not run it)
-    let mut best: Option<(u64, Lowered, bool, Options)> = None;
-    let mut msm_count = 0;
-    for compressed in [false, true] {
-        let (p, terms_count) = build(compressed);
-        msm_count = terms_count;
-        #[cfg(test)]
-        if !compressed {
-            LAST_STORED.with(|k| *k.borrow_mut() = Some(p.stored_report()));
-        }
-        let weigh = |opts: &Options| -> Result<Option<(u64, Lowered)>, R1CSError> {
-            let l = p.lower(opts);
-            let (w, cells) = weight_of(&l.term, &dummy).map_err(|e| gadget_err(&format!("the generated program does not type: {:?}", e)))?;
-            Ok((cells <= MAX_CELLS).then_some((w, l)))
-        };
-        #[cfg(test)]
-        let forced = FORCE.with(|f| *f.borrow());
-        #[cfg(not(test))]
-        let forced: Option<(bool, Options)> = None;
-        let candidates: Vec<Options> = match forced {
-            Some((c, o)) if c == compressed => vec![o],
-            Some(_) => vec![],
-            None => LOWERINGS.to_vec(),
-        };
-        let mut here: Option<(u64, Lowered, Options)> = None;
-        for opts in candidates {
-            if let Some((w, l)) = weigh(&opts)? {
-                if here.as_ref().map_or(true, |(b, ..)| w < *b) {
-                    here = Some((w, l, opts));
+    // The candidates are independent: the two IRs are built, then the lowerings weighed, on all
+    // cores. A worker returns only a weight (no program held per candidate); the winner is
+    // lowered again at the end (lowering is deterministic). The choice is the sequential one:
+    // the first lightest in a fixed order, so the CMR does not depend on the threads.
+    // A candidate that needs more cells than consensus allows is never kept.
+    #[cfg(test)]
+    let forced = FORCE.with(|f| *f.borrow());
+    #[cfg(not(test))]
+    let forced: Option<(bool, Options)> = None;
+    let modes: Vec<bool> = match forced {
+        Some((c, _)) => vec![c],
+        None => vec![false, true],
+    };
+    let progs: Vec<(Prog, usize)> = par_map(&modes, |c| build(*c));
+    #[cfg(test)]
+    if let Some(k) = modes.iter().position(|c| !*c) {
+        LAST_STORED.with(|s| *s.borrow_mut() = Some(progs[k].0.stored_report()));
+    }
+    let weigh = |k: usize, opts: &Options| -> Result<Option<u64>, R1CSError> {
+        let l = progs[k].0.lower(opts);
+        let (w, cells) = weight_of(&l.term, &dummy).map_err(|e| gadget_err(&format!("the generated program does not type: {:?}", e)))?;
+        Ok((cells <= MAX_CELLS).then_some(w))
+    };
+    // the first lightest of `cands` (index of the program, options), in their order
+    let lightest = |cands: &[(usize, Options)], weights: &[Option<u64>]| -> Option<(u64, usize, Options)> {
+        let mut best: Option<(u64, usize, Options)> = None;
+        for (&(k, o), w) in cands.iter().zip(weights) {
+            if let Some(w) = *w {
+                if best.map_or(true, |(b, ..)| w < b) {
+                    best = Some((w, k, o));
                 }
             }
         }
-        let Some((mut w0, mut l0, mut opts)) = here else { continue };
-        // small constant words and shared functions on this generator mode's best lowering only
-        // (they trade a little cost for bytes)
-        if forced.is_none() {
-            for alt in [Options { small_words: true, ..opts }, Options { shared_funcs: true, ..opts }, Options { small_words: true, shared_funcs: true, ..opts }] {
-                if let Some((w, l)) = weigh(&alt)? {
-                    if w < w0 {
-                        (w0, l0, opts) = (w, l, alt);
-                    }
-                }
+        best
+    };
+    let cands: Vec<(usize, Options)> = match forced {
+        Some((_, o)) => vec![(0, o)],
+        None => (0..progs.len()).flat_map(|k| LOWERINGS.iter().map(move |o| (k, *o))).collect(),
+    };
+    let weights = par_map(&cands, |(k, o)| weigh(*k, o)).into_iter().collect::<Result<Vec<_>, _>>()?;
+    // each generator mode's best, then small constant words and shared functions on it (they
+    // trade a little cost for bytes)
+    let mut per_mode: Vec<Option<(u64, usize, Options)>> = (0..progs.len())
+        .map(|k| {
+            let idx: Vec<usize> = (0..cands.len()).filter(|i| cands[*i].0 == k).collect();
+            lightest(&idx.iter().map(|i| cands[*i]).collect::<Vec<_>>(), &idx.iter().map(|i| weights[*i]).collect::<Vec<_>>())
+        })
+        .collect();
+    if forced.is_none() {
+        let alts: Vec<(usize, Options)> = per_mode
+            .iter()
+            .flatten()
+            .flat_map(|&(_, k, o)| [Options { small_words: true, ..o }, Options { shared_funcs: true, ..o }, Options { small_words: true, shared_funcs: true, ..o }].map(|a| (k, a)))
+            .collect();
+        let alt_weights = par_map(&alts, |(k, o)| weigh(*k, o)).into_iter().collect::<Result<Vec<_>, _>>()?;
+        for m in per_mode.iter_mut().flatten() {
+            let mut cands = vec![(m.1, m.2)];
+            let mut ws = vec![Some(m.0)];
+            for (i, a) in alts.iter().enumerate().filter(|(_, a)| a.0 == m.1) {
+                cands.push(*a);
+                ws.push(alt_weights[i]);
             }
-        }
-        if best.as_ref().map_or(true, |(b, ..)| w0 < *b) {
-            best = Some((w0, l0, compressed, opts));
+            *m = lightest(&cands, &ws).expect("the mode's best");
         }
     }
-    let (_, low, compressed, opts) = best.ok_or_else(|| gadget_err("no program within the cell limit"))?;
+    let (_, k, opts) = lightest(&per_mode.iter().flatten().map(|&(_, k, o)| (k, o)).collect::<Vec<_>>(), &per_mode.iter().flatten().map(|&(w, ..)| Some(w)).collect::<Vec<_>>())
+        .ok_or_else(|| gadget_err("no program within the cell limit"))?;
+    let (compressed, msm_count) = (modes[k], progs[k].1);
+    let low = progs[k].0.lower(&opts);
     let term = low.term;
     let commit = term.commit().map_err(|e| gadget_err(&format!("the generated program does not type: {}", e)))?;
     let cmr = commit.cmr();

@@ -22,6 +22,10 @@ Entries are listed in reverse chronological order.
   sums, CSE, DCE), values recomputed where read when cheaper than storing them, the final
   multiscalar multiplication as a balanced tree; new `Stats.stored` and `Report.data_mwu`, and
   `Stats.jets` counts executions.
+  Stage 4: products of more than 8 distinct atoms kept as built (no quadratic blow-up on lookup
+  tables); the compiler weighs 18 candidate programs (generators as points or x and parity,
+  1 to 3 role passes, a hot/cold environment, small constant words, shared functions) and keeps
+  the lightest, on 4 threads by default (`simplicity::set_compile_threads`); new `Stats.lowering`.
 * Earlier fork changes (Bulletproofs++, the circuit builder, the secp256k1 curve, Elements
   commitments) are described in the README.
 

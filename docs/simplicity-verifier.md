@@ -141,16 +141,16 @@ the cost that copies data (`comp` and `iden`).
 
 | gates | MSM terms | steps | stored | cost (mWU) | budget (mWU) | jets | data | program | B/gate | witness | cells | tx WU | compile | run |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 2 | 18 | 60 | 46 | 3 015 948 | 5 062 000 | 58% | 28% | 4 589 B | 2 294 | 353 B | 54 355 | 5.0 k | 0.14 s | 23 ms |
-| 4 | 22 | 66 | 54 | 3 755 355 | 5 919 000 | 58% | 28% | 5 446 B | 1 361 | 353 B | 53 615 | 5.9 k | 0.14 s | 28 ms |
-| 8 | 26 | 74 | 61 | 4 779 987 | 7 496 000 | 55% | 28% | 6 991 B | 873 | 385 B | 61 807 | 7.4 k | 0.18 s | 36 ms |
-| 16 | 36 | 90 | 78 | 7 060 668 | 10 639 000 | 53% | 30% | 10 101 B | 631 | 418 B | 81 531 | 10.6 k | 0.27 s | 51 ms |
-| 32 | 52 | 115 | 101 | 11 204 520 | 17 006 000 | 50% | 31% | 16 404 B | 512 | 482 B | 112 966 | 17.0 k | 0.44 s | 84 ms |
-| 64 | 86 | 161 | 147 | 21 623 546 | 29 484 000 | 45% | 35% | 28 818 B | 450 | 546 B | 205 920 | 29.4 k | 0.82 s | 150 ms |
-| 128 | 152 | 221 | 207 | 44 596 939 | 56 465 000 | 41% | 36% | 55 735 B | 435 | 610 B | 317 296 | 56.4 k | 1.7 s | 0.3 s |
-| 256 | 282 | 284 | 270 | 96 887 847 | 100 912 000 | 40% | 34% | 100 118 B | 391 | 674 B | 477 840 | 100.9 k | 3.3 s | 0.6 s |
-| 512 | 540 | 334 | 320 | 198 247 245 | 200 418 000 | 42% | 30% | 199 559 B | 389 | 739 B | 580 770 | 200.4 k | 6.1 s | 1.2 s |
-| 1 024 | 1 054 | 392 | 378 | 411 018 620 | 405 945 000 | | | | | | | ≈ 411 k (padded) | 11.4 s | 2.6 s |
+| 2 | 18 | 60 | 46 | 3 015 948 | 5 062 000 | 58% | 28% | 4 589 B | 2 294 | 353 B | 54 355 | 5.0 k | 58 ms | 25 ms |
+| 4 | 22 | 66 | 54 | 3 755 355 | 5 919 000 | 58% | 28% | 5 446 B | 1 361 | 353 B | 53 615 | 5.9 k | 56 ms | 28 ms |
+| 8 | 26 | 74 | 61 | 4 779 987 | 7 496 000 | 55% | 28% | 6 991 B | 873 | 385 B | 61 807 | 7.4 k | 68 ms | 36 ms |
+| 16 | 36 | 90 | 78 | 7 060 668 | 10 639 000 | 53% | 30% | 10 101 B | 631 | 418 B | 81 531 | 10.6 k | 0.10 s | 52 ms |
+| 32 | 52 | 115 | 101 | 11 204 520 | 17 006 000 | 50% | 31% | 16 404 B | 512 | 482 B | 112 966 | 17.0 k | 0.16 s | 81 ms |
+| 64 | 86 | 161 | 147 | 21 623 546 | 29 484 000 | 45% | 35% | 28 818 B | 450 | 546 B | 205 920 | 29.4 k | 0.31 s | 148 ms |
+| 128 | 152 | 221 | 207 | 44 596 939 | 56 465 000 | 41% | 36% | 55 735 B | 435 | 610 B | 317 296 | 56.4 k | 0.62 s | 0.3 s |
+| 256 | 282 | 284 | 270 | 96 887 847 | 100 912 000 | 40% | 34% | 100 118 B | 391 | 674 B | 477 840 | 100.9 k | 1.2 s | 0.6 s |
+| 512 | 540 | 334 | 320 | 198 247 245 | 200 418 000 | 42% | 30% | 199 559 B | 389 | 739 B | 580 770 | 200.4 k | 2.3 s | 1.2 s |
+| 1 024 | 1 054 | 392 | 378 | 411 018 620 | 405 945 000 | | | | | | | ≈ 411 k (padded) | 4.2 s | 2.6 s |
 
 Stage 3 against stage 4 (input weight):
 
@@ -164,10 +164,19 @@ Stage 3 against stage 4 (input weight):
 | lookup table of 256 rows, 8 lookups (`tests/simplicity.rs`) | ≈ 314 kWU | 72 kWU |
 | bpvm `mul` (776 gates, 1 660 MSM terms) | ≈ 2 170 kWU | 574 kWU |
 | bpvm fib (2 450 gates, 4 165 MSM terms) | ≈ 3 550 kWU | 1 480 kWU |
+| bpvm `mul`, trimmed circuit (384 gates, 990 MSM terms) | 773 kWU | **312 kWU (fits)** |
+| bpvm fib, trimmed circuit (1 919 gates) | | 1 158 kWU (padded) |
 
-The last three gain most from the bound on monomials: a lookup table's batch inversion made the
+bpvm's trimmed circuit (bpvm branch `circuit-trim`: the stack sized when the guest is linked,
+timestamp gaps sized by the step count, only the registers the program names) brings `mul`
+below the 400 kWU of a standard transaction. The VM rows gain most from the bound on monomials: a lookup table's batch inversion made the
 IR of bpvm's `mul` grow from 42 721 to 230 041 operations; it now stays at 46 198. The program
-choice brings the rest; compiling takes longer (it builds 18 programs).
+choice brings the rest. The compiler builds 19 programs (18 candidates and the winner again),
+weighing the candidates on 4 threads by default (`simplicity::set_compile_threads`; 0 for every
+core); the table's compile times are on 4 threads. The program does not depend on the threads:
+the choice is the first lightest in a fixed order. Each thread holds one candidate, so threads
+trade memory for time: bpvm's fib compiles in 26 s on 1 thread (1.5 GB), 10 s on 4 (3.4 GB), 7 s
+on 8 or more (6 to 7.5 GB).
 
 Earlier: stage 2 against stage 3 (same chains):
 
@@ -218,9 +227,5 @@ as a direct R1CS circuit (`x · y = 15` in the tests) is about 5 kWU.
   against 72.7 k for `scale`; with the prover's points `D_i = k_i·P_i` in the witness, about −20 WU
   and +33 B per term, for cost-bound programs.
 
-- **VM circuits.** bpvm's 18-step `mul` has 1 660 MSM terms (776 gates and 852 linear slots,
-  mostly the VM's fixed tables): its `scale`s alone weigh 121 kWU. Fewer linear slots in bpvm, or
-  direct R1CS circuits for small statements, would fit a transaction.
-- **Compile time.** The compiler builds 18 programs (fib: 34 s); they are independent and
-  could be built in parallel.
+- **1 024 gates in a transaction**: the chain of 1 024 gates weighs 411 kWU (padded), 3% over.
 - Bind the commitments `V` to the transaction's outputs, and compile the BP backend.

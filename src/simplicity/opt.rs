@@ -21,20 +21,23 @@ pub(crate) fn optimize(p: &Prog) -> Prog {
 }
 
 /// A product `c · Π a^e` over atoms (values of the program being built).
+///
+/// Exponents are signed: `a^-1` is `invert(a)`. An exponent that cancels to 0 stays (as the
+/// factor `a · a^-1`), since for `a = 0` it is 0 (`invert(0) = 0`), not 1.
 #[derive(Clone)]
 struct Mono {
     c: K,
-    f: BTreeMap<Val, u64>,
+    f: BTreeMap<Val, i64>,
 }
 
 impl Mono {
-    fn atom(a: Val) -> Mono {
-        Mono { c: K::ONE, f: BTreeMap::from([(a, 1)]) }
+    fn atom(a: Val, e: i64) -> Mono {
+        Mono { c: K::ONE, f: BTreeMap::from([(a, e)]) }
     }
     fn constant(c: K) -> Mono {
         Mono { c, f: BTreeMap::new() }
     }
-    /// The product; none if an exponent would pass `u64` (the product then stays as it is).
+    /// The product; none if an exponent would overflow (the product then stays as it is).
     fn times(&self, o: &Mono) -> Option<Mono> {
         let mut f = self.f.clone();
         for (a, e) in &o.f {
@@ -43,6 +46,30 @@ impl Mono {
         }
         Some(Mono { c: self.c * o.c, f })
     }
+    /// The inverse, as `invert` computes it: each atom's exponent negated, the coefficient
+    /// inverted (`invert(0) = 0`).
+    fn inverse(&self) -> Option<Mono> {
+        let c = Option::from(self.c.invert()).unwrap_or(K::ZERO);
+        let f = self.f.iter().map(|(a, e)| e.checked_neg().map(|n| (*a, n))).collect::<Option<_>>()?;
+        Some(Mono { c, f })
+    }
+}
+
+/// The non-adjacent form of `e > 0`: `(j, ±1)` with `e = Σ ±2^j`, lowest first; on average a
+/// third of the bits are digits (half for binary).
+fn naf(mut e: u64) -> Vec<(u32, bool)> {
+    let mut out = Vec::new();
+    let mut j = 0u32;
+    while e > 0 {
+        if e & 1 == 1 {
+            let positive = e & 3 == 1;
+            out.push((j, positive));
+            e = if positive { e - 1 } else { e + 1 };
+        }
+        e >>= 1;
+        j += 1;
+    }
+    out
 }
 
 /// A program under construction that merges equal pure operations (constants, scalar jets).
@@ -114,27 +141,49 @@ impl Builder {
         self.squares.insert((a, j), v);
         v
     }
-    /// A monomial as a product of squares of its atoms, lowest (atom, j) first, folded to the
-    /// left: the product for exponent e is the product for e without its last factor, times
-    /// that factor (so the powers of one atom share their prefixes); the coefficient last.
+    /// `invert(a)`.
+    fn inv(&mut self, a: Val) -> Val {
+        self.push(Op::Jet("scalar_invert", vec![a], Ty::word()))
+    }
+
+    /// A monomial as a product of squares of its atoms and of their inverses, by the
+    /// non-adjacent form of each exponent when it has fewer digits than the binary one (a
+    /// positive digit takes `a^(2^j)`, a negative one `invert(a)^(2^j)`), lowest (atom, j) first, folded to the left: the product for an
+    /// exponent is the product without its last digit, times that digit's factor (so the
+    /// powers of one atom share their prefixes); the coefficient last.
     fn emit(&mut self, m: &Mono) -> Val {
-        let mut acc: Option<Val> = None;
+        let mut factors: Vec<Val> = Vec::new();
         for (&a, &e) in &m.f {
-            for j in 0..64u32 {
-                if (e >> j) & 1 == 1 {
-                    let s = self.square(a, j);
-                    acc = Some(match acc {
-                        None => s,
-                        Some(x) => self.mul(x, s),
-                    });
-                }
+            if e == 0 {
+                // cancelled: a · a^-1, which is 0 for a = 0
+                let i = self.inv(a);
+                factors.push(self.mul(a, i));
+                continue;
             }
+            // the signed digits only when they are fewer than the bits (binary needs no inverse
+            // for a positive exponent and shares more prefixes)
+            let m = e.unsigned_abs();
+            let signed = naf(m);
+            let digits = if signed.len() < m.count_ones() as usize { signed } else { (0..64).filter(|j| (m >> j) & 1 == 1).map(|j| (j, true)).collect() };
+            let up = if e > 0 { a } else { self.inv(a) };
+            let down = if digits.iter().any(|(_, p)| !p) { Some(if e > 0 { self.inv(a) } else { a }) } else { None };
+            for (j, positive) in digits {
+                factors.push(self.square(if positive { up } else { down.expect("a negative digit") }, j));
+            }
+        }
+        // a lone atom (exponent 1) is the product only if it is a canonical scalar already
+        // (the jet reduces mod n: a witness word or a hash may be above n)
+        let lone_raw = factors.len() == 1 && m.f.len() == 1 && m.f.values().all(|e| *e == 1);
+        let mut acc: Option<Val> = None;
+        for f in factors {
+            acc = Some(match acc {
+                None => f,
+                Some(x) => self.mul(x, f),
+            });
         }
         match acc {
             None => self.konst(m.c),
-            // a lone atom is the product only if it is a canonical scalar already (the jet
-            // reduces mod n: a witness word or a hash may be above n)
-            Some(x) if m.c == K::ONE && (m.f.len() > 1 || m.f.values().any(|e| *e > 1) || self.canonical(x)) => x,
+            Some(x) if m.c == K::ONE && (!lone_raw || self.canonical(x)) => x,
             Some(x) => {
                 let k = self.konst(m.c);
                 self.mul(x, k)
@@ -178,7 +227,7 @@ fn monomials(p: &Prog) -> Prog {
                 let f = match (&mono[x], scalar_const(&ops[x])) {
                     (Some(mx), _) => mx.clone(),
                     (None, Some(c)) => Mono::constant(c),
-                    (None, None) => Mono::atom(get(&mut b, &mut built, &mono, x)),
+                    (None, None) => Mono::atom(get(&mut b, &mut built, &mono, x), 1),
                 };
                 m = m.and_then(|m| m.times(&f));
             }
@@ -188,6 +237,20 @@ fn monomials(p: &Prog) -> Prog {
             }
             // a product of many distinct factors (a prefix product of a batch inversion), or an
             // exponent past u64: built as it is, an atom for the products that read it
+        }
+        // the inverse of a product or of an atom is a monomial too (an inverse of a constant
+        // is built as it is)
+        if let Op::Jet("scalar_invert", a, _) = op {
+            let x = a[0].index();
+            let m = match (&mono[x], scalar_const(&ops[x])) {
+                (Some(mx), _) => mx.inverse(),
+                (None, Some(_)) => None,
+                (None, None) => Some(Mono::atom(get(&mut b, &mut built, &mono, x), -1)),
+            };
+            if let Some(m) = m.filter(|m| m.f.len() <= MAX_ATOMS) {
+                mono[i] = Some(m);
+                continue;
+            }
         }
         let args: Vec<Val> = op.args().iter().map(|a| get(&mut b, &mut built, &mono, a.index())).collect();
         built[i] = Some(b.push(op.with_args(&args)));
@@ -381,7 +444,9 @@ mod tests {
         let q = optimize(&p);
         let wit = HashMap::from([("mu", mu)]);
         assert!(eval(&q, &wit).is_ok());
-        assert!(count(&q, "scalar_multiply") <= 64 + 6, "{} products", count(&q, "scalar_multiply"));
+        // linear: one product per power, the squares of μ and of μ^-1 (signed digits share
+        // fewer prefixes than binary ones)
+        assert!(count(&q, "scalar_multiply") <= 100, "{} products", count(&q, "scalar_multiply"));
         assert!(mul_depth(&q).iter().max().unwrap() <= &12);
         let mut wrong = wit.clone();
         wrong.insert("mu", K::from(8u64));
@@ -646,5 +711,86 @@ mod tests {
         println!("batch inversion: {} products for 200, {} for 400", a, b);
         assert!(a <= 8 * 200, "{} products for 200 values", a);
         assert!(b * 10 <= a * 22, "{} for 400 against {} for 200: not linear", b, a);
+    }
+
+    /// The checks of `p` and of `optimize(p)` agree on each witness assignment.
+    fn agree(p: &Prog, wits: &[HashMap<&str, K>]) {
+        let q = optimize(p);
+        for w in wits {
+            assert_eq!(eval(p, w).is_ok(), eval(&q, w).is_ok(), "{:?}", w);
+        }
+    }
+
+    /// An inverse of a product is the product of the inverses of its atoms; a factor and its
+    /// inverse cancel only as x · x⁻¹, which is 0 for x = 0 (as invert(0) = 0 makes it).
+    #[test]
+    fn inverses_are_exact_also_at_zero() {
+        let x5 = K::from(5u64);
+        let mut p = Prog::new();
+        let w = p.push(Op::Witness("x".into(), Ty::word()));
+        let inv = p.push(Op::Jet("scalar_invert", vec![w], Ty::word()));
+        let one = mul(&mut p, w, inv); // 1, or 0 for x = 0
+        check(&mut p, one, K::ONE);
+        let x2 = mul(&mut p, w, w);
+        let x3 = mul(&mut p, x2, w);
+        let inv2 = p.push(Op::Jet("scalar_invert", vec![x2], Ty::word()));
+        let back = mul(&mut p, inv2, x3); // x
+        check(&mut p, back, x5);
+        let none = mul(&mut p, inv2, x2); // 1, or 0
+        check(&mut p, none, K::ONE);
+        let wit = |v: u64| HashMap::from([("x", K::from(v))]);
+        assert!(eval(&optimize(&p), &wit(5)).is_ok());
+        agree(&p, &[wit(5), wit(0), wit(6)]);
+        // x · x⁻¹ alone at x = 0: 0 in both
+        let mut p = Prog::new();
+        let w = p.push(Op::Witness("x".into(), Ty::word()));
+        let inv = p.push(Op::Jet("scalar_invert", vec![w], Ty::word()));
+        let z = mul(&mut p, w, inv);
+        check(&mut p, z, K::ZERO);
+        agree(&p, &[wit(0), wit(3)]);
+    }
+
+    /// μ^63 is 2 signed digits (64 − 1), not 6: its products stay shallow.
+    #[test]
+    fn powers_use_signed_digits() {
+        let mu = K::from(7u64);
+        let mut p = Prog::new();
+        let w = p.push(Op::Witness("mu".into(), Ty::word()));
+        let inv = p.push(Op::Jet("scalar_invert", vec![w], Ty::word()));
+        let (mut x, mut e) = (w, mu);
+        for _ in 1..63 {
+            x = mul(&mut p, x, w);
+            e *= mu;
+        }
+        // μ^63 and μ^-63 read by checks
+        let mut y = inv;
+        for _ in 1..63 {
+            y = mul(&mut p, y, inv);
+        }
+        check(&mut p, x, e);
+        check(&mut p, y, e.invert().unwrap());
+        let q = optimize(&p);
+        assert!(eval(&q, &HashMap::from([("mu", mu)])).is_ok());
+        // products that are not squarings under each check's operand: one per digit after the
+        // first (binary 63 = 32 + 16 + 8 + 4 + 2 + 1 takes 5, signed 64 − 1 takes 1)
+        let folds = |v: usize| {
+            let (mut seen, mut stack, mut n) = (std::collections::HashSet::new(), vec![v], 0);
+            while let Some(a) = stack.pop() {
+                if !seen.insert(a) {
+                    continue;
+                }
+                if let Op::Jet("scalar_multiply", x, _) = &q.ops()[a] {
+                    if x[0] != x[1] {
+                        n += 1;
+                    }
+                    stack.extend(x.iter().map(|y| y.index()));
+                }
+            }
+            n
+        };
+        let operands: Vec<usize> = q.ops().iter().filter_map(|o| match o { Op::Jet("eq_256", a, _) => Some(a[0].index()), _ => None }).collect();
+        for v in operands {
+            assert!(folds(v) <= 2, "{} products for a power of 63", folds(v));
+        }
     }
 }

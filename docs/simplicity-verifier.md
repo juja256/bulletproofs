@@ -61,6 +61,13 @@ The compiler traces the crate's own BP++ verifier (`reciprocal::terms`):
   arguments only it reads) is at most (2 × its bits × the steps it would live) + (its reads).
   A witness run more than once, a transcript state read more than once and a hash read from a
   state are always stored.
+- **Signed exponents.** `invert(x)` of a monomial is a monomial with the exponents negated
+  (`μ^-1` of `μ = ρ²` is `ρ^-2`), and an exponent is written in its non-adjacent form when that
+  has fewer digits than the binary one: a positive digit takes `a^(2^j)`, a negative one
+  `invert(a)^(2^j)`. A third of the bits are digits on average instead of half, so a
+  recomputed power takes fewer products (`μ^63 = μ^64 · μ^-1`: one product instead of five).
+  Exact for `a = 0` too: every such product has a factor 0, and an exponent that cancels to 0
+  stays as the factor `a · invert(a)`, 0 for `a = 0` (`invert(0) = 0`).
 - **A product of more than 8 distinct atoms** (a prefix product of a batch inversion over a
   lookup table) is kept as the tape built it: rebuilding each from its atoms was quadratic.
 - **The lightest of several programs.** The compiler builds the program with the generators as
@@ -141,16 +148,16 @@ the cost that copies data (`comp` and `iden`).
 
 | gates | MSM terms | steps | stored | cost (mWU) | budget (mWU) | jets | data | program | B/gate | witness | cells | tx WU | compile | run |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 2 | 18 | 60 | 46 | 3 015 948 | 5 062 000 | 58% | 28% | 4 589 B | 2 294 | 353 B | 54 355 | 5.0 k | 58 ms | 25 ms |
-| 4 | 22 | 66 | 54 | 3 755 355 | 5 919 000 | 58% | 28% | 5 446 B | 1 361 | 353 B | 53 615 | 5.9 k | 56 ms | 28 ms |
-| 8 | 26 | 74 | 61 | 4 779 987 | 7 496 000 | 55% | 28% | 6 991 B | 873 | 385 B | 61 807 | 7.4 k | 68 ms | 36 ms |
-| 16 | 36 | 90 | 78 | 7 060 668 | 10 639 000 | 53% | 30% | 10 101 B | 631 | 418 B | 81 531 | 10.6 k | 0.10 s | 52 ms |
-| 32 | 52 | 115 | 101 | 11 204 520 | 17 006 000 | 50% | 31% | 16 404 B | 512 | 482 B | 112 966 | 17.0 k | 0.16 s | 81 ms |
-| 64 | 86 | 161 | 147 | 21 623 546 | 29 484 000 | 45% | 35% | 28 818 B | 450 | 546 B | 205 920 | 29.4 k | 0.31 s | 148 ms |
-| 128 | 152 | 221 | 207 | 44 596 939 | 56 465 000 | 41% | 36% | 55 735 B | 435 | 610 B | 317 296 | 56.4 k | 0.62 s | 0.3 s |
-| 256 | 282 | 284 | 270 | 96 887 847 | 100 912 000 | 40% | 34% | 100 118 B | 391 | 674 B | 477 840 | 100.9 k | 1.2 s | 0.6 s |
-| 512 | 540 | 334 | 320 | 198 247 245 | 200 418 000 | 42% | 30% | 199 559 B | 389 | 739 B | 580 770 | 200.4 k | 2.3 s | 1.2 s |
-| 1 024 | 1 054 | 392 | 378 | 411 018 620 | 405 945 000 | | | | | | | ≈ 411 k (padded) | 4.2 s | 2.6 s |
+| 2 | 18 | 60 | 46 | 3 026 698 | 5 067 000 | 58% | 28% | 4 594 B | 2 297 | 353 B | 54 355 | 5.0 k | 49 ms | 23 ms |
+| 4 | 22 | 68 | 56 | 3 787 888 | 5 956 000 | 57% | 29% | 5 483 B | 1 370 | 353 B | 53 103 | 5.9 k | 53 ms | 29 ms |
+| 8 | 26 | 79 | 66 | 4 825 549 | 7 580 000 | 55% | 30% | 7 075 B | 884 | 385 B | 63 855 | 7.5 k | 68 ms | 36 ms |
+| 16 | 36 | 97 | 85 | 7 342 381 | 10 617 000 | 52% | 31% | 10 079 B | 629 | 418 B | 82 299 | 10.6 k | 0.10 s | 55 ms |
+| 32 | 52 | 131 | 117 | 12 018 347 | 16 842 000 | 48% | 35% | 16 240 B | 507 | 482 B | 134 471 | 16.8 k | 0.16 s | 84 ms |
+| 64 | 86 | 194 | 180 | 23 380 634 | 29 674 000 | 43% | 37% | 29 008 B | 453 | 546 B | 200 032 | 29.6 k | 0.30 s | 153 ms |
+| 128 | 152 | 273 | 259 | 48 472 651 | 54 026 000 | 40% | 36% | 53 296 B | 416 | 610 B | 296 574 | 54.0 k | 0.57 s | 0.3 s |
+| 256 | 282 | 309 | 295 | 96 252 193 | 96 340 000 | 42% | 32% | 95 546 B | 373 | 674 B | 352 912 | 96.3 k | 1.0 s | 0.6 s |
+| 512 | 540 | 353 | 339 | 192 574 661 | 191 119 000 | | | | | | | ≈ 192.6 k (padded) | 1.9 s | 1.2 s |
+| 1 024 | 1 054 | 389 | 375 | 397 774 711 | 378 970 000 | | | | | | | **≈ 397.8 k (padded): fits** | 3.7 s | 2.5 s |
 
 Stage 3 against stage 4 (input weight):
 
@@ -159,13 +166,13 @@ Stage 3 against stage 4 (input weight):
 | chain 16 | 11.3 kWU | 10.6 kWU |
 | chain 64 | 32.2 kWU | 29.4 kWU |
 | chain 256 | 111.1 kWU | 100.9 kWU |
-| chain 512 | 209.0 kWU | 200.4 kWU |
-| chain 1 024 | 430.7 kWU (padded) | 411.0 kWU (padded) |
-| lookup table of 256 rows, 8 lookups (`tests/simplicity.rs`) | ≈ 314 kWU | 72 kWU |
+| chain 512 | 209.0 kWU | 192.6 kWU (padded) |
+| chain 1 024 | 430.7 kWU (padded) | **397.8 kWU (padded): fits** |
+| lookup table of 256 rows, 8 lookups (`tests/simplicity.rs`) | ≈ 314 kWU | 70.6 kWU |
 | bpvm `mul` (776 gates, 1 660 MSM terms) | ≈ 2 170 kWU | 574 kWU |
 | bpvm fib (2 450 gates, 4 165 MSM terms) | ≈ 3 550 kWU | 1 480 kWU |
-| bpvm `mul`, trimmed circuit (384 gates, 990 MSM terms) | 773 kWU | **312 kWU (fits)** |
-| bpvm fib, trimmed circuit (1 919 gates) | | 1 158 kWU (padded) |
+| bpvm `mul`, trimmed circuit (384 gates, 990 MSM terms) | 773 kWU | **298.5 kWU (padded): fits** |
+| bpvm fib, trimmed circuit (1 919 gates) | | 1 100 kWU (padded) |
 
 bpvm's trimmed circuit (bpvm branch `circuit-trim`: the stack sized when the guest is linked,
 timestamp gaps sized by the step count, only the registers the program names) brings `mul`
@@ -206,9 +213,9 @@ as a direct R1CS circuit (`x · y = 15` in the tests) is about 5 kWU.
 
 **What this says.**
 
-- Up to 512 gates the program fits a standard transaction (400 kWU) with no padding (200 kWU at
-  512 gates); bytes and cost are now about even there. At 1 024 gates the cost (411 M mWU) passes
-  the budget, so the input needs padding to about 411 kWU: the limit is about 990 gates.
+- The chain of 1 024 gates fits a standard transaction (400 kWU): its cost (397.8 M mWU) passes
+  its budget, so the input is padded to about 397.8 kWU, 0.6% under the limit. From 256 gates
+  the cost sets the weight; below, the bytes.
 - The jets of the multiscalar multiplication (`scale` and `gej_add`, about 77 WU per term with a
   minimal coefficient) put the ceiling of a standard transaction near 5 000 gates; at 512 gates
   both the cost (390 WU per gate) and the bytes (406 B per gate) are about 5× above that floor.
@@ -227,5 +234,9 @@ as a direct R1CS circuit (`x · y = 15` in the tests) is about 5 kWU.
   against 72.7 k for `scale`; with the prover's points `D_i = k_i·P_i` in the witness, about −20 WU
   and +33 B per term, for cost-bound programs.
 
-- **1 024 gates in a transaction**: the chain of 1 024 gates weighs 411 kWU (padded), 3% over.
+- **Blocks of the sum (tried, not kept).** Lowering a subtree of 16 or 64 terms over a tuple of
+  what it reads and of the scalars it would compute more than once (computed once per block)
+  cuts the cost of the chain of 1 024 gates by 19% (411 → 332 M mWU) but adds 45–50% bytes: a
+  node's identity (IHR) includes its input type, so code is no longer shared between blocks.
+  It would pay only where the cost far exceeds the bytes.
 - Bind the commitments `V` to the transaction's outputs, and compile the BP backend.

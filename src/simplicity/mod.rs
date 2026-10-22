@@ -21,4 +21,7 @@ pub const SIGHASH_LABEL: &[u8] = b"sighash";
 pub use self::sha::CompileTranscript;
 
 pub use self::compile::{set_compile_threads, SimplicityVerifier, SimplicityWitness, Stats};
+/// The Simplicity crate the programs are built with (`simplicity-lang`), and through it
+/// `elements`: transactions, Taproot and environments of the same versions.
+pub use ::simplicity as lang;
 pub(crate) use self::compile::compile;

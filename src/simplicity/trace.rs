@@ -169,15 +169,21 @@ thread_local! {
     static CTX: RefCell<Option<Ctx>> = RefCell::new(None);
 }
 
-/// Run `f` with a fresh tape; returns its result and the tape.
-pub(crate) fn with_tape<R>(f: impl FnOnce() -> R) -> (R, Tape) {
-    CTX.with(|c| *c.borrow_mut() = Some(Ctx::default()));
-    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-    let ctx = CTX.with(|c| c.borrow_mut().take()).expect("tracing");
-    match r {
-        Ok(r) => (r, ctx.tape),
-        Err(e) => std::panic::resume_unwind(e),
-    }
+/// Run `f` with a fresh tape; returns its result and the tape. The tape is per thread: with
+/// `parallel`, `f` runs in a pool of one thread, so that its rayon calls stay on the tape's.
+pub(crate) fn with_tape<R: Send>(f: impl FnOnce() -> R + Send) -> (R, Tape) {
+    let traced = move || {
+        CTX.with(|c| *c.borrow_mut() = Some(Ctx::default()));
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        let ctx = CTX.with(|c| c.borrow_mut().take()).expect("tracing");
+        match r {
+            Ok(r) => (r, ctx.tape),
+            Err(e) => std::panic::resume_unwind(e),
+        }
+    };
+    #[cfg(feature = "parallel")]
+    let traced = || rayon::ThreadPoolBuilder::new().num_threads(1).build().expect("a pool of one thread").install(traced);
+    traced()
 }
 
 fn with_ctx<R>(f: impl FnOnce(&mut Ctx) -> R) -> R {

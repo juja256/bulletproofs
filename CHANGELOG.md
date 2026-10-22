@@ -39,6 +39,9 @@ Entries are listed in reverse chronological order.
   * `Variable` is opaque (`Variable::ONE` for the constant); the backends' wires are private.
     Operators that made ristretto255 linear combinations from variables alone
     (`var ± var`, `-var`, `var ± u64`, `var * u64`) are gone: write `lc(a) + b`.
+* Fixed: with both `simplicity` and `parallel`, compiling a Simplicity verifier failed ("the
+  verifier is not traceable"): the tracer's tape is per thread and the verifier's rayon calls
+  ran elsewhere. Tracing now runs in a pool of one thread.
 * Transcripts: every protocol takes its Fiat–Shamir transcript as `&mut T` for any
   `T: TranscriptBackend`; `merlin::Transcript` stays the default with byte-identical proofs.
   New `Sha256Transcript` (feature `sha256-transcript`, on with `secp256k1`): a transcript on

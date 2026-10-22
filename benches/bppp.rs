@@ -94,7 +94,7 @@ fn bppp_circuit(g: &Gates) -> (bppp::ArithmeticCircuit<Scalar>, bppp::CircuitWit
     (c, w)
 }
 
-/// The same circuit as a BP++ arithmetic circuit and (with `yoloproofs`) as BP R1CS.
+/// The same circuit as a BP++ arithmetic circuit and as BP R1CS.
 fn circuit_bench(c: &mut Criterion) {
     let pc = bulletproofs::PedersenGens::default();
     for &k in &[10usize, 14] {

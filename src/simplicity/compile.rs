@@ -229,45 +229,115 @@ pub(crate) fn compile_with<R: rand_core::RngCore + rand_core::CryptoRng>(
     }
     let (n_lin, n_mm) = (c.n_lin, c.n_p + c.n_m);
     let gens = BpppGens::new(pc, bp, n_lin, n_mm).map_err(|_| R1CSError::InvalidGeneratorsLength)?;
+    let proof = DummyProof::new(c, V, &gens, rng)?;
+    let tr = trace(c, V, t, &gens, &proof)?;
 
-    // a dummy proof of the circuit's dimensions; a constant point equal to one of its points
-    // would be taken for proof data (negligible for random points unless crafted for them)
-    let (points, scalars) = dummy_proof(c, rng);
-    let (n_points, n_scalars) = (points.len(), scalars.len());
-    let constants = V.iter().copied().chain(std::iter::once(gens.g).chain(gens.h.iter().copied()).chain(gens.n.iter().copied()).map(|p| Secp256k1::compress(&p)));
-    for k in constants {
-        if points.contains(&k) {
-            return Err(gadget_err("a statement point equals a point of the dummy proof"));
+    // the program with the generators as constant points and as x and parity (`compressed`),
+    // built on all cores; then the lightest lowering of either
+    #[cfg(test)]
+    let forced = FORCE.with(|f| *f.borrow());
+    #[cfg(not(test))]
+    let forced: Option<(bool, Options)> = None;
+    let modes: Vec<bool> = match forced {
+        Some((c, _)) => vec![c],
+        None => vec![false, true],
+    };
+    let progs: Vec<(Prog, usize)> = par_map(&modes, |c| build(&tr, &proof, &gens, *c));
+    #[cfg(test)]
+    if let Some(k) = modes.iter().position(|c| !*c) {
+        LAST_STORED.with(|s| *s.borrow_mut() = Some(progs[k].0.stored_report()));
+    }
+    let dummy = witness_map(&proof.points, &proof.scalars)?;
+    let (weight, k, opts) = lightest_lowering(&progs, &dummy, forced.map(|f| f.1))?;
+    let (compressed, msm_count) = (modes[k], progs[k].1);
+    let low = progs[k].0.lower(&opts);
+    // lowering is deterministic: the winner lowered again is the program that was weighed
+    debug_assert_eq!(weight_of(&low.term, &dummy).ok().map(|w| w.0), Some(weight), "the winner lowered again differs");
+    let term = low.term;
+    let commit = term.commit().map_err(|e| gadget_err(&format!("the generated program does not type: {}", e)))?;
+    let cmr = commit.cmr();
+    let lowering = format!(
+        "generators {}, role passes {}, hot/cold {}, small words {}, shared functions {}",
+        if compressed { "x and parity" } else { "points" },
+        opts.role_passes,
+        opts.hot_cold,
+        opts.small_words,
+        opts.shared_funcs
+    );
+    let stats = Stats {
+        jets: low.jets,
+        tape_ops: tr.live.iter().filter(|x| **x).count(),
+        msm_terms: msm_count,
+        witness_points: proof.points.len(),
+        witness_scalars: proof.scalars.len(),
+        steps: low.steps,
+        stored: low.stored,
+        live_bits: low.live_bits,
+        lowering,
+    };
+    Ok(SimplicityVerifier { term, text: std::sync::OnceLock::new(), cmr, n_lin, n_mm, stats })
+}
+
+/// A random proof of the circuit's dimensions, on which the verifier is traced: its points,
+/// scalars and encoding.
+struct DummyProof {
+    points: Vec<Secp256k1Compressed>,
+    scalars: Vec<K>,
+    bytes: Vec<u8>,
+}
+
+impl DummyProof {
+    fn new<R: rand_core::RngCore + rand_core::CryptoRng>(c: &ReciprocalCircuit<K>, V: &[Secp256k1Compressed], gens: &BpppGens<Secp256k1>, rng: &mut R) -> Result<Self, R1CSError> {
+        let (points, scalars) = dummy_proof(c, rng);
+        // a constant point equal to a point of the proof would be taken for proof data
+        // (negligible for random points unless crafted for them)
+        let constants = V.iter().copied().chain(std::iter::once(gens.g).chain(gens.h.iter().copied()).chain(gens.n.iter().copied()).map(|p| Secp256k1::compress(&p)));
+        for k in constants {
+            if points.contains(&k) {
+                return Err(gadget_err("a statement point equals a point of the dummy proof"));
+            }
         }
+        let mut bytes = Vec::new();
+        for p in &points {
+            bytes.extend_from_slice(p.as_bytes());
+        }
+        for s in &scalars {
+            bytes.extend_from_slice(&s.to_repr());
+        }
+        Ok(DummyProof { points, scalars, bytes })
     }
-    let mut bytes = Vec::new();
-    for p in &points {
-        bytes.extend_from_slice(p.as_bytes());
-    }
-    for s in &scalars {
-        bytes.extend_from_slice(&s.to_repr());
-    }
+}
 
-    // trace
+/// The traced verifier: the scalars of its final multiscalar multiplication, its transcript
+/// log, and the tape with its live nodes.
+struct Trace {
+    terms: crate::bppp::terms::Terms<TracedCurve>,
+    log: Vec<Rec>,
+    tape: Tape,
+    live: Vec<bool>,
+}
+
+/// Run the verifier of `c` on the dummy proof with traced values.
+fn trace(c: &ReciprocalCircuit<K>, V: &[Secp256k1Compressed], t: &CompileTranscript, gens: &BpppGens<Secp256k1>, proof: &DummyProof) -> Result<Trace, R1CSError> {
     let ct = c.map_scalars(Traced::constant);
     let n: Vec<TracedPoint> = gens.n.iter().map(|p| TracedPoint::constant(*p)).collect();
     let tg = BpppGens::<TracedCurve> { g: TracedPoint::constant(gens.g), h: gens.h.iter().map(|p| TracedPoint::constant(*p)).collect(), n: &n };
     let mut tt = t.clone();
-    let traced = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let run = || {
         with_tape(|| {
-            for (i, p) in points.iter().enumerate() {
+            for (i, p) in proof.points.iter().enumerate() {
                 register_witness_point(p, i);
             }
-            for (i, s) in scalars.iter().enumerate() {
+            for (i, s) in proof.scalars.iter().enumerate() {
                 register_witness_scalar(&<K as Field>::to_bytes32(s), i);
             }
-            let tp = CircuitProof::<TracedCurve>::from_bytes_dims(&bytes, n_lin, n_mm)?;
+            let tp = CircuitProof::<TracedCurve>::from_bytes_dims(&proof.bytes, c.n_lin, c.n_p + c.n_m)?;
             BpppTranscript::domain_sep(&mut tt, BPPP_DOMAIN);
             let terms = crate::bppp::reciprocal::terms(&tp, &ct, &tg, V, &mut tt)?;
             Ok::<_, crate::errors::ProofError>((terms, tt.log().to_vec()))
         })
-    }));
-    let ((terms, log), tape) = match traced {
+    };
+    let ((terms, log), tape) = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
         Ok((Ok(x), tape)) => (x, tape),
         Ok((Err(e), _)) => return Err(gadget_err(&format!("tracing the verifier failed: {:?}", e))),
         Err(e) => {
@@ -275,7 +345,6 @@ pub(crate) fn compile_with<R: rand_core::RngCore + rand_core::CryptoRng>(
             return Err(gadget_err(&format!("the verifier is not traceable: {}", msg)));
         }
     };
-
     let roots: Vec<NodeId> = std::iter::once(&terms.g)
         .chain(&terms.h)
         .chain(&terms.n)
@@ -294,89 +363,79 @@ pub(crate) fn compile_with<R: rand_core::RngCore + rand_core::CryptoRng>(
         }
         *k.borrow_mut() = Some(m);
     });
+    Ok(Trace { terms, log, tape, live })
+}
 
-    // the program, with the generators as constant points or (`compressed`) as x and parity
-    // decompressed by the program; and its number of terms in the sum
-    let build = |compressed: bool| -> (Prog, usize) {
-        let mut p = Prog::new();
-        let wp: Vec<WitPoint> = (0..n_points).map(|i| witness_point(&mut p, &format!("p{}", i))).collect();
-        let ws: Vec<Val> = (0..n_scalars).map(|i| witness_scalar(&mut p, &format!("s{}", i))).collect();
-        let mut lw = TapeLowering { tape: &tape, live: &live, vals: HashMap::new(), ws: &ws };
-        let challenges = {
-            let mut parts = |p: &mut Prog, part: &Part, ch: &[ChallengeVals]| match part {
-                Part::Sighash => vec![(p.push(Op::Jet("sig_all_hash", vec![], Ty::word())), 32)],
-                Part::WitPoint(i) => vec![(wp[*i].sec1_prefix, 1), (wp[*i].x, 32)],
-                Part::Scalar(n) => vec![(lw.node(p, NodeId(*n), ch), 32)],
-                Part::Const(_) => unreachable!("constants are hashed by lower_log"),
-            };
-            lower_log(&mut p, &log, usize::MAX, &mut parts)
+/// The program of the traced verifier, with the generators as constant points or
+/// (`compressed`) as x and parity decompressed by the program; and its number of terms in the
+/// final sum.
+fn build(tr: &Trace, proof: &DummyProof, gens: &BpppGens<Secp256k1>, compressed: bool) -> (Prog, usize) {
+    let mut p = Prog::new();
+    let wp: Vec<WitPoint> = (0..proof.points.len()).map(|i| witness_point(&mut p, &format!("p{}", i))).collect();
+    let ws: Vec<Val> = (0..proof.scalars.len()).map(|i| witness_scalar(&mut p, &format!("s{}", i))).collect();
+    let mut lw = TapeLowering { tape: &tr.tape, live: &tr.live, vals: HashMap::new(), ws: &ws };
+    let challenges = {
+        let mut parts = |p: &mut Prog, part: &Part, ch: &[ChallengeVals]| match part {
+            Part::Sighash => vec![(p.push(Op::Jet("sig_all_hash", vec![], Ty::word())), 32)],
+            Part::WitPoint(i) => vec![(wp[*i].sec1_prefix, 1), (wp[*i].x, 32)],
+            Part::Scalar(n) => vec![(lw.node(p, NodeId(*n), ch), 32)],
+            Part::Const(_) => unreachable!("constants are hashed by lower_log"),
         };
-        // every live node (the checks among them), in tape order
-        for i in 0..tape.ops.len() {
-            if live[i] {
-                lw.node(&mut p, NodeId(i as u32), &challenges);
-            }
-        }
-        let scalar = |p: &mut Prog, lw: &mut TapeLowering, t: &Traced| -> Option<Val> {
-            match t.node {
-                Some(n) => Some(lw.node(p, n, &challenges)),
-                None if bool::from(t.value.is_zero()) => None,
-                None => Some(p.push(Op::Const(Ty::word(), t.value.to_repr().to_vec()))),
-            }
-        };
-        let constant = |p: &mut Prog, pt: &k256::AffinePoint| if compressed { const_gej_compressed(p, pt) } else { const_gej(p, pt) };
-        let mut msm_terms = Vec::new();
-        let generators = std::iter::once((&terms.g, gens.g)).chain(terms.h.iter().zip(gens.h.iter().copied())).chain(terms.n.iter().zip(gens.n.iter().copied()));
-        for (k, pt) in generators {
-            if let Some(kv) = scalar(&mut p, &mut lw, k) {
-                let g = constant(&mut p, &pt.to_affine());
-                msm_terms.push((kv, g));
-            }
-        }
-        for (k, pt) in &terms.points {
-            // a constant identity (a commitment to zero with a zero blinding) adds nothing
-            if pt.src == PointSrc::Const && bool::from(group::Group::is_identity(&pt.value)) {
-                continue;
-            }
-            if let Some(kv) = scalar(&mut p, &mut lw, k) {
-                let g = match pt.src {
-                    PointSrc::Witness(i) => ge_to_gej(&mut p, wp[i].ge),
-                    PointSrc::Const => constant(&mut p, &pt.value.to_affine()),
-                };
-                msm_terms.push((kv, g));
-            }
-        }
-        let acc = msm(&mut p, &msm_terms);
-        assert_infinity(&mut p, acc);
-        let p = crate::simplicity::opt::optimize(&p);
-        debug_assert!(p.unread_witnesses().is_empty(), "witnesses nobody reads: {:?}", p.unread_witnesses());
-        (p, msm_terms.len())
+        lower_log(&mut p, &tr.log, usize::MAX, &mut parts)
     };
-
-    // the lightest program: generators as constants or compressed, times the lowerings (their
-    // weights from the dummy proof's witness: the same types, so the same bytes and cost)
-    let dummy = witness_map(&points, &scalars)?;
-    // The candidates are independent: the two IRs are built, then the lowerings weighed, on all
-    // cores. A worker returns only a weight (no program held per candidate); the winner is
-    // lowered again at the end (lowering is deterministic). The choice is the sequential one:
-    // the first lightest in a fixed order, so the CMR does not depend on the threads.
-    // A candidate that needs more cells than consensus allows is never kept.
-    #[cfg(test)]
-    let forced = FORCE.with(|f| *f.borrow());
-    #[cfg(not(test))]
-    let forced: Option<(bool, Options)> = None;
-    let modes: Vec<bool> = match forced {
-        Some((c, _)) => vec![c],
-        None => vec![false, true],
-    };
-    let progs: Vec<(Prog, usize)> = par_map(&modes, |c| build(*c));
-    #[cfg(test)]
-    if let Some(k) = modes.iter().position(|c| !*c) {
-        LAST_STORED.with(|s| *s.borrow_mut() = Some(progs[k].0.stored_report()));
+    // every live node (the checks among them), in tape order
+    for i in 0..tr.tape.ops.len() {
+        if tr.live[i] {
+            lw.node(&mut p, NodeId(i as u32), &challenges);
+        }
     }
+    let scalar = |p: &mut Prog, lw: &mut TapeLowering, t: &Traced| -> Option<Val> {
+        match t.node {
+            Some(n) => Some(lw.node(p, n, &challenges)),
+            None if bool::from(t.value.is_zero()) => None,
+            None => Some(p.push(Op::Const(Ty::word(), t.value.to_repr().to_vec()))),
+        }
+    };
+    let constant = |p: &mut Prog, pt: &k256::AffinePoint| if compressed { const_gej_compressed(p, pt) } else { const_gej(p, pt) };
+    let terms = &tr.terms;
+    let mut msm_terms = Vec::new();
+    let generators = std::iter::once((&terms.g, gens.g)).chain(terms.h.iter().zip(gens.h.iter().copied())).chain(terms.n.iter().zip(gens.n.iter().copied()));
+    for (k, pt) in generators {
+        if let Some(kv) = scalar(&mut p, &mut lw, k) {
+            let g = constant(&mut p, &pt.to_affine());
+            msm_terms.push((kv, g));
+        }
+    }
+    for (k, pt) in &terms.points {
+        // a constant identity (a commitment to zero with a zero blinding) adds nothing
+        if pt.src == PointSrc::Const && bool::from(group::Group::is_identity(&pt.value)) {
+            continue;
+        }
+        if let Some(kv) = scalar(&mut p, &mut lw, k) {
+            let g = match pt.src {
+                PointSrc::Witness(i) => ge_to_gej(&mut p, wp[i].ge),
+                PointSrc::Const => constant(&mut p, &pt.value.to_affine()),
+            };
+            msm_terms.push((kv, g));
+        }
+    }
+    let acc = msm(&mut p, &msm_terms);
+    assert_infinity(&mut p, acc);
+    let p = crate::simplicity::opt::optimize(&p);
+    debug_assert!(p.unread_witnesses().is_empty(), "witnesses nobody reads: {:?}", p.unread_witnesses());
+    (p, msm_terms.len())
+}
+
+/// The lightest lowering of the programs `progs` (generator modes): (weight, index of the
+/// program, options). Weights come from the dummy proof's witness (the same types, so the same
+/// bytes and cost). The candidates are weighed on all cores, a worker returning only a weight;
+/// the choice is the sequential one, the first lightest in a fixed order, so the CMR does not
+/// depend on the threads. A candidate that needs more cells than consensus allows is never
+/// kept. `forced` (tests) weighs one lowering only.
+fn lightest_lowering(progs: &[(Prog, usize)], dummy: &HashMap<Arc<str>, ::simplicity::Value>, forced: Option<Options>) -> Result<(u64, usize, Options), R1CSError> {
     let weigh = |k: usize, opts: &Options| -> Result<Option<u64>, R1CSError> {
         let l = progs[k].0.lower(opts);
-        let (w, cells) = weight_of(&l.term, &dummy).map_err(|e| gadget_err(&format!("the generated program does not type: {:?}", e)))?;
+        let (w, cells) = weight_of(&l.term, dummy).map_err(|e| gadget_err(&format!("the generated program does not type: {:?}", e)))?;
         Ok((cells <= MAX_CELLS).then_some(w))
     };
     // the first lightest of `cands` (index of the program, options), in their order
@@ -392,7 +451,7 @@ pub(crate) fn compile_with<R: rand_core::RngCore + rand_core::CryptoRng>(
         best
     };
     let cands: Vec<(usize, Options)> = match forced {
-        Some((_, o)) => vec![(0, o)],
+        Some(o) => vec![(0, o)],
         None => (0..progs.len()).flat_map(|k| LOWERINGS.iter().map(move |o| (k, *o))).collect(),
     };
     let weights = par_map(&cands, |(k, o)| weigh(*k, o)).into_iter().collect::<Result<Vec<_>, _>>()?;
@@ -421,25 +480,8 @@ pub(crate) fn compile_with<R: rand_core::RngCore + rand_core::CryptoRng>(
             *m = lightest(&cands, &ws).expect("the mode's best");
         }
     }
-    let (weight, k, opts) = lightest(&per_mode.iter().flatten().map(|&(_, k, o)| (k, o)).collect::<Vec<_>>(), &per_mode.iter().flatten().map(|&(w, ..)| Some(w)).collect::<Vec<_>>())
-        .ok_or_else(|| gadget_err("no program within the cell limit"))?;
-    let (compressed, msm_count) = (modes[k], progs[k].1);
-    let low = progs[k].0.lower(&opts);
-    // lowering is deterministic: the winner lowered again is the program that was weighed
-    debug_assert_eq!(weight_of(&low.term, &dummy).ok().map(|w| w.0), Some(weight), "the winner lowered again differs");
-    let term = low.term;
-    let commit = term.commit().map_err(|e| gadget_err(&format!("the generated program does not type: {}", e)))?;
-    let cmr = commit.cmr();
-    let lowering = format!(
-        "generators {}, role passes {}, hot/cold {}, small words {}, shared functions {}",
-        if compressed { "x and parity" } else { "points" },
-        opts.role_passes,
-        opts.hot_cold,
-        opts.small_words,
-        opts.shared_funcs
-    );
-    let stats = Stats { jets: low.jets, tape_ops: live.iter().filter(|x| **x).count(), msm_terms: msm_count, witness_points: n_points, witness_scalars: n_scalars, steps: low.steps, stored: low.stored, live_bits: low.live_bits, lowering };
-    Ok(SimplicityVerifier { term, text: std::sync::OnceLock::new(), cmr, n_lin, n_mm, stats })
+    lightest(&per_mode.iter().flatten().map(|&(_, k, o)| (k, o)).collect::<Vec<_>>(), &per_mode.iter().flatten().map(|&(w, ..)| Some(w)).collect::<Vec<_>>())
+        .ok_or_else(|| gadget_err("no program within the cell limit"))
 }
 
 #[cfg(test)]

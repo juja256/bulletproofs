@@ -169,7 +169,7 @@ impl Curve for Secp256k1 {
             s.par_chunks(CT_CHUNK)
                 .zip(p.par_chunks(CT_CHUNK))
                 .map(|(s, p)| lincomb(s, p))
-                .reduce(ProjectivePoint::identity, |a, b| a + b)
+                .reduce(|| ProjectivePoint::IDENTITY, |a, b| a + b)
         }
         #[cfg(not(feature = "parallel"))]
         s.chunks(CT_CHUNK).zip(p.chunks(CT_CHUNK)).map(|(s, p)| lincomb(s, p)).fold(ProjectivePoint::IDENTITY, |a, b| a + b)

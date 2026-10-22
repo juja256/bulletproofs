@@ -100,12 +100,12 @@ The following example shows how to create and verify a 32-bit rangeproof.
 # use merlin::Transcript;
 #
 # extern crate bulletproofs;
-# use bulletproofs::{BulletproofGens, PedersenGens, RangeProof};
+# use bulletproofs::{BulletproofGens, PedersenGens, RangeProof, Ristretto};
 #
 # fn main() {
 // Generators for Pedersen commitments.  These can be selected
 // independently of the Bulletproofs generators.
-let pc_gens = PedersenGens::default();
+let pc_gens = PedersenGens::<Ristretto>::default();
 
 // Generators for Bulletproofs, valid for proofs up to bitsize 64
 // and aggregation size up to 1.
@@ -207,23 +207,23 @@ worse code generation elsewhere ¯\\\_(ツ)\_/¯
 
 Every proof of the crate (range, linear, aggregated range proofs, R1CS and the circuit
 builder on both backends, all of Bulletproofs++) runs over **ristretto255** (the default,
-byte-identical to upstream) or, with the `secp256k1` feature, over **secp256k1** (on
-[k256](https://crates.io/crates/k256)). The curve is a type parameter that defaults to
-ristretto255 and is inferred from the generators:
+byte-identical to upstream) or **secp256k1** (on [k256](https://crates.io/crates/k256)). The
+curve is a type parameter `C: curve::Curve` with no default (`RangeProof<C>`,
+`Prover<'g, T, C>`, `bppp::CircuitProof<C>`, ...); it is named once, on the generators, and
+inferred from them everywhere else:
 
 ```rust,ignore
-use bulletproofs::secp256k1::{BulletproofGens, PedersenGens, RangeProof};
+use bulletproofs::curve::Secp256k1;
+use bulletproofs::{BulletproofGens, PedersenGens, RangeProof};
 
-let pc_gens = PedersenGens::for_curve();          // B = H of secp256k1-zkp, B_blinding = G
-let bp_gens = BulletproofGens::for_curve(64, 1);
+let pc_gens = PedersenGens::<Secp256k1>::default(); // B = H of secp256k1-zkp, B_blinding = G
+let bp_gens = BulletproofGens::new(64, 1);
 let (proof, committed) = RangeProof::prove_single(&bp_gens, &pc_gens, &mut transcript, v, &blinding, 64)?;
 ```
 
-- `bulletproofs::secp256k1` names the types over secp256k1 (`RangeProof`, `r1cs::Prover`,
-  `bppp::RangeProof`, ...); generically, `RangeProof<C>`, `Prover<'g, T, C>`,
-  `bppp::CircuitProof<C>` with `C: curve::Curve`.
-- `new` and `default` constructors are the ristretto255 ones; `for_curve` is generic.
-  `Verifier::new` is ristretto255, `Verifier::<_, C>::for_curve` any curve.
+- One constructor per type, generic over the curve: `PedersenGens::<C>::default()`,
+  `BulletproofGens::<C>::new(gens, parties)`, `Prover::new(&pc_gens, transcript)` (the curve
+  of the generators) and `Verifier::<_, C>::new(transcript)`.
 - Encodings on secp256k1: points are SEC1 compressed (33 bytes, the identity 33 zero bytes),
   scalars 32 bytes big-endian. A proof of one curve does not parse as the other, and every
   transcript of a curve other than ristretto255 absorbs the curve's name.
@@ -259,7 +259,7 @@ for circuits): k256's constant-time multiscalar multiplication costs 12.7 µs pe
 
 ### Elements commitments
 
-`bulletproofs::elements` (feature `secp256k1`) follows Elements / secp256k1-zkp, so the
+`bulletproofs::elements` follows Elements / secp256k1-zkp, so the
 proofs can be about values committed in Liquid confidential transactions:
 `generator_generate(_blinded)` (asset generators, the Shallue–van de Woestijne map),
 `h()` (secp256k1-zkp's default value generator H; Liquid commits values with the asset's
@@ -269,10 +269,11 @@ carrying the quadratic residuosity of y). `PedersenGens::with_value_generator(ge
 the range proofs (BP and BP++) prove the value of such a commitment:
 
 ```rust,ignore
-use bulletproofs::secp256k1::{elements, BulletproofGens, PedersenGens, RangeProof};
+use bulletproofs::curve::Secp256k1;
+use bulletproofs::{elements, BulletproofGens, PedersenGens, RangeProof};
 
 let asset = elements::generator_parse(&asset_generator_33_bytes).unwrap();  // blinded asset tag
-let pc_gens = PedersenGens::with_value_generator(asset);
+let pc_gens = PedersenGens::<Secp256k1>::with_value_generator(asset);
 let committed = elements::commitment_parse(&commitment_33_bytes).unwrap();
 // the prover knows (value, blinding) with committed = value * asset + blinding * G
 let (proof, v) = RangeProof::prove_single(&bp_gens, &pc_gens, &mut transcript, value, &blinding, 64)?;
@@ -308,11 +309,12 @@ A proof verifies only under the transcript type and label it was made with.
 
 ```rust,ignore
 use bulletproofs::bppp::RangeStatement;
-use bulletproofs::secp256k1::{bppp, BulletproofGens, PedersenGens, Sha256Transcript};
+use bulletproofs::curve::Secp256k1;
+use bulletproofs::{bppp, BulletproofGens, PedersenGens, Sha256Transcript};
 
 let st = RangeStatement::new(16, vec![(0, 1 << 64)]).unwrap();
-let pc_gens = PedersenGens::for_curve();
-let bp_gens = BulletproofGens::for_curve(st.generators_capacity(), 1);
+let pc_gens = PedersenGens::<Secp256k1>::default();
+let bp_gens = BulletproofGens::new(st.generators_capacity(), 1);
 let (proof, commitments) = bppp::RangeProof::prove(&st, &pc_gens, &bp_gens, &[v], &[blinding], &mut Sha256Transcript::new(b"app"), &mut rng)?;
 proof.verify(&st, &pc_gens, &bp_gens, &commitments, &mut Sha256Transcript::new(b"app"))?;
 ```
@@ -533,7 +535,7 @@ So `output` is a permutation of `input` when the argument with `add(x)` for ever
 | method | what it does |
 |---|---|
 | `Prover::new(&pc_gens, transcript)` | A prover over the curve of the Pedersen generators. The transcript is a `merlin::Transcript`, a `Sha256Transcript` (see [Transcripts](#transcripts)) or a `&mut` of any `TranscriptBackend`. |
-| `Verifier::new(transcript)`, `Verifier::<_, C>::for_curve(transcript)` | A verifier over ristretto255, or over any curve `C`. |
+| `Verifier::<_, C>::new(transcript)` | A verifier over the curve `C` (often inferred from its use with the generators). |
 | `prover.commit(v, blinding)` | Commits to a secret input: returns the public commitment `V = v * B + blinding * B_blinding` and the variable that stands for `v` in the circuit. |
 | `verifier.commit(V)` | The verifier's side: the variable for the committed input `V`. |
 | `set_backend(Backend::Bp \| Backend::Bppp)` | Chooses the proof system; any time before `prove`/`verify`. |
@@ -542,11 +544,10 @@ So `output` is a permutation of `input` when the argument with `add(x)` for ever
 
 ### Gadgets over any curve
 
-All three traits take the scalar field as a parameter that defaults to ristretto255's:
-`ConstraintSystem<F = Scalar>`, `CircuitBuilder<F = Scalar>`. A gadget written as
-`fn g<CS: CircuitBuilder>(..)` is a ristretto255 gadget, as before; one written as
-`fn g<F: Field, CS: CircuitBuilder<F>>(..)` (with `bulletproofs::curve::Field`) runs on every
-curve. In generic code:
+The traits take the scalar field as a parameter with no default: `ConstraintSystem<F>`,
+`CircuitBuilder<F>`. A gadget written as `fn g<F: Field, CS: CircuitBuilder<F>>(..)` (with
+`bulletproofs::curve::Field`) runs on every curve; `CircuitBuilder<Scalar>` with
+curve25519-dalek's `Scalar` is a ristretto255 gadget. In generic code:
 
 - values are `F::from(u64)`, linear combinations `LinearCombination<F>`;
 - `lc ± var`, `lc ± F`, `lc ± u64`, `lc * F`, `var * F`, `var ± lc` and `var ± F` are
@@ -554,9 +555,8 @@ curve. In generic code:
 - `var ± var`, `-var`, `var ± u64`, `var * u64` (any integer width) and `Scalar ± * var`
   produce ristretto255 linear combinations (they do not name a field): write `lc(a) + b`
   with `bulletproofs::r1cs::lc`;
-- `Prover::new(&pc, ..)` takes its curve from the Pedersen generators;
-  `Verifier::new(..)` is the ristretto255 verifier, `Verifier::<_, C>::for_curve(..)` the one
-  over `C`.
+- `Prover::new(&pc, ..)` takes its curve from the Pedersen generators,
+  `Verifier::<_, C>::new(..)` names it.
 
 ### An example
 

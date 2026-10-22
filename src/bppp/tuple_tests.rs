@@ -14,6 +14,7 @@ use super::gens::BpppGens;
 use super::reciprocal::*;
 use super::sparse::SparseMatrix;
 use crate::{BulletproofGens, PedersenGens};
+use crate::curve::Ristretto;
 
 fn s(x: u64) -> Scalar {
     Scalar::from(x)
@@ -22,7 +23,7 @@ fn s(x: u64) -> Scalar {
 /// Two tuple poles with the same tuple (a, b) in w_O; numerators of both poles read w_D,0 (a
 /// tuple pole); an ordinary linear row w_D,0 - w_D,1 = 0; one ordinary gate w_L w_R = w_O[2]
 /// (late w_R for the two-phase prover). Row: w_P,0 - w_P,1 = 0.
-fn circuit(a: Scalar, b: Scalar) -> (ReciprocalCircuit, ReciprocalWitness) {
+fn circuit(a: Scalar, b: Scalar) -> (ReciprocalCircuit<Scalar>, ReciprocalWitness<Scalar>) {
     let (n_p, n_m) = (2usize, 1usize);
     let n_mm = n_p + n_m;
     let n_o = 3; // a, b, product output
@@ -63,11 +64,11 @@ fn circuit(a: Scalar, b: Scalar) -> (ReciprocalCircuit, ReciprocalWitness) {
     (c, w)
 }
 
-fn gens(c: &ReciprocalCircuit) -> (PedersenGens, BulletproofGens) {
+fn gens(c: &ReciprocalCircuit<Scalar>) -> (PedersenGens<Ristretto>, BulletproofGens<Ristretto>) {
     let _ = c;
     (PedersenGens::default(), BulletproofGens::new(64, 1))
 }
-fn mk<'a>(c: &ReciprocalCircuit, g: &'a (PedersenGens, BulletproofGens)) -> BpppGens<'a> {
+fn mk<'a>(c: &ReciprocalCircuit<Scalar>, g: &'a (PedersenGens<Ristretto>, BulletproofGens<Ristretto>)) -> BpppGens<'a, Ristretto> {
     c.gens(&g.0, &g.1).unwrap()
 }
 
@@ -99,7 +100,7 @@ fn malformed_circuits_do_not_panic() {
     let gg = gens(&c);
     let g = mk(&c, &gg);
     let p = prove(&c, &g, &[], &w, &mut Transcript::new(b"p"), &mut ChaCha20Rng::seed_from_u64(1)).unwrap();
-    let mut bads: Vec<ReciprocalCircuit> = Vec::new();
+    let mut bads: Vec<ReciprocalCircuit<Scalar>> = Vec::new();
     let mut x = c.clone();
     x.recip[0].terms[0].2 = Some(Pole(vec![]));
     bads.push(x);

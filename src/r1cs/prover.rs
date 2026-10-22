@@ -11,7 +11,7 @@ use super::{
     RandomizedConstraintSystem, Variable,
 };
 
-use crate::curve::{Curve, Field, Ristretto};
+use crate::curve::{Curve, Field};
 use crate::errors::R1CSError;
 use crate::generators::{BulletproofGens, PedersenGens};
 use crate::inner_product_proof::InnerProductProof;
@@ -70,7 +70,7 @@ fn eval_with<F: Field>(secrets: &Secrets<F>, lc: &LinearCombination<F>) -> F {
 /// When all constraints are added, the proving code calls `prove`
 /// which consumes the `Prover` instance, samples random challenges
 /// that instantiate the randomized constraints, and creates a complete proof.
-pub struct Prover<'g, T: TranscriptRef, C: Curve = Ristretto> {
+pub struct Prover<'g, T: TranscriptRef, C: Curve> {
     transcript: T,
     pc_gens: &'g PedersenGens<C>,
     /// The constraints accumulated so far.
@@ -120,7 +120,7 @@ struct Secrets<F: Field> {
 /// monomorphize the closures for the proving and verifying code.
 /// However, this type cannot be instantiated by the user and therefore can only be used within
 /// the callback provided to `specify_randomized_constraints`.
-pub struct RandomizingProver<'g, T: TranscriptRef, C: Curve = Ristretto> {
+pub struct RandomizingProver<'g, T: TranscriptRef, C: Curve> {
     prover: Prover<'g, T, C>,
 }
 

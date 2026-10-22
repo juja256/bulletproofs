@@ -2,7 +2,6 @@
 
 use alloc::vec::Vec;
 
-use curve25519_dalek::scalar::Scalar;
 
 use crate::curve::Field;
 
@@ -14,7 +13,7 @@ const LEN: usize = (MAX_DEG - MIN_DEG + 1) as usize;
 
 /// A scalar Laurent polynomial with degrees `MIN_DEG..=MAX_DEG`.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Poly<F: Field = Scalar>([F; LEN]);
+pub(crate) struct Poly<F: Field>([F; LEN]);
 
 impl<F: Field> Poly<F> {
     pub fn zero() -> Self {
@@ -44,7 +43,7 @@ pub(crate) fn pow_signed<F: Field>(t: F, t_inv: F, d: i32) -> F {
 
 /// A vector Laurent polynomial given by its non-zero terms `(degree, coefficients)`; terms of
 /// different lengths are zero-padded.
-pub(crate) struct VecPoly<F: Field = Scalar>(pub Vec<(i32, Vec<F>)>);
+pub(crate) struct VecPoly<F: Field>(pub Vec<(i32, Vec<F>)>);
 
 impl<F: Field> VecPoly<F> {
     /// The value at `t`, as a vector of length `len`.
@@ -85,11 +84,12 @@ impl<F: Field> VecPoly<F> {
 
 #[cfg(test)]
 mod tests {
+    use curve25519_dalek::scalar::Scalar;
     use super::*;
     use rand_chacha::rand_core::SeedableRng;
     use rand_chacha::ChaCha20Rng;
 
-    fn direct(a: &VecPoly, b: &VecPoly, w: Option<&[Scalar]>) -> Poly {
+    fn direct(a: &VecPoly<Scalar>, b: &VecPoly<Scalar>, w: Option<&[Scalar]>) -> Poly<Scalar> {
         let mut p = Poly::zero();
         for (da, a) in &a.0 {
             for (db, b) in &b.0 {

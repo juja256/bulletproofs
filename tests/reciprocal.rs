@@ -6,10 +6,11 @@ use merlin::Transcript;
 use std::time::Instant;
 use bulletproofs::r1cs::{ConstraintSystem, LinearCombination, Prover, R1CSProof, RandomizableConstraintSystem, RandomizedConstraintSystem, Variable, Verifier};
 use bulletproofs::r1cs::R1CSError;
+use bulletproofs::curve::Ristretto;
 
 /// Create a single-value range proof for `value` in [0, 2^nbits).
 /// Returns (proof, commitment, blinding).
-pub fn create_range_proof(value: u64, nbits: usize) -> (RangeProof, CompressedRistretto) {
+pub fn create_range_proof(value: u64, nbits: usize) -> (RangeProof<Ristretto>, CompressedRistretto) {
    
     
     let pc_gens = PedersenGens::default();
@@ -36,7 +37,7 @@ pub fn create_range_proof(value: u64, nbits: usize) -> (RangeProof, CompressedRi
 }
 
 /// Verify a single-value range proof.
-pub fn verify_range_proof(proof: &RangeProof, commitment: &CompressedRistretto, nbits: usize) -> bool {
+pub fn verify_range_proof(proof: &RangeProof<Ristretto>, commitment: &CompressedRistretto, nbits: usize) -> bool {
     
     
     let pc_gens = PedersenGens::default();
@@ -55,7 +56,7 @@ pub fn verify_range_proof(proof: &RangeProof, commitment: &CompressedRistretto, 
 }
 
 /// Create multiple range proofs for a vector of values.
-pub fn create_multiple_range_proofs(values: &[u64], nbits: usize) -> (RangeProof, Vec<CompressedRistretto>) {
+pub fn create_multiple_range_proofs(values: &[u64], nbits: usize) -> (RangeProof<Ristretto>, Vec<CompressedRistretto>) {
     let pc_gens = PedersenGens::default();
     let bp_gens = BulletproofGens::new(64, values.len());
     let start = Instant::now();
@@ -83,7 +84,7 @@ pub fn create_multiple_range_proofs(values: &[u64], nbits: usize) -> (RangeProof
 }
 
 /// Verify multiple range proofs.
-pub fn verify_multiple_range_proofs(proof: &RangeProof, commitments: &[CompressedRistretto], nbits: usize) -> bool {
+pub fn verify_multiple_range_proofs(proof: &RangeProof<Ristretto>, commitments: &[CompressedRistretto], nbits: usize) -> bool {
     let pc_gens = PedersenGens::default();
     let bp_gens = BulletproofGens::new(64, commitments.len());
 
@@ -101,9 +102,9 @@ pub fn verify_multiple_range_proofs(proof: &RangeProof, commitments: &[Compresse
 }
 
 /// Enforces that the quantity of v is in the range [0, 2^n).
-pub fn range_proof_gadget<CS: ConstraintSystem>(
+pub fn range_proof_gadget<CS: ConstraintSystem<Scalar>>(
     cs: &mut CS,
-    mut v: LinearCombination,
+    mut v: LinearCombination<Scalar>,
     v_assignment: Option<u64>,
     n: usize,
 ) -> Result<(), R1CSError> {
@@ -136,7 +137,7 @@ pub fn range_proof_gadget<CS: ConstraintSystem>(
 }
 
 /// Create a range proof using the R1CS API. Returns (proof, commitment, blinding).
-pub fn create_range_proof_r1cs(value: u64, nbits: usize) -> (R1CSProof, CompressedRistretto) {
+pub fn create_range_proof_r1cs(value: u64, nbits: usize) -> (R1CSProof<Ristretto>, CompressedRistretto) {
     let pc_gens = PedersenGens::default();
     let bp_gens = BulletproofGens::new(64, 1);
 
@@ -162,7 +163,7 @@ pub fn create_range_proof_r1cs(value: u64, nbits: usize) -> (R1CSProof, Compress
 }
 
 /// Verify an R1CS range proof produced by `create_range_proof_r1cs`.
-pub fn verify_range_proof_r1cs(proof: &R1CSProof, commitment: &CompressedRistretto, nbits: usize) -> bool {
+pub fn verify_range_proof_r1cs(proof: &R1CSProof<Ristretto>, commitment: &CompressedRistretto, nbits: usize) -> bool {
     let pc_gens = PedersenGens::default();
     let bp_gens = BulletproofGens::new(64, 1);
 
@@ -198,9 +199,9 @@ pub fn get_multiplicities(v: u64, b: usize) -> Vec<u64> {
 }
 
 /// Enforces that the quantity of v is in the range [0, 2^n) using the reciprocal argument.
-pub fn range_proof_reciprocal_gadget<CS: RandomizableConstraintSystem>(
+pub fn range_proof_reciprocal_gadget<CS: RandomizableConstraintSystem<Scalar>>(
     cs: &mut CS,
-    mut v: LinearCombination,
+    mut v: LinearCombination<Scalar>,
     v_assignment: Option<u64>,
     n: usize,
     b: usize, // 2^b is the size of lookup table
@@ -266,7 +267,7 @@ pub fn range_proof_reciprocal_gadget<CS: RandomizableConstraintSystem>(
 
 /// Create an R1CS range proof using the reciprocal gadget with b = 4.
 /// Returns (proof, commitment, blinding).
-pub fn create_range_proof_reciprocal(value: u64, nbits: usize) -> (R1CSProof, CompressedRistretto) {
+pub fn create_range_proof_reciprocal(value: u64, nbits: usize) -> (R1CSProof<Ristretto>, CompressedRistretto) {
     let pc_gens = PedersenGens::default();
     let bp_gens = BulletproofGens::new(32, 1);
 
@@ -292,7 +293,7 @@ pub fn create_range_proof_reciprocal(value: u64, nbits: usize) -> (R1CSProof, Co
 }
 
 /// Verify an R1CS range proof produced by `create_range_proof_reciprocal` (b = 4).
-pub fn verify_range_proof_reciprocal(proof: &R1CSProof, commitment: &CompressedRistretto, nbits: usize) -> bool {
+pub fn verify_range_proof_reciprocal(proof: &R1CSProof<Ristretto>, commitment: &CompressedRistretto, nbits: usize) -> bool {
     let pc_gens = PedersenGens::default();
     let bp_gens = BulletproofGens::new(32, 1);
 

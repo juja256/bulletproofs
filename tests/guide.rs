@@ -79,7 +79,7 @@ fn statement<F: Field, CS: CircuitBuilder<F>>(cs: &mut CS, ab: [Variable; 2], pr
 }
 
 fn prove<C: Curve>(backend: Backend, a: u64, b: u64, p: u64, q: u64, product: u64) -> Result<(R1CSProof<C>, Vec<C::Compressed>), R1CSError> {
-    let pc = PedersenGens::<C>::for_curve();
+    let pc = PedersenGens::<C>::default();
     let mut transcript = Transcript::new(b"guide");
     // public data that the constraints do not contain goes into the transcript first
     transcript.append_u64(b"product", product);
@@ -88,20 +88,20 @@ fn prove<C: Curve>(backend: Backend, a: u64, b: u64, p: u64, q: u64, product: u6
     let (ca, va) = prover.commit(C::Scalar::from(a), C::Scalar::from(11u64));
     let (cb, vb) = prover.commit(C::Scalar::from(b), C::Scalar::from(12u64));
     statement(&mut prover, [va, vb], product, Some([a, b, p, q]))?;
-    let bp = BulletproofGens::<C>::for_curve(prover.cost().gens_capacity(backend), 1);
+    let bp = BulletproofGens::<C>::new(prover.cost().gens_capacity(backend), 1);
     Ok((prover.prove(&bp)?, vec![ca, cb]))
 }
 
 fn verify<C: Curve>(proof: &R1CSProof<C>, commitments: &[C::Compressed], product: u64) -> Result<(), R1CSError> {
-    let pc = PedersenGens::<C>::for_curve();
+    let pc = PedersenGens::<C>::default();
     let mut transcript = Transcript::new(b"guide");
     transcript.append_u64(b"product", product);
-    let mut verifier = Verifier::<_, C>::for_curve(&mut transcript);
+    let mut verifier = Verifier::<_, C>::new(&mut transcript);
     // this verifier accepts either backend; a stricter one would require one of them
     verifier.set_backend(proof.backend());
     let ab = [verifier.commit(commitments[0]), verifier.commit(commitments[1])];
     statement(&mut verifier, ab, product, None)?;
-    let bp = BulletproofGens::<C>::for_curve(verifier.cost().gens_capacity(proof.backend()), 1);
+    let bp = BulletproofGens::<C>::new(verifier.cost().gens_capacity(proof.backend()), 1);
     verifier.verify(proof, &pc, &bp)
 }
 

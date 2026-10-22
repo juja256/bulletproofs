@@ -1,7 +1,6 @@
 //! Definition of the constraint system trait.
 
 use super::{LinearCombination, R1CSError, Variable};
-use curve25519_dalek::scalar::Scalar;
 
 use crate::curve::Field;
 use crate::transcript::TranscriptBackend;
@@ -18,7 +17,7 @@ use crate::transcript::TranscriptBackend;
 /// verifier, gadgets for the constraint system should be written
 /// using the `ConstraintSystem` trait, so that the prover and
 /// verifier share the logic for specifying constraints.
-pub trait ConstraintSystem<F: Field = Scalar> {
+pub trait ConstraintSystem<F: Field> {
     /// Leases the proof transcript to the user, so they can
     /// add extra data to which the proof must be bound, but which
     /// is not available before creation of the constraint system (`merlin::Transcript`,
@@ -87,7 +86,7 @@ pub trait ConstraintSystem<F: Field = Scalar> {
 /// while gadgets that need randomization should use trait bound `CS: RandomizedConstraintSystem`.
 /// Gadgets generally _should not_ use this trait as a bound on the CS argument: it should be used
 /// by the higher-order protocol that composes gadgets together.
-pub trait RandomizableConstraintSystem<F: Field = Scalar>: ConstraintSystem<F> {
+pub trait RandomizableConstraintSystem<F: Field>: ConstraintSystem<F> {
     /// Represents a concrete type for the CS in a randomization phase.
     type RandomizedCS: RandomizedConstraintSystem<F>;
 
@@ -120,7 +119,7 @@ pub trait RandomizableConstraintSystem<F: Field = Scalar>: ConstraintSystem<F> {
 ///
 /// Note: this trait also includes `ConstraintSystem` trait
 /// in order to allow composition of gadgets: e.g. a shuffle gadget can be used in both phases.
-pub trait RandomizedConstraintSystem<F: Field = Scalar>: ConstraintSystem<F> {
+pub trait RandomizedConstraintSystem<F: Field>: ConstraintSystem<F> {
     /// Generates a challenge scalar.
     ///
     /// ### Usage

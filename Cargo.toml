@@ -113,9 +113,6 @@ harness = false
 name = "curves"
 harness = false
 
-[[test]]
-name = "facade"
-
 [[example]]
 name = "curves_table"
 

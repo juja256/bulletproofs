@@ -236,8 +236,8 @@ where
     assert_eq!(c.is_satisfied(w, eta, alpha), satisfied, "{}: satisfied", name);
     assert_eq!(c.reciprocals_for_test(w, eta, alpha), scs(&case["w_P"]), "{}: w_P", name);
     let (n_mm, n_lin) = (c.n_p + c.n_m, c.n_lin);
-    let pc = PedersenGens::<C>::for_curve();
-    let bp = BulletproofGens::<C>::for_curve(super::gens::capacity(n_lin, n_mm), 1);
+    let pc = PedersenGens::<C>::default();
+    let bp = BulletproofGens::<C>::new(super::gens::capacity(n_lin, n_mm), 1);
     let g = BpppGens::new(&pc, &bp, n_lin, n_mm).unwrap();
     let point = |p: &Value| sym_point::<C>(p, &g.g, &g.h, g.n);
     let V: Vec<C::Compressed> = w.v.iter().zip(&w.s).map(|(v, s)| C::compress(&g.commit_input(v, *s))).collect();

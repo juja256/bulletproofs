@@ -12,6 +12,7 @@ use merlin::Transcript;
 use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use sha3::{Digest, Sha3_256};
+use bulletproofs::curve::Ristretto;
 
 fn h(bytes: &[u8]) -> String {
     hex::encode(Sha3_256::digest(bytes))
@@ -22,7 +23,7 @@ fn rng(seed: u64) -> ChaCha20Rng {
 }
 
 /// `n` multiplications `w_L w_R = w_O` and `n` linear rows of three terms, from a seed.
-fn circuit(n: usize, seed: u64) -> (ArithmeticCircuit, CircuitWitness) {
+fn circuit(n: usize, seed: u64) -> (ArithmeticCircuit<Scalar>, CircuitWitness<Scalar>) {
     let mut r = rng(seed);
     let s = |r: &mut ChaCha20Rng| Scalar::random(r);
     let w_l: Vec<Scalar> = (0..n).map(|_| s(&mut r)).collect();
@@ -60,7 +61,7 @@ fn circuit(n: usize, seed: u64) -> (ArithmeticCircuit, CircuitWitness) {
 
 fn circuit_proof(n: usize) -> Vec<u8> {
     let (c, w) = circuit(n, n as u64);
-    let pc = PedersenGens::default();
+    let pc = PedersenGens::<Ristretto>::default();
     let bp = BulletproofGens::new(n.max(6), 1);
     let gens = BpppGens::new(&pc, &bp, 0, n).unwrap();
     let p = bppp::CircuitProof::prove(&c, &gens, &[], &w, &mut Transcript::new(b"reg"), &mut rng(1)).unwrap();
@@ -70,7 +71,7 @@ fn circuit_proof(n: usize) -> Vec<u8> {
 
 fn range_proof(base: u64) -> Vec<u8> {
     let st = RangeStatement::new(base, vec![(0, 1 << 64), (1000, 1u128 << 40)]).unwrap();
-    let pc = PedersenGens::default();
+    let pc = PedersenGens::<Ristretto>::default();
     let bp = BulletproofGens::new(st.generators_capacity(), 1);
     let (p, V) = bppp::RangeProof::prove(&st, &pc, &bp, &[0x0123_4567_89ab_cdef, 123_456_789], &[Scalar::from(5u64), Scalar::from(6u64)], &mut Transcript::new(b"reg"), &mut rng(2)).unwrap();
     p.verify(&st, &pc, &bp, &V, &mut Transcript::new(b"reg")).unwrap();
@@ -79,7 +80,7 @@ fn range_proof(base: u64) -> Vec<u8> {
 
 fn mact_proof() -> Vec<u8> {
     let st = MactStatement::new(16, 2, 2).unwrap();
-    let pc = PedersenGens::default();
+    let pc = PedersenGens::<Ristretto>::default();
     let bp = BulletproofGens::new(st.generators_capacity(), 1);
     let e = |amount: u64, asset: u64, s: u64| MactEntry { amount, asset: Scalar::from(asset), blinding: Scalar::from(s) };
     let (ins, outs) = ([e(100, 1, 1), e(50, 2, 2)], [e(100, 1, 3), e(50, 2, 4)]);
@@ -91,7 +92,7 @@ fn mact_proof() -> Vec<u8> {
 /// The R1CS front end: plain constraint system or with builder operations (spec §6.2: one
 /// protocol and encoding for both; pins changed with option B).
 fn r1cs_proof(builder: bool) -> Vec<u8> {
-    let pc = PedersenGens::default();
+    let pc = PedersenGens::<Ristretto>::default();
     let bp = BulletproofGens::new(1024, 1);
     let mut t = Transcript::new(b"reg");
     let mut p = Prover::new(&pc, &mut t);
@@ -169,7 +170,7 @@ impl rand_chacha::rand_core::CryptoRng for ZeroRng {}
 /// different blindings of `C_O`; the same witness gives the same proof.
 #[test]
 fn prover_randomness_depends_on_the_witness() {
-    let pc = PedersenGens::default();
+    let pc = PedersenGens::<Ristretto>::default();
     let bp = BulletproofGens::new(16, 1);
     let n = 8;
     let gens = BpppGens::new(&pc, &bp, 0, n).unwrap();
@@ -177,7 +178,7 @@ fn prover_randomness_depends_on_the_witness() {
     c.w_l = SparseMatrix::new(3 * n);
     c.a_l = vec![];
     let w2 = CircuitWitness { w_l: w1.w_r.clone(), w_r: w1.w_l.clone(), ..w1.clone() };
-    let prove = |w: &CircuitWitness| bppp::CircuitProof::prove(&c, &gens, &[], w, &mut Transcript::new(b"z"), &mut ZeroRng).unwrap();
+    let prove = |w: &CircuitWitness<Scalar>| bppp::CircuitProof::prove(&c, &gens, &[], w, &mut Transcript::new(b"z"), &mut ZeroRng).unwrap();
     let (p1, p2) = (prove(&w1), prove(&w2));
     assert_ne!(p1.C_O, p2.C_O);
     assert_eq!(prove(&w1), p1);
@@ -189,7 +190,7 @@ fn prover_randomness_depends_on_the_witness() {
 /// would leak the witness through the different challenges).
 #[test]
 fn prover_randomness_binds_the_transcript_context() {
-    let pc = PedersenGens::default();
+    let pc = PedersenGens::<Ristretto>::default();
     let bp = BulletproofGens::new(16, 1);
     let gens = BpppGens::new(&pc, &bp, 0, 8).unwrap();
     let (c, w) = circuit(8, 4);

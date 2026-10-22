@@ -39,6 +39,9 @@ tasks are numbered 1.1–3.4 there, Task 1–14 in the ledger.
   ristretto255 only; `for_curve` is the generic constructor. `Prover::new` infers the curve
   from the Pedersen generators. A call where nothing pins the curve (a standalone
   `X::from_bytes`, `LinearProof::create`) needs `::<Ristretto>`.
+  *(2026-10-22: superseded by the API refactor: no default type parameters, one generic
+  constructor per type — `PedersenGens::<C>::default()`, `BulletproofGens::<C>::new`,
+  `Verifier::<_, C>::new` — and no `bulletproofs::secp256k1` module.)*
 - Transcripts: `curve_domain_sep::<C>()` next to every protocol's domain separator; a no-op for
   ristretto255, `append_message(b"curve", NAME)` otherwise.
 - Gadgets: `fn g<CS: CircuitBuilder>` is a ristretto255 gadget; `fn g<F: Field, CS:

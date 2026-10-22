@@ -12,6 +12,7 @@ use merlin::Transcript;
 
 use bulletproofs::RangeProof;
 use bulletproofs::{BulletproofGens, PedersenGens};
+use bulletproofs::curve::Ristretto;
 
 static AGGREGATION_SIZES: [usize; 6] = [1, 2, 4, 8, 16, 32];
 
@@ -21,7 +22,7 @@ fn create_aggregated_rangeproof_helper(n: usize, c: &mut Criterion) {
     c.bench_function_over_inputs(
         &label,
         move |b, &&m| {
-            let pc_gens = PedersenGens::default();
+            let pc_gens = PedersenGens::<Ristretto>::default();
             let bp_gens = BulletproofGens::new(n, m);
             let mut rng = rand::thread_rng();
 
@@ -69,7 +70,7 @@ fn verify_aggregated_rangeproof_helper(n: usize, c: &mut Criterion) {
     c.bench_function_over_inputs(
         &label,
         move |b, &&m| {
-            let pc_gens = PedersenGens::default();
+            let pc_gens = PedersenGens::<Ristretto>::default();
             let bp_gens = BulletproofGens::new(n, m);
             let mut rng = rand::thread_rng();
 

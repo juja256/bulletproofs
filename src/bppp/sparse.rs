@@ -3,7 +3,6 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use curve25519_dalek::scalar::Scalar;
 
 use crate::curve::Field;
 use sha3::{Digest, Sha3_256};
@@ -44,7 +43,7 @@ impl BufHasher {
 /// A matrix stored by rows: row `r` holds the `(column, coefficient)` terms
 /// `start[r]..start[r + 1]`, in the order they were pushed.
 #[derive(Clone, Debug, PartialEq)]
-pub struct SparseMatrix<F: Field = Scalar> {
+pub struct SparseMatrix<F: Field> {
     n_cols: usize,
     start: Vec<usize>,
     cols: Vec<u32>,
@@ -147,6 +146,7 @@ impl<F: Field> SparseMatrix<F> {
 
 #[cfg(test)]
 mod tests {
+    use curve25519_dalek::scalar::Scalar;
     use super::*;
 
     /// `y^T M` (the parallel path above 2^14 terms) equals the direct double loop.

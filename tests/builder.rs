@@ -10,8 +10,9 @@ use curve25519_dalek::scalar::Scalar;
 use merlin::Transcript;
 use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha20Rng;
+use bulletproofs::curve::Ristretto;
 
-type Lc = LinearCombination;
+type Lc = LinearCombination<Scalar>;
 
 fn backends() -> Vec<Backend> {
     #[allow(unused_mut)]
@@ -27,7 +28,7 @@ struct Tables {
     xor: TableId,
 }
 
-fn tables<CS: CircuitBuilder>(cs: &mut CS) -> Result<Tables, R1CSError> {
+fn tables<CS: CircuitBuilder<Scalar>>(cs: &mut CS) -> Result<Tables, R1CSError> {
     let byte = cs.table((0..256u64).map(|x| vec![x]).collect())?;
     let nib = cs.table((0..16u64).map(|x| vec![x]).collect())?;
     let xor = cs.table((0..256u64).map(|x| vec![x >> 4, x & 15, (x >> 4) ^ (x & 15)]).collect())?;
@@ -35,7 +36,7 @@ fn tables<CS: CircuitBuilder>(cs: &mut CS) -> Result<Tables, R1CSError> {
 }
 
 /// `x < 2^32`: four bytes from the byte table, `x = sum 256^i b_i`.
-fn range32<CS: CircuitBuilder>(cs: &mut CS, t: &Tables, x: Lc, value: Option<u64>) -> Result<Vec<Variable>, R1CSError> {
+fn range32<CS: CircuitBuilder<Scalar>>(cs: &mut CS, t: &Tables, x: Lc, value: Option<u64>) -> Result<Vec<Variable>, R1CSError> {
     let mut sum = Lc::default();
     let mut bytes = Vec::new();
     for i in 0..4 {
@@ -48,7 +49,7 @@ fn range32<CS: CircuitBuilder>(cs: &mut CS, t: &Tables, x: Lc, value: Option<u64
 }
 
 /// Nibbles of a byte, from the nibble table.
-fn nibbles<CS: CircuitBuilder>(cs: &mut CS, t: &Tables, byte: Variable, value: Option<u64>) -> Result<(Variable, Variable), R1CSError> {
+fn nibbles<CS: CircuitBuilder<Scalar>>(cs: &mut CS, t: &Tables, byte: Variable, value: Option<u64>) -> Result<(Variable, Variable), R1CSError> {
     let nib = t.nib;
     let hi = cs.lookup_value(nib, value.map(|v| v >> 4))?;
     let lo = cs.lookup_value(nib, value.map(|v| v & 15))?;
@@ -57,7 +58,7 @@ fn nibbles<CS: CircuitBuilder>(cs: &mut CS, t: &Tables, byte: Variable, value: O
 }
 
 /// `z = x ^ y` for bytes, nibble by nibble through the XOR table; returns `z`.
-fn xor8<CS: CircuitBuilder>(cs: &mut CS, t: &Tables, x: Variable, y: Variable, v: Option<(u64, u64)>) -> Result<Variable, R1CSError> {
+fn xor8<CS: CircuitBuilder<Scalar>>(cs: &mut CS, t: &Tables, x: Variable, y: Variable, v: Option<(u64, u64)>) -> Result<Variable, R1CSError> {
     let (xh, xl) = nibbles(cs, t, x, v.map(|v| v.0))?;
     let (yh, yl) = nibbles(cs, t, y, v.map(|v| v.1))?;
     let nib = t.nib;
@@ -72,7 +73,7 @@ fn xor8<CS: CircuitBuilder>(cs: &mut CS, t: &Tables, x: Variable, y: Variable, v
 
 /// A memory permutation: the multiset of `(address, value)` writes equals that of the reads,
 /// with addresses and values bytes.
-fn memory<CS: CircuitBuilder>(cs: &mut CS, t: &Tables, writes: &[(u64, u64)], reads: Option<&[(u64, u64)]>, n: usize) -> Result<(), R1CSError> {
+fn memory<CS: CircuitBuilder<Scalar>>(cs: &mut CS, t: &Tables, writes: &[(u64, u64)], reads: Option<&[(u64, u64)]>, n: usize) -> Result<(), R1CSError> {
     let arg = cs.reciprocal(2)?;
     for i in 0..n {
         let w = writes.get(i).copied();
@@ -91,7 +92,7 @@ fn memory<CS: CircuitBuilder>(cs: &mut CS, t: &Tables, writes: &[(u64, u64)], re
 
 /// A MACT-style balance: committed `(amount, asset type)` pairs, `sum_in a/(X + t) - sum_out
 /// a/(X + t) = 0`, every output amount below `2^32` (`range32`).
-fn balance<CS: CircuitBuilder>(cs: &mut CS, t: &Tables, ins: &[(Variable, Variable)], outs: &[(Variable, Variable)], out_amounts: Option<&[u64]>) -> Result<(), R1CSError> {
+fn balance<CS: CircuitBuilder<Scalar>>(cs: &mut CS, t: &Tables, ins: &[(Variable, Variable)], outs: &[(Variable, Variable)], out_amounts: Option<&[u64]>) -> Result<(), R1CSError> {
     let arg = cs.reciprocal(1)?;
     for (a, ty) in ins {
         arg.add_weighted(cs, (*a).into(), &[(*ty).into()])?;
@@ -113,7 +114,7 @@ struct Private {
 }
 
 /// All four gadgets in one statement.
-fn statement<CS: CircuitBuilder>(cs: &mut CS, V: &[Variable], p: Option<&Private>, x: Option<u64>) -> Result<(), R1CSError> {
+fn statement<CS: CircuitBuilder<Scalar>>(cs: &mut CS, V: &[Variable], p: Option<&Private>, x: Option<u64>) -> Result<(), R1CSError> {
     let t = tables(cs)?;
     // range32 of a committed value
     range32(cs, &t, V[0].into(), x)?;
@@ -135,7 +136,7 @@ fn values() -> (Vec<u64>, Private) {
     (vals, p)
 }
 
-fn prove(backend: Backend, vals: &[u64], p: &Private, bp: &BulletproofGens) -> Result<(R1CSProof, Vec<CompressedRistretto>, Cost), R1CSError> {
+fn prove(backend: Backend, vals: &[u64], p: &Private, bp: &BulletproofGens<Ristretto>) -> Result<(R1CSProof<Ristretto>, Vec<CompressedRistretto>, Cost), R1CSError> {
     let pc = PedersenGens::default();
     let mut t = Transcript::new(b"builder");
     let mut prover = Prover::new(&pc, &mut t);
@@ -147,7 +148,7 @@ fn prove(backend: Backend, vals: &[u64], p: &Private, bp: &BulletproofGens) -> R
     Ok((proof, V, cost))
 }
 
-fn verify(backend: Backend, proof: &R1CSProof, V: &[CompressedRistretto], bp: &BulletproofGens) -> Result<Cost, R1CSError> {
+fn verify(backend: Backend, proof: &R1CSProof<Ristretto>, V: &[CompressedRistretto], bp: &BulletproofGens<Ristretto>) -> Result<Cost, R1CSError> {
     let pc = PedersenGens::default();
     let mut t = Transcript::new(b"builder");
     let mut verifier = Verifier::new(&mut t);
@@ -180,7 +181,7 @@ fn gadgets_on_both_backends() {
 }
 
 /// The prover refuses, or its proof does not verify.
-fn rejected(backend: Backend, vals: &[u64], p: &Private, bp: &BulletproofGens) -> bool {
+fn rejected(backend: Backend, vals: &[u64], p: &Private, bp: &BulletproofGens<Ristretto>) -> bool {
     match prove(backend, vals, p, bp) {
         Err(_) => true,
         Ok((proof, V, _)) => verify(backend, &proof, &V, bp).is_err(),
@@ -235,7 +236,7 @@ fn proofs_of_one_backend_do_not_verify_with_the_other() {
 /// A small statement exercising the copies of §7.6: numerators and public coefficients that
 /// read `MultiplierRight` (the right wire of `allocate`), tuple components on `w_L` and `w_R`,
 /// constants in coefficients, a product with constants.
-fn copies<CS: CircuitBuilder>(cs: &mut CS, V: &[Variable], p: Option<[u64; 3]>) -> Result<(), R1CSError> {
+fn copies<CS: CircuitBuilder<Scalar>>(cs: &mut CS, V: &[Variable], p: Option<[u64; 3]>) -> Result<(), R1CSError> {
     let s = |x: u64| Scalar::from(x);
     let a = cs.allocate(p.map(|p| s(p[0])))?; // MultiplierLeft(0)
     let b = cs.allocate(p.map(|p| s(p[1])))?; // MultiplierRight(0)
@@ -251,9 +252,9 @@ fn copies<CS: CircuitBuilder>(cs: &mut CS, V: &[Variable], p: Option<[u64; 3]>) 
     r.add_public(cs, b * Scalar::from(2u64) - Scalar::from(10u64), &[1, 2]) // 0 for b = 5
 }
 
-fn prove_small<F>(backend: Backend, v: u64, gadget: F) -> Result<(R1CSProof, CompressedRistretto, Cost), R1CSError>
+fn prove_small<F>(backend: Backend, v: u64, gadget: F) -> Result<(R1CSProof<Ristretto>, CompressedRistretto, Cost), R1CSError>
 where
-    F: Fn(&mut Prover<&mut Transcript>, Variable) -> Result<(), R1CSError>,
+    F: Fn(&mut Prover<&mut Transcript, Ristretto>, Variable) -> Result<(), R1CSError>,
 {
     let pc = PedersenGens::default();
     let bp = BulletproofGens::new(64, 1);
@@ -266,9 +267,9 @@ where
     Ok((prover.prove_with_rng(&bp, &mut ChaCha20Rng::seed_from_u64(2))?, V, cost))
 }
 
-fn verify_small<F>(backend: Backend, proof: &R1CSProof, V: CompressedRistretto, gadget: F) -> Result<(), R1CSError>
+fn verify_small<F>(backend: Backend, proof: &R1CSProof<Ristretto>, V: CompressedRistretto, gadget: F) -> Result<(), R1CSError>
 where
-    F: Fn(&mut Verifier<&mut Transcript>, Variable) -> Result<(), R1CSError>,
+    F: Fn(&mut Verifier<&mut Transcript, Ristretto>, Variable) -> Result<(), R1CSError>,
 {
     let pc = PedersenGens::default();
     let bp = BulletproofGens::new(64, 1);
@@ -300,12 +301,12 @@ fn copies_of_right_wires() {
 #[test]
 fn no_gates() {
     for backend in backends() {
-        let g = |cs: &mut Prover<&mut Transcript>, x: Variable| {
+        let g = |cs: &mut Prover<&mut Transcript, Ristretto>, x: Variable| {
             let w = cs.witness(Some(Scalar::from(4u64)))?;
             cs.constrain(w - x);
             Ok(())
         };
-        let gv = |cs: &mut Verifier<&mut Transcript>, x: Variable| {
+        let gv = |cs: &mut Verifier<&mut Transcript, Ristretto>, x: Variable| {
             let w = cs.witness(None)?;
             cs.constrain(w - x);
             Ok(())
@@ -324,26 +325,26 @@ fn no_gates() {
 #[test]
 fn bppp_builder_rules() {
     let b = Backend::Bppp;
-    let g = |cs: &mut Prover<&mut Transcript>, x: Variable| copies(cs, &[x], Some([2, 5, 18]));
-    let gv = |cs: &mut Verifier<&mut Transcript>, x: Variable| copies(cs, &[x], None);
+    let g = |cs: &mut Prover<&mut Transcript, Ristretto>, x: Variable| copies(cs, &[x], Some([2, 5, 18]));
+    let gv = |cs: &mut Verifier<&mut Transcript, Ristretto>, x: Variable| copies(cs, &[x], None);
     let (proof, V, _) = prove_small(b, 4, g).unwrap();
     // randomized constraints are refused on both sides
-    let rand_p = |cs: &mut Prover<&mut Transcript>, x: Variable| {
+    let rand_p = |cs: &mut Prover<&mut Transcript, Ristretto>, x: Variable| {
         g(cs, x)?;
         cs.specify_randomized_constraints(|_| Ok(()))
     };
-    let rand_v = |cs: &mut Verifier<&mut Transcript>, x: Variable| {
+    let rand_v = |cs: &mut Verifier<&mut Transcript, Ristretto>, x: Variable| {
         gv(cs, x)?;
         cs.specify_randomized_constraints(|_| Ok(()))
     };
     assert!(matches!(prove_small(b, 4, rand_p), Err(R1CSError::GadgetError { .. })));
     assert!(matches!(verify_small(b, &proof, V, rand_v), Err(R1CSError::GadgetError { .. })));
     // a verifier without the builder operations rejects a builder proof, and conversely
-    let plain_p = |cs: &mut Prover<&mut Transcript>, x: Variable| {
+    let plain_p = |cs: &mut Prover<&mut Transcript, Ristretto>, x: Variable| {
         cs.constrain(x - 4u64);
         Ok(())
     };
-    let plain_v = |cs: &mut Verifier<&mut Transcript>, x: Variable| {
+    let plain_v = |cs: &mut Verifier<&mut Transcript, Ristretto>, x: Variable| {
         cs.constrain(x - 4u64);
         Ok(())
     };
@@ -397,12 +398,12 @@ fn bppp_wnla(mut a: usize, mut b: usize) -> usize {
 /// not leave a witness behind, on the prover or the verifier.
 #[test]
 fn failed_operations_record_nothing() {
-    let pc = PedersenGens::default();
+    let pc = PedersenGens::<Ristretto>::default();
     let mut t = Transcript::new(b"x");
     let mut p = Prover::new(&pc, &mut t);
     let mut t2 = Transcript::new(b"x");
-    let mut v = Verifier::new(&mut t2);
-    fn go<CS: CircuitBuilder>(cs: &mut CS, val: Option<u64>) {
+    let mut v = Verifier::<_, Ristretto>::new(&mut t2);
+    fn go<CS: CircuitBuilder<Scalar>>(cs: &mut CS, val: Option<u64>) {
         let two = cs.table(vec![vec![0, 0]]).unwrap();
         let one = cs.table(vec![vec![0]]).unwrap();
         let before = cs.cost();
@@ -423,19 +424,19 @@ fn constraints_on_missing_variables_are_errors() {
     let bad = [Variable::Witness(1), Variable::Witness(1000), Variable::MultiplierLeft(7), Variable::Committed(1)];
     for backend in backends() {
         for &y in &bad {
-            let gp = move |cs: &mut Prover<&mut Transcript>, x: Variable| {
+            let gp = move |cs: &mut Prover<&mut Transcript, Ristretto>, x: Variable| {
                 cs.witness(Some(Scalar::from(4u64)))?;
                 cs.constrain(y - x);
                 Ok(())
             };
-            let gv = move |cs: &mut Verifier<&mut Transcript>, x: Variable| {
+            let gv = move |cs: &mut Verifier<&mut Transcript, Ristretto>, x: Variable| {
                 cs.witness(None)?;
                 cs.constrain(y - x);
                 Ok(())
             };
             assert!(matches!(prove_small(backend, 0, gp), Err(R1CSError::GadgetError { .. })), "{:?} {:?}", backend, y);
             // a proof of the honest statement, presented to a verifier with the bad constraint
-            let ok = |cs: &mut Prover<&mut Transcript>, x: Variable| {
+            let ok = |cs: &mut Prover<&mut Transcript, Ristretto>, x: Variable| {
                 cs.witness(Some(Scalar::from(4u64)))?;
                 cs.constrain(x - 0u64);
                 Ok(())
@@ -445,7 +446,7 @@ fn constraints_on_missing_variables_are_errors() {
         }
     }
     // also without builder operations
-    let gp = |cs: &mut Prover<&mut Transcript>, x: Variable| {
+    let gp = |cs: &mut Prover<&mut Transcript, Ristretto>, x: Variable| {
         cs.constrain(Variable::MultiplierOutput(3) - x);
         Ok(())
     };
@@ -456,7 +457,7 @@ fn constraints_on_missing_variables_are_errors() {
 /// operations failed gives the proof of the plain constraint system, byte for byte.
 #[test]
 fn failed_operations_leave_the_plain_proof() {
-    let g = |cs: &mut Prover<&mut Transcript>, x: Variable| {
+    let g = |cs: &mut Prover<&mut Transcript, Ristretto>, x: Variable| {
         assert!(cs.table(vec![vec![]]).is_err());
         assert!(cs.constrain_product(Variable::Witness(3).into(), x.into(), x.into()).is_err());
         let r = cs.reciprocal(1)?;
@@ -464,7 +465,7 @@ fn failed_operations_leave_the_plain_proof() {
         cs.constrain(x - 0u64);
         Ok(())
     };
-    let gv = |cs: &mut Verifier<&mut Transcript>, x: Variable| {
+    let gv = |cs: &mut Verifier<&mut Transcript, Ristretto>, x: Variable| {
         assert!(cs.table(vec![vec![]]).is_err());
         assert!(cs.constrain_product(Variable::Witness(3).into(), x.into(), x.into()).is_err());
         let r = cs.reciprocal(1)?;
@@ -474,7 +475,7 @@ fn failed_operations_leave_the_plain_proof() {
     };
     let (proof, V, _) = prove_small(Backend::Bppp, 0, g).unwrap();
     verify_small(Backend::Bppp, &proof, V, gv).unwrap();
-    let plain = |cs: &mut Prover<&mut Transcript>, x: Variable| {
+    let plain = |cs: &mut Prover<&mut Transcript, Ristretto>, x: Variable| {
         cs.constrain(x - 0u64);
         Ok(())
     };
@@ -485,17 +486,17 @@ fn failed_operations_leave_the_plain_proof() {
 /// `CircuitBuilder` is object safe: gadgets can take `&mut dyn CircuitBuilder`.
 #[test]
 fn object_safe() {
-    fn gadget(cs: &mut dyn CircuitBuilder, v: Option<u64>) -> Result<Variable, R1CSError> {
+    fn gadget(cs: &mut dyn CircuitBuilder<Scalar>, v: Option<u64>) -> Result<Variable, R1CSError> {
         let t = cs.table((0..4u64).map(|x| vec![x]).collect())?;
         cs.lookup_value(t, v)
     }
     for backend in backends() {
-        let p = |cs: &mut Prover<&mut Transcript>, x: Variable| {
+        let p = |cs: &mut Prover<&mut Transcript, Ristretto>, x: Variable| {
             let y = gadget(cs, Some(3))?;
             cs.constrain(y - x);
             Ok(())
         };
-        let v = |cs: &mut Verifier<&mut Transcript>, x: Variable| {
+        let v = |cs: &mut Verifier<&mut Transcript, Ristretto>, x: Variable| {
             let y = gadget(cs, None)?;
             cs.constrain(y - x);
             Ok(())
@@ -511,7 +512,7 @@ fn object_safe() {
 /// a borrow from the next one) is not a row: the prover refuses.
 #[test]
 fn xor32_with_unbounded_nibbles() {
-    fn xor32<CS: CircuitBuilder>(cs: &mut CS, x: Variable, y: Variable, nibbles: Option<[(u64, u64); 8]>) -> Result<Variable, R1CSError> {
+    fn xor32<CS: CircuitBuilder<Scalar>>(cs: &mut CS, x: Variable, y: Variable, nibbles: Option<[(u64, u64); 8]>) -> Result<Variable, R1CSError> {
         let t = cs.table((0..256u64).map(|v| vec![v >> 4, v & 15, (v >> 4) ^ (v & 15)]).collect())?;
         let (mut sx, mut sy, mut sz) = (Lc::default(), Lc::default(), Lc::default());
         for i in 0..8 {
@@ -538,7 +539,7 @@ fn xor32_with_unbounded_nibbles() {
     let pc = PedersenGens::default();
     let bp = BulletproofGens::new(512, 1);
     for backend in backends() {
-        let run = |nib: [(u64, u64); 8]| -> Result<(R1CSProof, Vec<CompressedRistretto>, Cost), R1CSError> {
+        let run = |nib: [(u64, u64); 8]| -> Result<(R1CSProof<Ristretto>, Vec<CompressedRistretto>, Cost), R1CSError> {
             let mut t = Transcript::new(b"xor32");
             let mut p = Prover::new(&pc, &mut t);
             p.set_backend(backend);
@@ -550,7 +551,7 @@ fn xor32_with_unbounded_nibbles() {
             let cost = p.cost();
             Ok((p.prove_with_rng(&bp, &mut ChaCha20Rng::seed_from_u64(5))?, vec![V0, V1, V2], cost))
         };
-        let verify = |proof: &R1CSProof, V: &[CompressedRistretto]| {
+        let verify = |proof: &R1CSProof<Ristretto>, V: &[CompressedRistretto]| {
             let mut t = Transcript::new(b"xor32");
             let mut v = Verifier::new(&mut t);
             v.set_backend(backend);

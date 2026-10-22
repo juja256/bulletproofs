@@ -20,6 +20,7 @@ use curve25519_dalek::scalar::Scalar;
 use merlin::Transcript;
 use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha20Rng;
+use bulletproofs::curve::Ristretto;
 
 fn peak_rss_mb() -> f64 {
     let s = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
@@ -58,7 +59,7 @@ fn gates(n: usize) -> Gates {
     Gates { n, w_l, w_r, rows }
 }
 
-fn circuit(g: &Gates) -> (ArithmeticCircuit, CircuitWitness) {
+fn circuit(g: &Gates) -> (ArithmeticCircuit<Scalar>, CircuitWitness<Scalar>) {
     let n = g.n;
     let mut w_l = SparseMatrix::new(3 * n);
     for (terms, _) in &g.rows {
@@ -86,7 +87,7 @@ fn circuit(g: &Gates) -> (ArithmeticCircuit, CircuitWitness) {
     (c, CircuitWitness { w_l: g.w_l.clone(), w_r: g.w_r.clone(), w_o, v: vec![], s: vec![] })
 }
 
-fn r1cs<CS: ConstraintSystem>(cs: &mut CS, g: &Gates, prover: bool) {
+fn r1cs<CS: ConstraintSystem<Scalar>>(cs: &mut CS, g: &Gates, prover: bool) {
     let mut vars = vec![Variable::One(); 3 * g.n];
     for i in 0..g.n {
         let (l, r, o) = cs.allocate_multiplier(if prover { Some((g.w_l[i], g.w_r[i])) } else { None }).unwrap();
@@ -95,12 +96,12 @@ fn r1cs<CS: ConstraintSystem>(cs: &mut CS, g: &Gates, prover: bool) {
         vars[2 * g.n + i] = o;
     }
     for (terms, constant) in &g.rows {
-        let lc: LinearCombination = terms.iter().map(|(c, v)| (vars[*c], *v)).chain(Some((Variable::One(), *constant))).collect();
+        let lc: LinearCombination<Scalar> = terms.iter().map(|(c, v)| (vars[*c], *v)).chain(Some((Variable::One(), *constant))).collect();
         cs.constrain(lc);
     }
 }
 
-fn range32<CS: CircuitBuilder>(cs: &mut CS, vars: &[Variable], vals: Option<&[u64]>) -> Result<(), R1CSError> {
+fn range32<CS: CircuitBuilder<Scalar>>(cs: &mut CS, vars: &[Variable], vals: Option<&[u64]>) -> Result<(), R1CSError> {
     let byte = cs.table((0..256u64).map(|x| vec![x]).collect())?;
     for (i, x) in vars.iter().enumerate() {
         let mut sum = LinearCombination::default();
@@ -121,7 +122,7 @@ fn main() {
         Some("bp") => Backend::Bp,
         _ => Backend::Bppp,
     };
-    let pc = PedersenGens::default();
+    let pc = PedersenGens::<Ristretto>::default();
     let mut rng = ChaCha20Rng::seed_from_u64(7);
     let (prove_ms, verify_ms, bytes, label) = match mode {
         "wnla" => {

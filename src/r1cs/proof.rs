@@ -5,7 +5,7 @@ use core::marker::PhantomData;
 
 use group::Group;
 
-use crate::curve::{Curve, Field, PointEncoding, Ristretto};
+use crate::curve::{Curve, Field, PointEncoding};
 use crate::errors::R1CSError;
 use crate::inner_product_proof::InnerProductProof;
 use crate::util;
@@ -33,7 +33,7 @@ const TWO_PHASE_COMMITMENTS: u8 = 1;
 /// [`Verifier::verify`](crate::r1cs::Verifier::verify) to verify the
 /// proof.
 #[derive(Clone, Debug)]
-pub struct R1CSProof<C: Curve = Ristretto>(pub(super) ProofKind<C>);
+pub struct R1CSProof<C: Curve>(pub(super) ProofKind<C>);
 
 /// The backend-specific content of an [`R1CSProof`].
 #[derive(Clone, Debug)]

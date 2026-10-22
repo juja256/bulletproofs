@@ -43,7 +43,7 @@ struct Statement {
 
 impl Statement {
     fn new() -> Self {
-        Statement { pc: PedersenGens::<Secp256k1>::for_curve(), bp: BulletproofGens::<Secp256k1>::for_curve(256, 1) }
+        Statement { pc: PedersenGens::<Secp256k1>::default(), bp: BulletproofGens::<Secp256k1>::new(256, 1) }
     }
 
     fn prove(&self, seed: u64, lookup: bool) -> (R1CSProof<Secp256k1>, Vec<Secp256k1Compressed>) {
@@ -61,7 +61,7 @@ impl Statement {
     /// The lowered circuit and its generators, as the verifier builds them.
     fn circuit(&self, V: &[Secp256k1Compressed], lookup: bool) -> crate::bppp::ReciprocalCircuit<S> {
         let mut ct = CompileTranscript::new(b"circuit");
-        let mut v = Verifier::<_, Secp256k1>::for_curve(&mut ct);
+        let mut v = Verifier::<_, Secp256k1>::new(&mut ct);
         v.set_backend(Backend::Bppp);
         let x = v.commit(V[0]);
         let y = v.commit(V[1]);

@@ -106,6 +106,7 @@ impl<'a, C: Curve, R: RngCore + CryptoRng> BatchVerifier<'a, C, R> {
 
 #[cfg(test)]
 mod tests {
+    use crate::curve::Ristretto;
     use super::*;
     #[allow(unused_imports)]
     use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
@@ -118,8 +119,8 @@ mod tests {
     /// Circuit and reciprocal proofs in one batch, also next to a range proof; a bad one fails.
     #[test]
     fn circuits_and_reciprocals() {
-        let pc = PedersenGens::default();
-        let bp = BulletproofGens::new(256, 1);
+        let pc = PedersenGens::<Ristretto>::default();
+        let bp = BulletproofGens::<Ristretto>::new(256, 1);
         let mut rng = ChaCha20Rng::seed_from_u64(1);
         let st = RangeStatement::new(16, alloc::vec![(0, 1 << 64)]).unwrap();
         let (rc, info) = st.circuit();
@@ -133,7 +134,7 @@ mod tests {
         let (ac, aw) = rc.compiled_for_test(&w, Scalar::ZERO, alpha);
         let ag = BpppGens::new(&pc, &bp, ac.n_lin, ac.n_m).unwrap();
         let cp = super::super::circuit::prove(&ac, &ag, &V, &aw, &mut Transcript::new(b"c"), &mut rng).unwrap();
-        let run = |rp: &CircuitProof, cp: &CircuitProof| {
+        let run = |rp: &CircuitProof<Ristretto>, cp: &CircuitProof<Ristretto>| {
             let mut b = BatchVerifier::new(&pc, &bp, ChaCha20Rng::seed_from_u64(2));
             b.add_reciprocal(&ReciprocalProof(rp.clone()), &rc, &V, &mut Transcript::new(b"r"))?;
             b.add_circuit(cp, &ac, &V, &mut Transcript::new(b"c"))?;

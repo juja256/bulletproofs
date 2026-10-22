@@ -13,7 +13,7 @@ use super::gens::BpppGens;
 use super::reciprocal::{self, Pole, ReciprocalCircuit, ReciprocalRow, ReciprocalWitness};
 use super::sparse::SparseMatrix;
 use super::transcript::BpppTranscript;
-use crate::curve::{Curve, Field, Ristretto};
+use crate::curve::{Curve, Field};
 use crate::errors::ProofError;
 use crate::{BulletproofGens, PedersenGens};
 
@@ -250,7 +250,7 @@ impl RangeStatement {
 
 /// A BP++ range proof for several values (spec §5.2).
 #[derive(Clone, Debug, PartialEq)]
-pub struct RangeProof<C: Curve = Ristretto>(pub(crate) CircuitProof<C>);
+pub struct RangeProof<C: Curve>(pub(crate) CircuitProof<C>);
 
 impl<C: Curve> RangeProof<C> {
     /// Prove `values[i] in [A_i, B_i)` for commitments `values[i] B + blindings[i] B_blinding`;
@@ -320,6 +320,7 @@ impl<C: Curve> RangeProof<C> {
 
 #[cfg(test)]
 mod tests {
+    use crate::curve::Ristretto;
     use super::*;
     #[allow(unused_imports)]
     use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
@@ -398,7 +399,7 @@ mod tests {
         assert_eq!(ct_div(u64::MAX as u128 * 2, 1 << 64), 1);
     }
 
-    fn gens(st: &RangeStatement) -> (PedersenGens, BulletproofGens) {
+    fn gens(st: &RangeStatement) -> (PedersenGens<Ristretto>, BulletproofGens<Ristretto>) {
         (PedersenGens::default(), BulletproofGens::new(st.generators_capacity(), 1))
     }
 

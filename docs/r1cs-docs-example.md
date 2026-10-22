@@ -391,7 +391,7 @@ Because only the prover knows the scalar values of the inputs and outputs, and t
 # extern crate rand;
 # 
 # use bulletproofs::r1cs::*;
-# use bulletproofs::{BulletproofGens, PedersenGens};
+# use bulletproofs::{BulletproofGens, PedersenGens, Ristretto};
 # use curve25519_dalek::ristretto::CompressedRistretto;
 # use curve25519_dalek::scalar::Scalar;
 # use merlin::Transcript;
@@ -516,7 +516,7 @@ Because only the prover knows the scalar values of the inputs and outputs, and t
 # }
 # fn main() {
 // Construct generators. 1024 Bulletproofs generators is enough for 512-size shuffles.
-let pc_gens = PedersenGens::default();
+let pc_gens = PedersenGens::<Ristretto>::default();
 let bp_gens = BulletproofGens::new(1024, 1);
 
 // Putting the prover code in its own scope means we can't

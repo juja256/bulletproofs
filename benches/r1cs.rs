@@ -25,14 +25,15 @@ use curve25519_dalek::scalar::Scalar;
 use merlin::Transcript;
 use rand::seq::SliceRandom;
 use rand::Rng;
+use bulletproofs::curve::Ristretto;
 
 // Shuffle gadget (documented in markdown file)
 
 /// A proof-of-shuffle.
-struct ShuffleProof(R1CSProof);
+struct ShuffleProof(R1CSProof<Ristretto>);
 
 impl ShuffleProof {
-    fn gadget<CS: RandomizableConstraintSystem>(
+    fn gadget<CS: RandomizableConstraintSystem<Scalar>>(
         cs: &mut CS,
         x: Vec<Variable>,
         y: Vec<Variable>,
@@ -79,8 +80,8 @@ impl ShuffleProof {
     ///
     /// Returns a tuple `(proof, input_commitments || output_commitments)`.
     pub fn prove<'a, 'b>(
-        pc_gens: &'b PedersenGens,
-        bp_gens: &'b BulletproofGens,
+        pc_gens: &'b PedersenGens<Ristretto>,
+        bp_gens: &'b BulletproofGens<Ristretto>,
         transcript: &'a mut Transcript,
         input: &[Scalar],
         output: &[Scalar],
@@ -126,8 +127,8 @@ impl ShuffleProof {
     /// Attempt to verify a `ShuffleProof`.
     pub fn verify<'a, 'b>(
         &self,
-        pc_gens: &'b PedersenGens,
-        bp_gens: &'b BulletproofGens,
+        pc_gens: &'b PedersenGens<Ristretto>,
+        bp_gens: &'b BulletproofGens<Ristretto>,
         transcript: &'a mut Transcript,
         input_commitments: &Vec<CompressedRistretto>,
         output_commitments: &Vec<CompressedRistretto>,

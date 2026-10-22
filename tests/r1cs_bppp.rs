@@ -12,11 +12,12 @@ use curve25519_dalek::scalar::Scalar;
 use merlin::Transcript;
 use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha20Rng;
+use bulletproofs::curve::Ristretto;
 
 /// The statement: committed `x, y, z` with `x * y = z`, and a committed `v` with an `n`-bit
 /// decomposition (`b (1 - b) = 0`, `sum 2^i b_i = v`), plus one lone `allocate()` that leaves a
 /// pending multiplier, constrained to 3.
-fn gadget<CS: ConstraintSystem>(cs: &mut CS, vars: &[Variable], bits: Option<u64>, n: usize) -> Result<(), R1CSError> {
+fn gadget<CS: ConstraintSystem<Scalar>>(cs: &mut CS, vars: &[Variable], bits: Option<u64>, n: usize) -> Result<(), R1CSError> {
     let (_, _, o) = cs.multiply(vars[0].into(), vars[1].into());
     cs.constrain(o - vars[2]);
     let mut sum = LinearCombination::default();
@@ -35,7 +36,7 @@ fn gadget<CS: ConstraintSystem>(cs: &mut CS, vars: &[Variable], bits: Option<u64
     Ok(())
 }
 
-fn prove(backend: Backend, values: [u64; 4], n: usize, pc: &PedersenGens, bp: &BulletproofGens) -> Result<(R1CSProof, Vec<CompressedRistretto>), R1CSError> {
+fn prove(backend: Backend, values: [u64; 4], n: usize, pc: &PedersenGens<Ristretto>, bp: &BulletproofGens<Ristretto>) -> Result<(R1CSProof<Ristretto>, Vec<CompressedRistretto>), R1CSError> {
     let mut rng = ChaCha20Rng::seed_from_u64(values[3]);
     let mut t = Transcript::new(b"r1cs-bppp");
     let mut prover = Prover::new(pc, &mut t);
@@ -46,7 +47,7 @@ fn prove(backend: Backend, values: [u64; 4], n: usize, pc: &PedersenGens, bp: &B
     Ok((proof, V))
 }
 
-fn verify(backend: Backend, proof: &R1CSProof, V: &[CompressedRistretto], n: usize, pc: &PedersenGens, bp: &BulletproofGens) -> Result<(), R1CSError> {
+fn verify(backend: Backend, proof: &R1CSProof<Ristretto>, V: &[CompressedRistretto], n: usize, pc: &PedersenGens<Ristretto>, bp: &BulletproofGens<Ristretto>) -> Result<(), R1CSError> {
     let mut t = Transcript::new(b"r1cs-bppp");
     let mut verifier = Verifier::new(&mut t);
     verifier.set_backend(backend);
@@ -96,7 +97,7 @@ fn unsatisfied_witness_does_not_verify() {
 /// Several constant terms in one constraint add up (`(x + 1) + 2 - c = 0` with `c = x + 3`).
 #[test]
 fn several_constants_in_one_constraint() {
-    let pc = PedersenGens::default();
+    let pc = PedersenGens::<Ristretto>::default();
     let bp = BulletproofGens::new(16, 1);
     let mut t = Transcript::new(b"consts");
     let mut prover = Prover::new(&pc, &mut t);
@@ -121,7 +122,7 @@ fn several_constants_in_one_constraint() {
 /// otherwise alias another column).
 #[test]
 fn foreign_variables_are_gadget_errors() {
-    let pc = PedersenGens::default();
+    let pc = PedersenGens::<Ristretto>::default();
     let bp = BulletproofGens::new(16, 1);
     for var in [Variable::MultiplierLeft(1), Variable::MultiplierOutput(5), Variable::Committed(1)] {
         let mut t = Transcript::new(b"foreign");
@@ -139,7 +140,7 @@ fn foreign_variables_are_gadget_errors() {
 
 #[test]
 fn no_commitments_and_no_multipliers() {
-    let pc = PedersenGens::default();
+    let pc = PedersenGens::<Ristretto>::default();
     let bp = BulletproofGens::new(16, 1);
     // no commitments: a product of allocated values
     let run = |backend: Backend| {
@@ -178,7 +179,7 @@ fn no_commitments_and_no_multipliers() {
 /// `C_R`, where right wires are unbound); both sides return a gadget error.
 #[test]
 fn randomized_constraints_need_bp() {
-    let pc = PedersenGens::default();
+    let pc = PedersenGens::<Ristretto>::default();
     let bp = BulletproofGens::new(16, 1);
     let mut t = Transcript::new(b"rand");
     let mut prover = Prover::new(&pc, &mut t);
@@ -303,7 +304,7 @@ fn one_encoding_for_every_constraint_system() {
 /// builder `Witness` in a plain constraint is a `GadgetError` on both sides.
 #[test]
 fn plain_corner_cases() {
-    let pc = PedersenGens::default();
+    let pc = PedersenGens::<Ristretto>::default();
     let bp = BulletproofGens::new(16, 1);
     let mut t = Transcript::new(b"empty");
     let mut p = Prover::new(&pc, &mut t);

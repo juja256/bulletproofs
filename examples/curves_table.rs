@@ -44,8 +44,8 @@ fn row(curve: &str, proof: &str, backend: &str, size: usize, prove: f64, verify:
 
 fn range<C: Curve>(runs: usize) {
     let mut rng = ChaCha20Rng::seed_from_u64(1);
-    let pc = PedersenGens::<C>::for_curve();
-    let bp = BulletproofGens::<C>::for_curve(64, 1);
+    let pc = PedersenGens::<C>::default();
+    let bp = BulletproofGens::<C>::new(64, 1);
     let b = C::Scalar::random(&mut rng);
     let (proof, v) = RangeProof::<C>::prove_single_with_rng(&bp, &pc, &mut Transcript::new(b"t"), 7, &b, 64, &mut rng).unwrap();
     let prove = median(|| drop(RangeProof::<C>::prove_single_with_rng(&bp, &pc, &mut Transcript::new(b"t"), 7, &b, 64, &mut rng)), runs);
@@ -53,7 +53,7 @@ fn range<C: Curve>(runs: usize) {
     row(C::NAME, "range 64 bits", "BP", proof.to_bytes().len(), prove, verify);
 
     let st = RangeStatement::new(16, vec![(0, 1 << 64)]).unwrap();
-    let bp = BulletproofGens::<C>::for_curve(st.generators_capacity(), 1);
+    let bp = BulletproofGens::<C>::new(st.generators_capacity(), 1);
     let (proof, v) = BpppRangeProof::<C>::prove(&st, &pc, &bp, &[7], &[b], &mut Transcript::new(b"t"), &mut rng).unwrap();
     let prove = median(|| drop(BpppRangeProof::<C>::prove(&st, &pc, &bp, &[7], &[b], &mut Transcript::new(b"t"), &mut rng)), runs);
     let verify = median(|| proof.verify(&st, &pc, &bp, &v, &mut Transcript::new(b"t")).unwrap(), runs);
@@ -73,8 +73,8 @@ fn chain<C: Curve, CS: ConstraintSystem<C::Scalar>>(cs: &mut CS, x0: Variable, n
 
 fn r1cs<C: Curve>(n: usize, backend: Backend, runs: usize) {
     let mut rng = ChaCha20Rng::seed_from_u64(2);
-    let pc = PedersenGens::<C>::for_curve();
-    let bp = BulletproofGens::<C>::for_curve(2 * n + 64, 1);
+    let pc = PedersenGens::<C>::default();
+    let bp = BulletproofGens::<C>::new(2 * n + 64, 1);
     let mut x = C::Scalar::from(3u64);
     let pairs: Vec<(C::Scalar, C::Scalar)> = (0..n)
         .map(|_| {
@@ -98,7 +98,7 @@ fn r1cs<C: Curve>(n: usize, backend: Backend, runs: usize) {
     let verify = median(
         || {
             let mut t = Transcript::new(b"c");
-            let mut v = Verifier::<_, C>::for_curve(&mut t);
+            let mut v = Verifier::<_, C>::new(&mut t);
             v.set_backend(backend);
             let x0 = v.commit(c);
             chain::<C, _>(&mut v, x0, n, None);

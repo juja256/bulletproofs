@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use ff::Field as _;
 use rand_core::{CryptoRng, RngCore};
 
-use crate::curve::{Curve, Field, PointEncoding, Ristretto};
+use crate::curve::{Curve, Field, PointEncoding};
 use crate::errors::ProofError;
 use crate::inner_product_proof::inner_product;
 use crate::transcript::{TranscriptBackend, TranscriptProtocol};
@@ -18,7 +18,7 @@ use crate::util;
 ///
 /// Prove that <a, b> = c where a is secret and b is public.
 #[derive(Clone, Debug)]
-pub struct LinearProof<C: Curve = Ristretto> {
+pub struct LinearProof<C: Curve> {
     pub(crate) L_vec: Vec<C::Compressed>,
     pub(crate) R_vec: Vec<C::Compressed>,
     /// A commitment to the base case elements
@@ -386,6 +386,7 @@ impl<C: Curve> LinearProof<C> {
 
 #[cfg(test)]
 mod tests {
+    use crate::curve::Ristretto;
     use super::*;
     use merlin::Transcript;
     use core::iter;
@@ -397,10 +398,10 @@ mod tests {
         let mut rng = rand::thread_rng();
 
         use crate::generators::{BulletproofGens, PedersenGens};
-        let bp_gens = BulletproofGens::new(n, 1);
+        let bp_gens = BulletproofGens::<Ristretto>::new(n, 1);
         let G: Vec<RistrettoPoint> = bp_gens.share(0).G(n).cloned().collect();
 
-        let pedersen_gens = PedersenGens::default();
+        let pedersen_gens = PedersenGens::<Ristretto>::default();
         let F = pedersen_gens.B;
         let B = pedersen_gens.B_blinding;
 

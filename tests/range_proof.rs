@@ -10,6 +10,7 @@ use merlin::Transcript;
 use bulletproofs::{BulletproofGens, PedersenGens, RangeProof};
 
 use hex;
+use bulletproofs::curve::Ristretto;
 
 // Tests that proofs generated with v1.0.0 continue to verify in later versions.
 #[test]
@@ -80,7 +81,7 @@ fn deserialize_and_verify() {
     .map(|res| res.unwrap())
     .collect();
 
-    let pc_gens = PedersenGens::default();
+    let pc_gens = PedersenGens::<Ristretto>::default();
     let bp_gens = BulletproofGens::new(64, 8);
 
     for i in 0..4 {
@@ -103,8 +104,8 @@ fn deserialize_and_verify() {
 //#[test]
 #[allow(dead_code)]
 fn generate_test_vectors() {
-    let pc_gens = PedersenGens::default();
-    let bp_gens = BulletproofGens::new(64, 8);
+    let pc_gens = PedersenGens::<Ristretto>::default();
+    let bp_gens = BulletproofGens::<Ristretto>::new(64, 8);
 
     // Use a deterministic RNG for proving, so the test vectors can be
     // generated reproducibly.

@@ -18,7 +18,7 @@ use ff::Field as _;
 use rand_core::{CryptoRng, RngCore};
 use zeroize::Zeroize;
 
-use crate::curve::{Curve, Ristretto};
+use crate::curve::Curve;
 
 use crate::errors::MPCError;
 use crate::generators::{BulletproofGens, PedersenGens};
@@ -61,7 +61,7 @@ impl Party {
 }
 
 /// A party waiting for the dealer to assign their position in the aggregation.
-pub struct PartyAwaitingPosition<'a, C: Curve = Ristretto> {
+pub struct PartyAwaitingPosition<'a, C: Curve> {
     bp_gens: &'a BulletproofGens<C>,
     pc_gens: &'a PedersenGens<C>,
     n: usize,
@@ -153,7 +153,7 @@ impl<'a, C: Curve> Drop for PartyAwaitingPosition<'a, C> {
 
 /// A party which has committed to the bits of its value
 /// and is waiting for the aggregated value challenge from the dealer.
-pub struct PartyAwaitingBitChallenge<'a, C: Curve = Ristretto> {
+pub struct PartyAwaitingBitChallenge<'a, C: Curve> {
     n: usize, // bitsize of the range
     v: u64,
     v_blinding: C::Scalar,
@@ -259,7 +259,7 @@ impl<'a, C: Curve> Drop for PartyAwaitingBitChallenge<'a, C> {
 
 /// A party which has committed to their polynomial coefficents
 /// and is waiting for the polynomial challenge from the dealer.
-pub struct PartyAwaitingPolyChallenge<C: Curve = Ristretto> {
+pub struct PartyAwaitingPolyChallenge<C: Curve> {
     offset_zz: C::Scalar,
     l_poly: util::VecPoly1<C::Scalar>,
     r_poly: util::VecPoly1<C::Scalar>,

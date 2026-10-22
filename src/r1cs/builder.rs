@@ -3,7 +3,6 @@
 //! `verify` to Bulletproofs (§7.5, logUp over randomized constraints) or to a BP++ reciprocal
 //! form circuit (§7.6).
 
-use curve25519_dalek::scalar::Scalar;
 use subtle::Choice;
 
 use super::{ConstraintSystem, LinearCombination, RandomizedConstraintSystem, Variable};
@@ -95,7 +94,7 @@ impl Reciprocal {
 /// Constraint systems that build circuits with lookups and reciprocal arguments (spec §7),
 /// implemented by [`Prover`](super::Prover) and [`Verifier`](super::Verifier) for both
 /// backends. All operations belong to the first phase; every variable they read must exist.
-pub trait CircuitBuilder<F: Field = Scalar>: ConstraintSystem<F> {
+pub trait CircuitBuilder<F: Field>: ConstraintSystem<F> {
     /// A free witness (BP: half a multiplier; BP++: a slot of `w_O`, no gate).
     fn witness(&mut self, v: Option<F>) -> Result<Variable, R1CSError>;
 
@@ -492,6 +491,7 @@ pub(super) fn needs_early_copy<F: Field>(lc: &LinearCombination<F>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use curve25519_dalek::scalar::Scalar;
     use super::*;
 
     type Builder = super::Builder<Scalar>;
@@ -587,7 +587,7 @@ mod tests {
             b.lookup(t, &[(*x).into()], C).unwrap();
         }
         let vals = [Scalar::from(1u64), Scalar::from(2u64), Scalar::from(1u64)];
-        let eval = |lc: &LinearCombination| {
+        let eval = |lc: &LinearCombination<Scalar>| {
             lc.terms.iter().map(|(x, c)| c * if let Variable::Witness(i) = x { vals[*i] } else { Scalar::ONE }).sum()
         };
         let cost = b.cost(0, 0);
@@ -602,7 +602,7 @@ mod tests {
         let x = b.witness();
         let t = b.table(vec![vec![1]]).unwrap();
         b.lookup(t, &[x.into()], C).unwrap();
-        let zero = |_: &LinearCombination| Scalar::ZERO;
+        let zero = |_: &LinearCombination<Scalar>| Scalar::ZERO;
         assert!(b.finalize(Some(&zero)).is_err());
     }
 
@@ -649,7 +649,7 @@ mod tests {
             for i in 0..n_w {
                 b.lookup(t, &[w[2 * i].into(), w[2 * i + 1].into()], C).unwrap();
             }
-            let eval = |lc: &LinearCombination| {
+            let eval = |lc: &LinearCombination<Scalar>| {
                 lc.terms
                     .iter()
                     .map(|(x, c)| match x {

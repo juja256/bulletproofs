@@ -117,7 +117,7 @@ let proof = prover.prove(&bp_gens)?;
 // compiler: the same records, the same circuit
 let mut ct = CompileTranscript::new(b"app");
 ct.append_message(SIGHASH_LABEL, &[0; 32]);          // becomes jet_sig_all_hash
-let mut v = Verifier::<_, Secp256k1>::for_curve(&mut ct);
+let mut v = Verifier::<_, Secp256k1>::new(&mut ct);
 v.set_backend(Backend::Bppp);
 // ... commit(V), gadgets ...
 let sv = v.compile_to_simplicity(&pc_gens, &bp_gens)?;

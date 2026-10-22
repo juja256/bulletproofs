@@ -8,13 +8,13 @@ use core::iter;
 
 use ff::Field as _;
 
-use crate::curve::{Curve, Field, PointEncoding, Ristretto};
+use crate::curve::{Curve, Field, PointEncoding};
 use crate::errors::ProofError;
 use crate::transcript::{TranscriptBackend, TranscriptProtocol};
 use crate::util;
 
 #[derive(Clone, Debug)]
-pub struct InnerProductProof<C: Curve = Ristretto> {
+pub struct InnerProductProof<C: Curve> {
     pub(crate) L_vec: Vec<C::Compressed>,
     pub(crate) R_vec: Vec<C::Compressed>,
     pub(crate) a: C::Scalar,
@@ -498,6 +498,7 @@ pub fn inner_product<F: crate::curve::Field>(a: &[F], b: &[F]) -> F {
 
 #[cfg(test)]
 mod tests {
+    use crate::curve::Ristretto;
     use super::*;
     use merlin::Transcript;
     use curve25519_dalek::ristretto::RistrettoPoint;
@@ -511,7 +512,7 @@ mod tests {
         let mut rng = rand::thread_rng();
 
         use crate::generators::BulletproofGens;
-        let bp_gens = BulletproofGens::new(n, 1);
+        let bp_gens = BulletproofGens::<Ristretto>::new(n, 1);
         let G: Vec<RistrettoPoint> = bp_gens.share(0).G(n).cloned().collect();
         let H: Vec<RistrettoPoint> = bp_gens.share(0).H(n).cloned().collect();
 

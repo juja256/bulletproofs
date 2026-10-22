@@ -19,12 +19,12 @@ use ff::Field as _;
 
 use super::terms::Terms;
 use super::transcript::BpppTranscript;
-use crate::curve::{Curve, Field, PointEncoding, Ristretto};
+use crate::curve::{Curve, Field, PointEncoding};
 use crate::errors::ProofError;
 use crate::util;
 
 /// Public input of the argument. `h_vec` and `c` have the length of `l`, `n_vec` that of `n`.
-pub struct WnlaStatement<'a, C: Curve = Ristretto> {
+pub struct WnlaStatement<'a, C: Curve> {
     /// Value generator `G`.
     pub g: &'a C::Point,
     /// Generators of the linear part `l`.
@@ -39,7 +39,7 @@ pub struct WnlaStatement<'a, C: Curve = Ristretto> {
 
 /// A WNLA proof: one `(X, R)` pair per round and the final vectors.
 #[derive(Clone, Debug, PartialEq)]
-pub struct WnlaProof<C: Curve = Ristretto> {
+pub struct WnlaProof<C: Curve> {
     /// `X_r`, the `gamma` coefficients.
     pub X: Vec<C::Compressed>,
     /// `R_r`, the `gamma^2 - 1` coefficients.
@@ -53,7 +53,7 @@ pub struct WnlaProof<C: Curve = Ristretto> {
 /// Scalars of the verification equation (spec §2.4):
 /// `g*G + <h, H> + <n, N> - C - sum_r (gamma_r X_r + (gamma_r^2 - 1) R_r) = 0`.
 /// The circuit verifier merges them into its own multiscalar multiplication.
-pub struct WnlaScalars<F: Field = curve25519_dalek::scalar::Scalar> {
+pub struct WnlaScalars<F: Field> {
     /// Coefficient of `G` (the value `v` of the final vectors).
     pub g: F,
     /// Coefficients of `H`.
@@ -476,6 +476,7 @@ impl<C: Curve> WnlaProof<C> {
 
 #[cfg(test)]
 mod tests {
+    use crate::curve::Ristretto;
     use crate::bppp::testutil::{sc, scs};
     use super::*;
     use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
@@ -656,7 +657,7 @@ mod tests {
             let n: Vec<Scalar> = (0..b).map(|_| Scalar::random(&mut rng)).collect();
             let C = st.commit(&l, &n);
             let proof = prove(&st, &C, &mut Transcript::new(b"t"), l, n).unwrap();
-            let ok = |p: &WnlaProof, C: &RistrettoPoint| p.verify(&st, C, &mut Transcript::new(b"t")).is_ok();
+            let ok = |p: &WnlaProof<Ristretto>, C: &RistrettoPoint| p.verify(&st, C, &mut Transcript::new(b"t")).is_ok();
             assert!(ok(&proof, &C), "{}x{}", a, b);
             assert_eq!(WnlaProof::<Ristretto>::from_bytes(&proof.to_bytes(), a, b).unwrap(), proof);
             assert!(!ok(&proof, &(C + G)), "{}x{}: wrong commitment", a, b);

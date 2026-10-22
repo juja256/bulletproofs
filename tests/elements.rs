@@ -24,7 +24,7 @@ fn range_proofs_over_elements_commitments() {
     let commitment = Secp256k1::compress(&elements::commitment_parse(&published).unwrap());
 
     // BP: 64-bit range proof; the prover's commitment is the Elements one
-    let bp = BulletproofGens::<Secp256k1>::for_curve(64, 1);
+    let bp = BulletproofGens::<Secp256k1>::new(64, 1);
     let (proof, v) =
         RangeProof::<Secp256k1>::prove_single_with_rng(&bp, &pc, &mut Transcript::new(b"elements"), value, &blinding, 64, &mut rng).unwrap();
     assert_eq!(v, commitment);
@@ -32,7 +32,7 @@ fn range_proofs_over_elements_commitments() {
 
     // BP++: a range proof over the same commitment
     let st = RangeStatement::new(16, vec![(0, 1 << 64)]).unwrap();
-    let bp2 = BulletproofGens::<Secp256k1>::for_curve(st.generators_capacity(), 1);
+    let bp2 = BulletproofGens::<Secp256k1>::new(st.generators_capacity(), 1);
     let (proof, v) = BpppRangeProof::<Secp256k1>::prove(&st, &pc, &bp2, &[value], &[blinding], &mut Transcript::new(b"e"), &mut rng).unwrap();
     assert_eq!(v, vec![commitment]);
     let parsed = BpppRangeProof::<Secp256k1>::from_bytes(&proof.to_bytes(), &st).unwrap();
@@ -43,6 +43,6 @@ fn range_proofs_over_elements_commitments() {
     assert!(parsed.verify(&st, &other, &bp2, &[commitment], &mut Transcript::new(b"e")).is_err());
     // the default generators use H (secp256k1-zkp's default value generator, not Liquid's)
     let h = PedersenGens::<Secp256k1>::with_value_generator(elements::h());
-    let d = PedersenGens::<Secp256k1>::for_curve();
+    let d = PedersenGens::<Secp256k1>::default();
     assert_eq!((h.B, h.B_blinding), (d.B, d.B_blinding));
 }

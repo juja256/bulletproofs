@@ -11,7 +11,7 @@ use core::marker::PhantomData;
 use digest::{ExtendableOutput, Update, XofReader};
 use sha3::{Shake256, Shake256Reader};
 
-use crate::curve::{Curve, Ristretto};
+use crate::curve::Curve;
 
 /// Represents a pair of base points for Pedersen commitments.
 ///
@@ -26,7 +26,7 @@ use crate::curve::{Curve, Ristretto};
 /// * `B_blinding`: the result of `ristretto255` SHA3-512
 /// hash-to-group on input `B_bytes`.
 #[derive(Copy, Clone)]
-pub struct PedersenGens<C: Curve = Ristretto> {
+pub struct PedersenGens<C: Curve> {
     /// Base for the committed value
     pub B: C::Point,
     /// Base for the blinding factor
@@ -34,24 +34,17 @@ pub struct PedersenGens<C: Curve = Ristretto> {
 }
 
 impl<C: Curve> PedersenGens<C> {
-    /// The standard generators of the curve `C` (`Curve::default_pedersen`).
-    pub fn for_curve() -> Self {
-        let (B, B_blinding) = C::default_pedersen();
-        PedersenGens { B, B_blinding }
-    }
-
     /// Creates a Pedersen commitment using the value scalar and a blinding factor.
     pub fn commit(&self, value: C::Scalar, blinding: C::Scalar) -> C::Point {
         C::msm_ct(&[value, blinding], &[self.B, self.B_blinding])
     }
 }
 
-/// The ristretto255 generators. `Default` is implemented for the default curve only, so that
-/// `PedersenGens::default()` keeps inferring ristretto255 (default type parameters do not take
-/// part in inference); other curves use [`PedersenGens::for_curve`].
-impl Default for PedersenGens<Ristretto> {
+/// The standard generators of the curve `C` (`Curve::default_pedersen`).
+impl<C: Curve> Default for PedersenGens<C> {
     fn default() -> Self {
-        Self::for_curve()
+        let (B, B_blinding) = C::default_pedersen();
+        PedersenGens { B, B_blinding }
     }
 }
 
@@ -59,7 +52,7 @@ impl Default for PedersenGens<Ristretto> {
 impl PedersenGens<crate::curve::Secp256k1> {
     /// Generators for commitments to a value of the asset with generator `gen` (an
     /// `elements::generator_generate(_blinded)` output, the asset tag of a Liquid output; or
-    /// `elements::h()`, secp256k1-zkp's default H, which is `for_curve()`): `B = gen`,
+    /// `elements::h()`, secp256k1-zkp's default H, which is `default()`): `B = gen`,
     /// `B_blinding = G`.
     pub fn with_value_generator(gen: k256::ProjectivePoint) -> Self {
         PedersenGens { B: gen, B_blinding: k256::ProjectivePoint::GENERATOR }
@@ -176,7 +169,7 @@ impl<C: Curve> Iterator for GeneratorsChain<C> {
 /// constraint system proofs, since the generators are namespaced by
 /// their party index.
 #[derive(Clone)]
-pub struct BulletproofGens<C: Curve = Ristretto> {
+pub struct BulletproofGens<C: Curve> {
     /// The maximum number of usable generators for each party.
     pub gens_capacity: usize,
     /// Number of values or parties
@@ -185,15 +178,6 @@ pub struct BulletproofGens<C: Curve = Ristretto> {
     G_vec: Vec<Vec<C::Point>>,
     /// Precomputed \\(\mathbf H\\) generators for each party.
     H_vec: Vec<Vec<C::Point>>,
-}
-
-impl BulletproofGens<Ristretto> {
-    /// Create a new `BulletproofGens` object over ristretto255 (other curves:
-    /// [`BulletproofGens::for_curve`]; `new` is defined for the default curve only so that
-    /// `BulletproofGens::new(..)` keeps inferring it).
-    pub fn new(gens_capacity: usize, party_capacity: usize) -> Self {
-        Self::for_curve(gens_capacity, party_capacity)
-    }
 }
 
 impl<C: Curve> BulletproofGens<C> {
@@ -209,7 +193,7 @@ impl<C: Curve> BulletproofGens<C> {
     ///
     /// * `party_capacity` is the maximum number of parties that can
     ///    produce an aggregated proof.
-    pub fn for_curve(gens_capacity: usize, party_capacity: usize) -> Self {
+    pub fn new(gens_capacity: usize, party_capacity: usize) -> Self {
         let mut gens = BulletproofGens {
             gens_capacity: 0,
             party_capacity,
@@ -316,7 +300,7 @@ impl<'a, P> Iterator for AggregatedGensIter<'a, P> {
 /// provides a view of the generators for one of the `m` parties' shares.
 ///
 /// The `BulletproofGensShare` is produced by [`BulletproofGens::share()`].
-pub struct BulletproofGensShare<'a, C: Curve = Ristretto> {
+pub struct BulletproofGensShare<'a, C: Curve> {
     /// The parent object that this is a view into
     gens: &'a BulletproofGens<C>,
     /// Which share we are
@@ -350,12 +334,13 @@ impl<'a, C: Curve> BulletproofGensShare<'a, C> {
 
 #[cfg(test)]
 mod tests {
+    use crate::curve::Ristretto;
     use super::*;
     use curve25519_dalek::ristretto::RistrettoPoint;
 
     #[test]
     fn aggregated_gens_iter_matches_flat_map() {
-        let gens = BulletproofGens::new(64, 8);
+        let gens = BulletproofGens::<Ristretto>::new(64, 8);
 
         let helper = |n: usize, m: usize| {
             let agg_G: Vec<RistrettoPoint> = gens.G(n, m).cloned().collect();
@@ -396,9 +381,9 @@ mod tests {
 
     #[test]
     fn resizing_small_gens_matches_creating_bigger_gens() {
-        let gens = BulletproofGens::new(64, 8);
+        let gens = BulletproofGens::<Ristretto>::new(64, 8);
 
-        let mut gen_resized = BulletproofGens::new(32, 8);
+        let mut gen_resized = BulletproofGens::<Ristretto>::new(32, 8);
         gen_resized.increase_capacity(64);
 
         let helper = |n: usize, m: usize| {

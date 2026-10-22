@@ -8,7 +8,8 @@ use std::time::Instant;
 
 use bulletproofs::curve::Secp256k1;
 use bulletproofs::r1cs::{lc, Backend, ConstraintSystem, Prover, Variable, Verifier};
-use bulletproofs::secp256k1::{BulletproofGens, PedersenGens, Scalar};
+use bulletproofs::{BulletproofGens, PedersenGens};
+use k256::Scalar;
 use bulletproofs::simplicity::{dummy_env, sighash_of, CompileTranscript, SIGHASH_LABEL};
 use bulletproofs::{Sha256Transcript, TranscriptBackend};
 use rand_chacha::rand_core::SeedableRng;
@@ -31,8 +32,8 @@ fn main() {
     println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     for lg in 1..=max {
         let n = 1usize << lg;
-        let pc = PedersenGens::for_curve();
-        let bp = BulletproofGens::for_curve(2 * n + 64, 1);
+        let pc = PedersenGens::<Secp256k1>::default();
+        let bp = BulletproofGens::<Secp256k1>::new(2 * n + 64, 1);
         let mut last = x;
         for _ in 0..n {
             last *= x;
@@ -49,7 +50,7 @@ fn main() {
         let t0 = Instant::now();
         let mut ct = CompileTranscript::new(b"chain");
         ct.append_message(SIGHASH_LABEL, &[0u8; 32]);
-        let mut v = Verifier::<_, Secp256k1>::for_curve(&mut ct);
+        let mut v = Verifier::<_, Secp256k1>::new(&mut ct);
         v.set_backend(Backend::Bppp);
         let xv = v.commit(cx);
         chain(&mut v, xv, n, last);

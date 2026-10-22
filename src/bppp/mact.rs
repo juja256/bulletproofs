@@ -19,14 +19,14 @@ use super::range::{decompose, layout, multiplicities, table_rows};
 use super::reciprocal::{self, ReciprocalCircuit, ReciprocalRow, ReciprocalWitness};
 use super::sparse::SparseMatrix;
 use super::transcript::BpppTranscript;
-use crate::curve::{Curve, Field, Ristretto};
+use crate::curve::{Curve, Field};
 use crate::errors::ProofError;
 use crate::{BulletproofGens, PedersenGens};
 
 /// An input or output: amount, asset type (a scalar, e.g. a hash of the asset id) and blinding.
 /// Committed as `amount B + blinding B_blinding + asset H_7` (spec §5.3). `Debug` hides it.
 #[derive(Clone, Copy)]
-pub struct MactEntry<F: Field = Scalar> {
+pub struct MactEntry<F: Field> {
     /// The amount.
     pub amount: u64,
     /// The asset type.
@@ -190,7 +190,7 @@ impl MactLayout {
 
 /// A BP++ multi-asset transaction proof (spec §5.3).
 #[derive(Clone, Debug, PartialEq)]
-pub struct MactProof<C: Curve = Ristretto>(pub(crate) CircuitProof<C>);
+pub struct MactProof<C: Curve>(pub(crate) CircuitProof<C>);
 
 impl<C: Curve> MactProof<C> {
     /// Prove that `inputs` and `outputs` balance per asset type and that the outputs are in
@@ -260,6 +260,7 @@ impl<C: Curve> MactProof<C> {
 
 #[cfg(test)]
 mod tests {
+    use crate::curve::Ristretto;
     use super::*;
     #[allow(unused_imports)]
     use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
@@ -269,16 +270,16 @@ mod tests {
     use rand_chacha::rand_core::SeedableRng;
     use rand_chacha::ChaCha20Rng;
 
-    fn entry(amount: u64, asset: u64, rng: &mut ChaCha20Rng) -> MactEntry {
+    fn entry(amount: u64, asset: u64, rng: &mut ChaCha20Rng) -> MactEntry<Scalar> {
         MactEntry { amount, asset: Scalar::from(asset) * Scalar::from(0x1234_5678u64), blinding: Scalar::random(rng) }
     }
 
     fn run(base: u64, ins: &[(u64, u64)], outs: &[(u64, u64)], rng: &mut ChaCha20Rng) -> Result<(), ProofError> {
         let st = MactStatement::new(base, ins.len(), outs.len())?;
-        let pc = PedersenGens::default();
+        let pc = PedersenGens::<Ristretto>::default();
         let bp = BulletproofGens::new(st.generators_capacity(), 1);
-        let inputs: Vec<MactEntry> = ins.iter().map(|&(a, t)| entry(a, t, rng)).collect();
-        let outputs: Vec<MactEntry> = outs.iter().map(|&(a, t)| entry(a, t, rng)).collect();
+        let inputs: Vec<MactEntry<Scalar>> = ins.iter().map(|&(a, t)| entry(a, t, rng)).collect();
+        let outputs: Vec<MactEntry<Scalar>> = outs.iter().map(|&(a, t)| entry(a, t, rng)).collect();
         let (proof, V) = MactProof::prove(&st, &pc, &bp, &inputs, &outputs, &mut Transcript::new(b"m"), rng)?;
         assert_eq!(MactProof::from_bytes(&proof.to_bytes(), &st).unwrap(), proof);
         proof.verify(&st, &pc, &bp, &V, &mut Transcript::new(b"m"))
@@ -306,11 +307,11 @@ mod tests {
         ] {
             assert!(run(16, &ins, &outs, &mut rng).is_err());
             let st = MactStatement::new(16, ins.len(), outs.len()).unwrap();
-            let pc = PedersenGens::default();
-            let bp = BulletproofGens::new(st.generators_capacity(), 1);
+            let pc = PedersenGens::<Ristretto>::default();
+            let bp = BulletproofGens::<Ristretto>::new(st.generators_capacity(), 1);
             let g = st.gens(&pc, &bp).unwrap();
             let (c, info) = st.circuit();
-            let entries: Vec<MactEntry> = ins.iter().chain(&outs).map(|&(a, t)| entry(a, t, &mut rng)).collect();
+            let entries: Vec<MactEntry<Scalar>> = ins.iter().chain(&outs).map(|&(a, t)| entry(a, t, &mut rng)).collect();
             let digits: Vec<Vec<u64>> = outs.iter().map(|&(a, _)| decompose(a as u128, &info.layout)).collect();
             let w = info.witness(&entries, &digits);
             let V: Vec<CompressedRistretto> =
@@ -379,8 +380,8 @@ mod tests {
     fn negative_output_is_rejected() {
         let mut rng = ChaCha20Rng::seed_from_u64(53);
         let st = MactStatement::new(16, 1, 2).unwrap();
-        let pc = PedersenGens::default();
-        let bp = BulletproofGens::new(st.generators_capacity(), 1);
+        let pc = PedersenGens::<Ristretto>::default();
+        let bp = BulletproofGens::<Ristretto>::new(st.generators_capacity(), 1);
         let g = st.gens(&pc, &bp).unwrap();
         let (c, info) = st.circuit();
         let t = Scalar::from(77u64);
@@ -403,8 +404,8 @@ mod tests {
     fn output_digit_out_of_range_is_rejected() {
         let mut rng = ChaCha20Rng::seed_from_u64(52);
         let st = MactStatement::new(16, 1, 2).unwrap();
-        let pc = PedersenGens::default();
-        let bp = BulletproofGens::new(st.generators_capacity(), 1);
+        let pc = PedersenGens::<Ristretto>::default();
+        let bp = BulletproofGens::<Ristretto>::new(st.generators_capacity(), 1);
         let g = st.gens(&pc, &bp).unwrap();
         let (c, info) = st.circuit();
         // in 46 = out 30 + out 16, balanced, but the second output is written with the digit

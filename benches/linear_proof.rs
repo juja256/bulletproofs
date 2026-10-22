@@ -17,6 +17,7 @@ use curve25519_dalek::ristretto::RistrettoPoint;
 use curve25519_dalek::scalar::Scalar;
 use curve25519_dalek::traits::VartimeMultiscalarMul;
 use merlin::Transcript;
+use bulletproofs::curve::Ristretto;
 
 /// Different linear proof vector lengths to try
 static TEST_SIZES: [usize; 5] = [64, 128, 256, 512, 1024];
@@ -27,13 +28,13 @@ fn create_linear_proof_helper(c: &mut Criterion) {
         move |bench, n| {
             let mut rng = rand::thread_rng();
 
-            let bp_gens = BulletproofGens::new(*n, 1);
+            let bp_gens = BulletproofGens::<Ristretto>::new(*n, 1);
             // Calls `.G()` on generators, which should be a pub(crate) function only.
             // For now, make that function public so it can be accessed from benches.
             // We don't want to use bp_gens directly because we don't need the H generators.
             let G: Vec<RistrettoPoint> = bp_gens.share(0).G(*n).cloned().collect();
 
-            let pedersen_gens = PedersenGens::default();
+            let pedersen_gens = PedersenGens::<Ristretto>::default();
             let F = pedersen_gens.B;
             let B = pedersen_gens.B_blinding;
 
@@ -102,14 +103,14 @@ fn linear_verify(c: &mut Criterion) {
     c.bench_function_over_inputs(
         "linear proof verification",
         move |bench, n| {
-            let bp_gens = BulletproofGens::new(*n, 1);
+            let bp_gens = BulletproofGens::<Ristretto>::new(*n, 1);
             let mut rng = rand::thread_rng();
 
             // Calls `.G()` on generators, which should be a pub(crate) function only.
             // For now, make that function public so it can be accessed from benches.
             // We can't simply use bp_gens directly because we don't need the H generators.
             let G: Vec<RistrettoPoint> = bp_gens.share(0).G(*n).cloned().collect();
-            let pedersen_gens = PedersenGens::default();
+            let pedersen_gens = PedersenGens::<Ristretto>::default();
             let F = pedersen_gens.B;
             let B = pedersen_gens.B_blinding;
 

@@ -13,6 +13,7 @@ use bulletproofs::{BulletproofGens, PedersenGens, RangeProof};
 use curve25519_dalek::scalar::Scalar;
 use merlin::Transcript;
 use rand_core::{CryptoRng, RngCore};
+use bulletproofs::curve::Ristretto;
 
 /// A fixed "RNG" (64-bit LCG) — for test vectors only.
 struct FixedRng(u64);
@@ -41,7 +42,7 @@ fn hex(b: &[u8]) -> String {
 
 /// Shuffle gadget (as in tests/r1cs.rs): committed inputs, multipliers and randomized
 /// (second-phase) constraints.
-fn shuffle<CS: RandomizableConstraintSystem>(cs: &mut CS, x: Vec<Variable>, y: Vec<Variable>) -> Result<(), R1CSError> {
+fn shuffle<CS: RandomizableConstraintSystem<Scalar>>(cs: &mut CS, x: Vec<Variable>, y: Vec<Variable>) -> Result<(), R1CSError> {
     let k = x.len();
     if k == 1 {
         cs.constrain(y[0] - x[0]);
@@ -67,7 +68,7 @@ fn shuffle<CS: RandomizableConstraintSystem>(cs: &mut CS, x: Vec<Variable>, y: V
 /// A circuit with committed values, a first phase (multipliers, allocations, linear
 /// constraints with repeated and non-unit coefficients) and a second phase.
 fn circuit_proof(k: usize) -> (Vec<u8>, bool) {
-    let pc_gens = PedersenGens::default();
+    let pc_gens = PedersenGens::<Ristretto>::default();
     let bp_gens = BulletproofGens::new((2 * k + 8).next_power_of_two(), 1);
     let xs: Vec<u64> = (0..k as u64).map(|i| 3 * i + 1).collect();
     let ys: Vec<u64> = xs.iter().rev().copied().collect();
@@ -78,7 +79,7 @@ fn circuit_proof(k: usize) -> (Vec<u8>, bool) {
         xs.iter().enumerate().map(|(i, v)| prover.commit(Scalar::from(*v), Scalar::from(1000 + i as u64))).unzip();
     let (comms_y, vars_y): (Vec<_>, Vec<_>) =
         ys.iter().enumerate().map(|(i, v)| prover.commit(Scalar::from(*v), Scalar::from(2000 + i as u64))).unzip();
-    let extra = |cs: &mut dyn ConstraintSystem, vals: Option<&[u64]>| {
+    let extra = |cs: &mut dyn ConstraintSystem<Scalar>, vals: Option<&[u64]>| {
         // squares of the first few inputs, an unpaired allocation, a weighted sum
         for i in 0..3 {
             let a = vals.map(|v| Scalar::from(v[i]));
@@ -104,7 +105,7 @@ fn circuit_proof(k: usize) -> (Vec<u8>, bool) {
 }
 
 fn range_proof_bytes() -> Vec<u8> {
-    let pc_gens = PedersenGens::default();
+    let pc_gens = PedersenGens::<Ristretto>::default();
     let bp_gens = BulletproofGens::new(64, 8);
     let values = [3u64, 1 << 40, 77, u32::MAX as u64];
     let blindings: Vec<Scalar> = (0..4u64).map(|i| Scalar::from(31 + i)).collect();

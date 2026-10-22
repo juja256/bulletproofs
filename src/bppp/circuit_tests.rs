@@ -11,6 +11,7 @@ use crate::{BulletproofGens, PedersenGens};
 use merlin::Transcript;
 use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha20Rng;
+use crate::curve::Ristretto;
 
 struct Shape {
     n_m: usize,
@@ -28,7 +29,7 @@ fn rand_vec(rng: &mut ChaCha20Rng, n: usize) -> Vec<Scalar> {
     (0..n).map(|_| Scalar::random(rng)).collect()
 }
 
-fn sparse(rng: &mut ChaCha20Rng, rows: usize, cols: usize) -> SparseMatrix {
+fn sparse(rng: &mut ChaCha20Rng, rows: usize, cols: usize) -> SparseMatrix<Scalar> {
     use rand_chacha::rand_core::RngCore;
     let mut m = SparseMatrix::new(cols);
     for _ in 0..rows {
@@ -45,7 +46,7 @@ fn sparse(rng: &mut ChaCha20Rng, rows: usize, cols: usize) -> SparseMatrix {
 
 /// A random circuit with a satisfying witness: `W_l`, `W_m` and the witness are random,
 /// `a_l` and `a_m` are chosen to satisfy the circuit.
-fn instance(rng: &mut ChaCha20Rng, s: &Shape) -> (ArithmeticCircuit, CircuitWitness) {
+fn instance(rng: &mut ChaCha20Rng, s: &Shape) -> (ArithmeticCircuit<Scalar>, CircuitWitness<Scalar>) {
     let n_w = 2 * s.n_m + s.n_o;
     let w = CircuitWitness {
         w_l: rand_vec(rng, s.n_m),
@@ -115,11 +116,11 @@ fn shapes() -> Vec<Shape> {
     out
 }
 
-fn gens_for(c: &ArithmeticCircuit) -> (PedersenGens, BulletproofGens) {
+fn gens_for(c: &ArithmeticCircuit<Scalar>) -> (PedersenGens<Ristretto>, BulletproofGens<Ristretto>) {
     (PedersenGens::default(), BulletproofGens::new(c.gens_capacity(), 1))
 }
 
-fn commitments(g: &BpppGens, w: &CircuitWitness) -> Vec<CompressedRistretto> {
+fn commitments(g: &BpppGens<'_, Ristretto>, w: &CircuitWitness<Scalar>) -> Vec<CompressedRistretto> {
     w.v.iter().zip(&w.s).map(|(v, s)| g.commit_input(v, *s).compress()).collect()
 }
 
@@ -135,7 +136,7 @@ fn prove_unchecked<C: Curve, T: BpppTranscript + ?Sized, R: RngCore + CryptoRng>
     prove_impl(c, g, V, w, t, |_, _| rng, false)
 }
 
-fn prove_and_verify(c: &ArithmeticCircuit, w: &CircuitWitness, rng: &mut ChaCha20Rng) -> Result<(), ProofError> {
+fn prove_and_verify(c: &ArithmeticCircuit<Scalar>, w: &CircuitWitness<Scalar>, rng: &mut ChaCha20Rng) -> Result<(), ProofError> {
     let (pc, bp) = gens_for(c);
     let g = BpppGens::new(&pc, &bp, c.n_lin, c.n_m)?;
     let V = commitments(&g, w);
@@ -156,7 +157,7 @@ where
         include_str!("../../tests/vectors/bppp/circuit.json"),
         include_str!("../../tests/vectors/bppp/secp256k1/circuit.json"),
     );
-    let pc = PedersenGens::<C>::for_curve();
+    let pc = PedersenGens::<C>::default();
     for case in file["cases"].as_array().unwrap() {
         let name = case["name"].as_str().unwrap();
         let u = |k: &str| case[k].as_u64().unwrap() as usize;
@@ -190,7 +191,7 @@ where
             s: scs(&case["s"]),
         };
         assert_eq!(c.is_satisfied(&w), case["satisfied"].as_bool().unwrap(), "{}", name);
-        let bp = BulletproofGens::<C>::for_curve(crate::bppp::gens::capacity(n_lin, n_m), 1);
+        let bp = BulletproofGens::<C>::new(crate::bppp::gens::capacity(n_lin, n_m), 1);
         let g = BpppGens::new(&pc, &bp, n_lin, n_m).unwrap();
         let point = |p: &serde_json::Value| crate::bppp::testutil::sym_point::<C>(p, &g.g, &g.h, g.n);
         let V: Vec<C::Compressed> = w.v.iter().zip(&w.s).map(|(v, s)| C::compress(&g.commit_input(v, *s))).collect();
@@ -275,7 +276,7 @@ fn unsatisfied_witnesses_are_rejected() {
 
 #[test]
 fn scalar_inputs_are_pedersen_commitments() {
-    let pc = PedersenGens::default();
+    let pc = PedersenGens::<Ristretto>::default();
     let bp = BulletproofGens::new(16, 1);
     let g = BpppGens::new(&pc, &bp, 3, 16).unwrap();
     let (v, s) = (Scalar::from(1234u64), Scalar::from(99u64));
@@ -512,7 +513,7 @@ fn malformed_inputs_are_errors() {
     let bytes = proof.to_bytes();
     assert!(CircuitProof::<Ristretto>::from_bytes(&bytes[1..], &c).is_err());
     assert!(CircuitProof::<Ristretto>::from_bytes(&[], &c).is_err());
-    let ok = |p: &CircuitProof, V: &[CompressedRistretto]| p.verify(&c, &g, V, &mut Transcript::new(b"t")).is_ok();
+    let ok = |p: &CircuitProof<Ristretto>, V: &[CompressedRistretto]| p.verify(&c, &g, V, &mut Transcript::new(b"t")).is_ok();
     assert!(ok(&proof, &V));
     assert!(!ok(&proof, &V[..1]), "missing input");
     let mut swapped = V.clone();

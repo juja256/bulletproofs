@@ -134,14 +134,14 @@ pub fn map_index<T: Send, F: Fn(usize) -> T + Sync + Send>(n: usize, f: F) -> Ve
 
 
 /// Represents a degree-1 vector polynomial \\(\mathbf{a} + \mathbf{b} \cdot x\\).
-pub struct VecPoly1<F: Field = Scalar>(pub Vec<F>, pub Vec<F>);
+pub struct VecPoly1<F: Field>(pub Vec<F>, pub Vec<F>);
 
 /// Represents a degree-2 scalar polynomial \\(a + b \cdot x + c \cdot x^2\\)
-pub struct Poly2<F: Field = Scalar>(pub F, pub F, pub F);
+pub struct Poly2<F: Field>(pub F, pub F, pub F);
 
 /// Represents a degree-6 scalar polynomial, without the zeroth degree
 /// \\(a \cdot x + b \cdot x^2 + c \cdot x^3 + d \cdot x^4 + e \cdot x^5 + f \cdot x^6\\)
-pub struct Poly6<F: Field = Scalar> {
+pub struct Poly6<F: Field> {
     pub t1: F,
     pub t2: F,
     pub t3: F,
@@ -153,7 +153,7 @@ pub struct Poly6<F: Field = Scalar> {
 /// Provides an iterator over the powers of a `Scalar`.
 ///
 /// This struct is created by the `exp_iter` function.
-pub struct ScalarExp<F: Field = Scalar> {
+pub struct ScalarExp<F: Field> {
     x: F,
     next_exp_x: F,
 }

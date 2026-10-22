@@ -9,6 +9,7 @@ use curve25519_dalek::ristretto::RistrettoPoint;
 use curve25519_dalek::scalar::Scalar;
 use merlin::Transcript;
 use sha3::Sha3_512;
+use bulletproofs::curve::Ristretto;
 
 fn points(label: &str, n: usize) -> Vec<RistrettoPoint> {
     (0..n)
@@ -65,7 +66,7 @@ fn gates(n: usize) -> Gates {
     Gates { n, w_l, w_r, w_o, rows }
 }
 
-fn bppp_circuit(g: &Gates) -> (bppp::ArithmeticCircuit, bppp::CircuitWitness) {
+fn bppp_circuit(g: &Gates) -> (bppp::ArithmeticCircuit<Scalar>, bppp::CircuitWitness<Scalar>) {
     let n = g.n;
     let mut w_l = bppp::SparseMatrix::new(3 * n);
     for (terms, _) in &g.rows {
@@ -118,13 +119,13 @@ fn r1cs_bench(
     c: &mut Criterion,
     k: usize,
     g: &Gates,
-    pc: &bulletproofs::PedersenGens,
-    bp: &bulletproofs::BulletproofGens,
+    pc: &bulletproofs::PedersenGens<Ristretto>,
+    bp: &bulletproofs::BulletproofGens<Ristretto>,
 ) {
     use bulletproofs::r1cs::{ConstraintSystem, LinearCombination, Prover, Variable, Verifier};
-    fn constrain<CS: ConstraintSystem>(cs: &mut CS, g: &Gates, vars: &[Variable]) {
+    fn constrain<CS: ConstraintSystem<Scalar>>(cs: &mut CS, g: &Gates, vars: &[Variable]) {
         for (terms, constant) in &g.rows {
-            let lc: LinearCombination =
+            let lc: LinearCombination<Scalar> =
                 terms.iter().map(|(col, v)| (vars[*col], *v)).chain(core::iter::once((Variable::One(), *constant))).collect();
             cs.constrain(lc);
         }
@@ -181,7 +182,7 @@ fn r1cs_bench(
 /// 64-bit range proof: the BP++ front end (base 16, inline multiplicities) against the BP
 /// `RangeProof`.
 fn range_bench(c: &mut Criterion) {
-    let pc = bulletproofs::PedersenGens::default();
+    let pc = bulletproofs::PedersenGens::<Ristretto>::default();
     let value = 0x0123_4567_89ab_cdefu64;
     let blinding = Scalar::from(12345u64);
     let st = bppp::RangeStatement::new(16, vec![(0, 1 << 64)]).unwrap();
@@ -226,7 +227,7 @@ fn range_bench(c: &mut Criterion) {
 /// backends of the circuit builder.
 fn builder_bench(c: &mut Criterion) {
     use bulletproofs::r1cs::{Backend, CircuitBuilder, ConstraintSystem, LinearCombination, Prover, R1CSError, Variable, Verifier};
-    fn gadget<CS: CircuitBuilder>(cs: &mut CS, vars: &[Variable], vals: Option<&[u64]>) -> Result<(), R1CSError> {
+    fn gadget<CS: CircuitBuilder<Scalar>>(cs: &mut CS, vars: &[Variable], vals: Option<&[u64]>) -> Result<(), R1CSError> {
         let byte = cs.table((0..256u64).map(|x| vec![x]).collect())?;
         for (i, x) in vars.iter().enumerate() {
             let mut sum = LinearCombination::default();
@@ -238,7 +239,7 @@ fn builder_bench(c: &mut Criterion) {
         }
         Ok(())
     }
-    let pc = bulletproofs::PedersenGens::default();
+    let pc = bulletproofs::PedersenGens::<Ristretto>::default();
     let bp = bulletproofs::BulletproofGens::new(1 << 13, 1);
     for &n in &[64usize, 1024] {
         let vals: Vec<u64> = (0..n as u64).map(|i| i.wrapping_mul(0x9e37_79b9) & 0xffff_ffff).collect();

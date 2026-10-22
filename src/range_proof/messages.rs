@@ -9,14 +9,14 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::iter;
 
-use crate::curve::{Curve, Ristretto};
+use crate::curve::Curve;
 use crate::generators::{BulletproofGens, PedersenGens};
 
 /// A commitment to the bits of a party's value. The points are encoded (for ristretto255 the
 /// serialization is that of the upstream crate, which serializes points compressed).
 #[derive(Serialize, Deserialize, Copy, Clone, Debug)]
 #[serde(bound = "")]
-pub struct BitCommitment<C: Curve = Ristretto> {
+pub struct BitCommitment<C: Curve> {
     pub(super) V_j: C::Compressed,
     pub(super) A_j: C::Compressed,
     pub(super) S_j: C::Compressed,
@@ -25,7 +25,7 @@ pub struct BitCommitment<C: Curve = Ristretto> {
 /// Challenge values derived from all parties' [`BitCommitment`]s.
 #[derive(Serialize, Deserialize, Copy, Clone, Debug)]
 #[serde(bound = "")]
-pub struct BitChallenge<C: Curve = Ristretto> {
+pub struct BitChallenge<C: Curve> {
     pub(super) y: C::Scalar,
     pub(super) z: C::Scalar,
 }
@@ -33,7 +33,7 @@ pub struct BitChallenge<C: Curve = Ristretto> {
 /// A commitment to a party's polynomial coefficents.
 #[derive(Serialize, Deserialize, Copy, Clone, Debug)]
 #[serde(bound = "")]
-pub struct PolyCommitment<C: Curve = Ristretto> {
+pub struct PolyCommitment<C: Curve> {
     pub(super) T_1_j: C::Compressed,
     pub(super) T_2_j: C::Compressed,
 }
@@ -41,7 +41,7 @@ pub struct PolyCommitment<C: Curve = Ristretto> {
 /// Challenge values derived from all parties' [`PolyCommitment`]s.
 #[derive(Serialize, Deserialize, Copy, Clone, Debug)]
 #[serde(bound = "")]
-pub struct PolyChallenge<C: Curve = Ristretto> {
+pub struct PolyChallenge<C: Curve> {
     pub(super) x: C::Scalar,
 }
 
@@ -49,7 +49,7 @@ pub struct PolyChallenge<C: Curve = Ristretto> {
 /// [`RangeProof`](::RangeProof).
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(bound = "")]
-pub struct ProofShare<C: Curve = Ristretto> {
+pub struct ProofShare<C: Curve> {
     pub(super) t_x: C::Scalar,
     pub(super) t_x_blinding: C::Scalar,
     pub(super) e_blinding: C::Scalar,

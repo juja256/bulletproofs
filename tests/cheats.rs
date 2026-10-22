@@ -8,8 +8,9 @@ use bulletproofs::r1cs::*;
 use bulletproofs::{BulletproofGens, PedersenGens};
 use curve25519_dalek::scalar::Scalar;
 use merlin::Transcript;
+use bulletproofs::curve::Ristretto;
 
-type Lc = LinearCombination;
+type Lc = LinearCombination<Scalar>;
 
 fn backends() -> Vec<Backend> {
     #[allow(unused_mut)]
@@ -30,7 +31,7 @@ enum Fault {
     Linear,
 }
 
-fn gadget<CS: CircuitBuilder>(cs: &mut CS, fault: Fault, prover: bool) -> Result<(), R1CSError> {
+fn gadget<CS: CircuitBuilder<Scalar>>(cs: &mut CS, fault: Fault, prover: bool) -> Result<(), R1CSError> {
     let v = |x: u64| if prover { Some(Scalar::from(x)) } else { None };
     let byte = cs.table((0..256u64).map(|x| vec![x]).collect())?;
     let b = cs.witness(v(if matches!(fault, Fault::Lookup) { 256 } else { 17 }))?;
@@ -48,7 +49,7 @@ fn gadget<CS: CircuitBuilder>(cs: &mut CS, fault: Fault, prover: bool) -> Result
     Ok(())
 }
 
-fn prove(backend: Backend, fault: Fault) -> Result<R1CSProof, R1CSError> {
+fn prove(backend: Backend, fault: Fault) -> Result<R1CSProof<Ristretto>, R1CSError> {
     let pc = PedersenGens::default();
     let mut t = Transcript::new(b"cheats");
     let mut p = Prover::new(&pc, &mut t);
@@ -58,7 +59,7 @@ fn prove(backend: Backend, fault: Fault) -> Result<R1CSProof, R1CSError> {
     p.prove(&BulletproofGens::new(cap.next_power_of_two(), 1))
 }
 
-fn verify(backend: Backend, proof: &R1CSProof) -> Result<(), R1CSError> {
+fn verify(backend: Backend, proof: &R1CSProof<Ristretto>) -> Result<(), R1CSError> {
     let pc = PedersenGens::default();
     let mut t = Transcript::new(b"cheats");
     let mut v = Verifier::new(&mut t);

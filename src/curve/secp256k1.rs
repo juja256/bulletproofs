@@ -339,13 +339,13 @@ mod tests {
             "0250929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0"
         );
         assert_eq!(bb, ProjectivePoint::GENERATOR);
-        let pc = crate::PedersenGens::<Secp256k1>::for_curve();
+        let pc = crate::PedersenGens::<Secp256k1>::default();
         assert_eq!((pc.B, pc.B_blinding), (b, bb));
         // hash to curve: deterministic, distinct, never the identity
         let (u1, u2) = (Secp256k1::point_from_uniform(&[1; 64]), Secp256k1::point_from_uniform(&[2; 64]));
         assert_eq!(u1, Secp256k1::point_from_uniform(&[1; 64]));
         assert!(u1 != u2 && !bool::from(u1.is_identity()));
-        let bp = crate::BulletproofGens::<Secp256k1>::for_curve(4, 2);
+        let bp = crate::BulletproofGens::<Secp256k1>::new(4, 2);
         let g: Vec<ProjectivePoint> = bp.share(1).G(4).cloned().collect();
         assert!(g.windows(2).all(|w| w[0] != w[1]));
     }

@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use core::iter::once;
 
 
-use crate::curve::{Curve, Ristretto};
+use crate::curve::Curve;
 use crate::errors::ProofError;
 use crate::{BulletproofGens, PedersenGens};
 
@@ -16,7 +16,7 @@ pub(crate) const H_FIXED: usize = 7;
 /// The generators of one circuit shape, taken from the BP generators so that both backends
 /// share one setup: `G = B`, `H = [B_blinding, H_0, ..., H_{5 + n_lin}]`, `N = G_0..G_{n_m}`
 /// (party 0 of `BulletproofGens`).
-pub struct BpppGens<'a, C: Curve = Ristretto> {
+pub struct BpppGens<'a, C: Curve> {
     /// Value generator `G`.
     pub g: C::Point,
     /// Blinding and linear-part generators, `H_FIXED + n_lin` (`7 + n_lin`) of them; `h[0]`

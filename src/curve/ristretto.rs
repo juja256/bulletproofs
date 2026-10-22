@@ -114,7 +114,7 @@ mod tests {
         assert_eq!(<Scalar as Field>::from_bytes32(&[0xff; 32]), None);
         assert_eq!(Ristretto::point_from_uniform(&wide), RistrettoPoint::from_uniform_bytes(&wide));
         let (b, bb) = Ristretto::default_pedersen();
-        let pg = crate::PedersenGens::default();
+        let pg = crate::PedersenGens::<Ristretto>::default();
         assert_eq!((b, bb), (pg.B, pg.B_blinding));
         let mut inv = s[..5].to_vec();
         let all = <Scalar as Field>::batch_invert(&mut inv);

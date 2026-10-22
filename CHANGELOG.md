@@ -10,6 +10,12 @@ Entries are listed in reverse chronological order.
     (`sha256-transcript`) are always compiled; `std` is always on (no no_std); `nightly` and
     `docs` are gone. The BP++ norm argument always runs in variable time (the former
     `bppp-vartime`; same proofs).
+  * Constructors: one per type, generic over the curve, and no default type parameters
+    (`C: Curve = Ristretto`, `F: Field = Scalar` are gone). `PedersenGens::<C>::default()`,
+    `BulletproofGens::<C>::new(gens, parties)`, `Verifier::<T, C>::new(transcript)`;
+    `for_curve` and the module `bulletproofs::secp256k1` (aliases over secp256k1) are gone.
+    Code that relied on the default names the curve once, usually on the generators
+    (`PedersenGens::<Ristretto>::default()`); the rest is inferred.
 * Transcripts: every protocol takes its Fiat–Shamir transcript as `&mut T` for any
   `T: TranscriptBackend`; `merlin::Transcript` stays the default with byte-identical proofs.
   New `Sha256Transcript` (feature `sha256-transcript`, on with `secp256k1`): a transcript on

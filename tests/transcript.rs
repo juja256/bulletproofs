@@ -52,7 +52,7 @@ impl bulletproofs::TranscriptRef for Counting {
 /// Aggregated range proofs run the MPC dealer and the inner-product argument.
 #[test]
 fn a_delegating_backend_gives_merlin_range_proofs() {
-    let (bp, pc) = (BulletproofGens::new(64, 2), PedersenGens::default());
+    let (bp, pc) = (BulletproofGens::new(64, 2), PedersenGens::<Ristretto>::default());
     let blindings = [Scalar::from(1u8), Scalar::from(2u8)];
     let mut m = Transcript::new(b"t");
     let (merlin_proof, _) =
@@ -77,9 +77,9 @@ fn a_delegating_backend_gives_merlin_range_proofs() {
 #[test]
 fn a_delegating_backend_gives_merlin_linear_proofs() {
     let n = 8;
-    let bp = BulletproofGens::new(n, 1);
+    let bp = BulletproofGens::<Ristretto>::new(n, 1);
     let G: Vec<RistrettoPoint> = bp.share(0).G(n).cloned().collect();
-    let pc = PedersenGens::default();
+    let pc = PedersenGens::<Ristretto>::default();
     let (F, B) = (pc.B, pc.B_blinding);
     let a: Vec<Scalar> = (0..n as u64).map(|i| Scalar::from(i + 3)).collect();
     let b: Vec<Scalar> = (0..n as u64).map(|i| Scalar::from(2 * i + 1)).collect();
@@ -109,7 +109,7 @@ mod r1cs {
 
     /// `x · y = 15` with committed `x = 3`, `y = 5`; `bind` appends extra data through the
     /// constraint system's transcript, as a gadget would.
-    fn product<CS: ConstraintSystem>(cs: &mut CS, x: Variable, y: Variable, bind: bool) {
+    fn product<CS: ConstraintSystem<Scalar>>(cs: &mut CS, x: Variable, y: Variable, bind: bool) {
         if bind {
             cs.transcript().append_message(b"ctx", b"gadget data");
         }
@@ -119,7 +119,7 @@ mod r1cs {
 
     use bulletproofs::r1cs::Variable;
 
-    fn prove<T: TranscriptRef>(t: T, backend: Backend, bind: bool) -> (R1CSProof, Vec<CompressedRistretto>, T) {
+    fn prove<T: TranscriptRef>(t: T, backend: Backend, bind: bool) -> (R1CSProof<Ristretto>, Vec<CompressedRistretto>, T) {
         let (pc, bp) = (PedersenGens::default(), BulletproofGens::new(64, 1));
         let mut p = Prover::new(&pc, t);
         p.set_backend(backend);
@@ -130,7 +130,7 @@ mod r1cs {
         (proof, vec![cx, cy], t)
     }
 
-    fn verify<T: TranscriptRef>(t: T, backend: Backend, bind: bool, proof: &R1CSProof, V: &[CompressedRistretto]) -> Result<T, bulletproofs::r1cs::R1CSError> {
+    fn verify<T: TranscriptRef>(t: T, backend: Backend, bind: bool, proof: &R1CSProof<Ristretto>, V: &[CompressedRistretto]) -> Result<T, bulletproofs::r1cs::R1CSError> {
         let (pc, bp) = (PedersenGens::default(), BulletproofGens::new(64, 1));
         let mut v = Verifier::new(t);
         v.set_backend(backend);
@@ -300,8 +300,8 @@ mod all_protocols {
     }
 
     fn range<C: Curve, T: TranscriptBackend + Clone, U: TranscriptBackend>(t: Mk<T>, u: Mk<U>) {
-        let pc = PedersenGens::<C>::for_curve();
-        let bp = BulletproofGens::<C>::for_curve(64, 4);
+        let pc = PedersenGens::<C>::default();
+        let bp = BulletproofGens::<C>::new(64, 4);
         let mut rng = ChaCha20Rng::seed_from_u64(5);
         let blind = C::Scalar::random(&mut rng);
         let (proof, com) = RangeProof::<C>::prove_single_with_rng(&bp, &pc, &mut t(b"rt"), 1_234_567, &blind, 32, &mut rng).unwrap();
@@ -319,8 +319,8 @@ mod all_protocols {
     /// The dealer verifies the shares with a clone of its initial transcript.
     fn mpc<C: Curve, T: TranscriptBackend + Clone, U: TranscriptBackend>(t: Mk<T>, u: Mk<U>) {
         use bulletproofs::range_proof_mpc::{dealer::Dealer, party::Party};
-        let pc = PedersenGens::<C>::for_curve();
-        let bp = BulletproofGens::<C>::for_curve(16, 2);
+        let pc = PedersenGens::<C>::default();
+        let bp = BulletproofGens::<C>::new(16, 2);
         let mut rng = ChaCha20Rng::seed_from_u64(6);
         let mut transcript = t(b"rt");
         let dealer = Dealer::new(&bp, &pc, &mut transcript, 16, 2).unwrap();
@@ -342,8 +342,8 @@ mod all_protocols {
     fn linear<C: Curve, T: TranscriptBackend + Clone, U: TranscriptBackend>(t: Mk<T>, u: Mk<U>) {
         let mut rng = ChaCha20Rng::seed_from_u64(7);
         let n = 8;
-        let pc = PedersenGens::<C>::for_curve();
-        let bp = BulletproofGens::<C>::for_curve(n, 1);
+        let pc = PedersenGens::<C>::default();
+        let bp = BulletproofGens::<C>::new(n, 1);
         let G: Vec<C::Point> = bp.share(0).G(n).cloned().collect();
         let a: Vec<C::Scalar> = (0..n).map(|_| C::Scalar::random(&mut rng)).collect();
         let b: Vec<C::Scalar> = (0..n).map(|_| C::Scalar::random(&mut rng)).collect();
@@ -377,8 +377,8 @@ mod all_protocols {
                 .unwrap();
             }
         }
-        let pc = PedersenGens::<C>::for_curve();
-        let bp = BulletproofGens::<C>::for_curve(16, 1);
+        let pc = PedersenGens::<C>::default();
+        let bp = BulletproofGens::<C>::new(16, 1);
         let mut rng = ChaCha20Rng::seed_from_u64(8);
         let mut pt = t(b"rt");
         let mut p = Prover::new(&pc, &mut pt);
@@ -391,7 +391,7 @@ mod all_protocols {
             macro_rules! go {
                 ($tr:expr) => {{
                     let mut tr = $tr;
-                    let mut v = Verifier::<_, C>::for_curve(&mut tr);
+                    let mut v = Verifier::<_, C>::new(&mut tr);
                     v.set_backend(backend);
                     let x = v.commit(cx);
                     let y = v.commit(cy);
@@ -427,8 +427,8 @@ mod all_protocols {
         use bulletproofs::bppp::{BatchVerifier, RangeProof, RangeStatement};
         let mut rng = ChaCha20Rng::seed_from_u64(9);
         let st = RangeStatement::new(16, vec![(0, 1 << 32), (10, 1000)]).unwrap();
-        let pc = PedersenGens::<C>::for_curve();
-        let bp = BulletproofGens::<C>::for_curve(st.generators_capacity(), 1);
+        let pc = PedersenGens::<C>::default();
+        let bp = BulletproofGens::<C>::new(st.generators_capacity(), 1);
         let blinds: Vec<C::Scalar> = (0..2).map(|_| C::Scalar::random(&mut rng)).collect();
         let (proof, V) = RangeProof::<C>::prove(&st, &pc, &bp, &[123_456, 999], &blinds, &mut t(b"rt"), &mut rng).unwrap();
         proof.verify(&st, &pc, &bp, &V, &mut t(b"rt")).unwrap();
@@ -448,8 +448,8 @@ mod all_protocols {
         use bulletproofs::bppp::{MactEntry, MactProof, MactStatement};
         let mut rng = ChaCha20Rng::seed_from_u64(11);
         let st = MactStatement::new(16, 2, 2).unwrap();
-        let pc = PedersenGens::<C>::for_curve();
-        let bp = BulletproofGens::<C>::for_curve(st.generators_capacity(), 1);
+        let pc = PedersenGens::<C>::default();
+        let bp = BulletproofGens::<C>::new(st.generators_capacity(), 1);
         let (a, b) = (C::Scalar::random(&mut rng), C::Scalar::random(&mut rng));
         let e = |amount: u64, asset: C::Scalar, rng: &mut ChaCha20Rng| MactEntry { amount, asset, blinding: C::Scalar::random(rng) };
         let inputs = [e(40, a, &mut rng), e(7, b, &mut rng)];
@@ -496,8 +496,8 @@ mod all_protocols {
             partition: (0..n).map(|i| (Slot::NormO, i)).collect(),
         };
         let wit = CircuitWitness { w_l, w_r, w_o, v: vec![], s: vec![] };
-        let pc = PedersenGens::<C>::for_curve();
-        let bp = BulletproofGens::<C>::for_curve(8, 1);
+        let pc = PedersenGens::<C>::default();
+        let bp = BulletproofGens::<C>::new(8, 1);
         let gens = BpppGens::new(&pc, &bp, 0, n).unwrap();
         let p = CircuitProof::<C>::prove(&c, &gens, &[], &wit, &mut t(b"rt"), &mut rng).unwrap();
         p.verify(&c, &gens, &[], &mut t(b"rt")).unwrap();
@@ -515,13 +515,13 @@ mod all_protocols {
         let asset = elements::generator_generate_blinded(&[0x42; 32], &k256::Scalar::random(&mut rng));
         let pc = PedersenGens::<Secp256k1>::with_value_generator(asset);
         let (value, blinding) = (21_000_000u64, k256::Scalar::random(&mut rng));
-        let bp = BulletproofGens::<Secp256k1>::for_curve(64, 1);
+        let bp = BulletproofGens::<Secp256k1>::new(64, 1);
         let (proof, v) = RangeProof::<Secp256k1>::prove_single_with_rng(&bp, &pc, &mut sha(b"rt"), value, &blinding, 64, &mut rng).unwrap();
         proof.verify_single(&bp, &pc, &mut sha(b"rt"), &v, 64).unwrap();
         assert!(proof.verify_single(&bp, &pc, &mut mer(b"rt"), &v, 64).is_err());
         assert!(proof.verify_single(&bp, &pc, &mut sha(b"other"), &v, 64).is_err());
         let st = bulletproofs::bppp::RangeStatement::new(16, vec![(0, 1 << 64)]).unwrap();
-        let bp2 = BulletproofGens::<Secp256k1>::for_curve(st.generators_capacity(), 1);
+        let bp2 = BulletproofGens::<Secp256k1>::new(st.generators_capacity(), 1);
         let (p, V) = bulletproofs::bppp::RangeProof::<Secp256k1>::prove(&st, &pc, &bp2, &[value], &[blinding], &mut sha(b"rt"), &mut rng).unwrap();
         assert_eq!(V, vec![v]);
         p.verify(&st, &pc, &bp2, &V, &mut sha(b"rt")).unwrap();
@@ -598,8 +598,8 @@ mod full_proofs {
         use bulletproofs::bppp::{RangeProof, RangeStatement};
         let mut rng = ChaCha20Rng::seed_from_u64(1);
         let st = RangeStatement::new(16, vec![(0, 1 << 64)]).unwrap();
-        let pc = PedersenGens::<Secp256k1>::for_curve();
-        let bp = BulletproofGens::<Secp256k1>::for_curve(st.generators_capacity(), 1);
+        let pc = PedersenGens::<Secp256k1>::default();
+        let bp = BulletproofGens::<Secp256k1>::new(st.generators_capacity(), 1);
         let blinding = <S as bulletproofs::curve::ff::Field>::random(&mut rng);
         let mut t = Recording::new();
         let (proof, V) = RangeProof::<Secp256k1>::prove(&st, &pc, &bp, &[0x0123_4567_89ab_cdef], &[blinding], &mut t, &mut rng).unwrap();
@@ -620,8 +620,8 @@ mod full_proofs {
 
     fn r1cs(backend: Backend, name: &str) -> Value {
         let mut rng = ChaCha20Rng::seed_from_u64(1);
-        let pc = PedersenGens::<Secp256k1>::for_curve();
-        let bp = BulletproofGens::<Secp256k1>::for_curve(16, 1);
+        let pc = PedersenGens::<Secp256k1>::default();
+        let bp = BulletproofGens::<Secp256k1>::new(16, 1);
         let random = |rng: &mut ChaCha20Rng| <S as bulletproofs::curve::ff::Field>::random(rng);
         let mut t = Recording::new();
         let mut p = Prover::new(&pc, &mut t);
@@ -631,7 +631,7 @@ mod full_proofs {
         product(&mut p, x, y);
         let bytes = p.prove_with_rng(&bp, &mut rng).unwrap().to_bytes();
         let mut vt = Recording::new();
-        let mut v = Verifier::<_, Secp256k1>::for_curve(&mut vt);
+        let mut v = Verifier::<_, Secp256k1>::new(&mut vt);
         v.set_backend(backend);
         let (x, y) = (v.commit(cx), v.commit(cy));
         product(&mut v, x, y);
@@ -663,16 +663,17 @@ mod full_proofs {
     }
 }
 
-/// The example of README's «Transcripts», through the facade.
+/// The example of README's «Transcripts».
 #[test]
 fn readme_transcripts_example() {
     use bulletproofs::bppp::RangeStatement;
-    use bulletproofs::secp256k1::{bppp, BulletproofGens, PedersenGens, Scalar, Sha256Transcript};
+    use bulletproofs::curve::{ff::Field, Secp256k1};
+    use bulletproofs::{bppp, BulletproofGens, PedersenGens, Sha256Transcript};
     let mut rng = ChaCha20Rng::seed_from_u64(15);
-    let (v, blinding) = (42u64, <Scalar as bulletproofs::curve::ff::Field>::random(&mut rng));
+    let (v, blinding) = (42u64, k256::Scalar::random(&mut rng));
     let st = RangeStatement::new(16, vec![(0, 1 << 64)]).unwrap();
-    let pc_gens = PedersenGens::for_curve();
-    let bp_gens = BulletproofGens::for_curve(st.generators_capacity(), 1);
+    let pc_gens = PedersenGens::<Secp256k1>::default();
+    let bp_gens = BulletproofGens::new(st.generators_capacity(), 1);
     let (proof, commitments) = bppp::RangeProof::prove(&st, &pc_gens, &bp_gens, &[v], &[blinding], &mut Sha256Transcript::new(b"app"), &mut rng).unwrap();
     proof.verify(&st, &pc_gens, &bp_gens, &commitments, &mut Sha256Transcript::new(b"app")).unwrap();
 }
@@ -682,7 +683,7 @@ fn readme_transcripts_example() {
 #[test]
 fn gadgets_can_pass_the_leased_transcript_to_protocols() {
     use bulletproofs::r1cs::{ConstraintSystem, Prover};
-    let (pc, bp) = (PedersenGens::default(), BulletproofGens::new(64, 1));
+    let (pc, bp) = (PedersenGens::<Ristretto>::default(), BulletproofGens::new(64, 1));
     let blinding = Scalar::from(4u8);
     let mut nested_t = Transcript::new(b"nested");
     let (nested, com) = RangeProof::prove_single_with_rng(&bp, &pc, &mut nested_t, 9, &blinding, 8, &mut ChaCha20Rng::seed_from_u64(1)).unwrap();
@@ -762,7 +763,7 @@ mod sha256_more {
         use bulletproofs::r1cs::{lc, ConstraintSystem, Prover, Verifier};
         use bulletproofs::{BulletproofGens, PedersenGens, Sha256Transcript};
         use curve25519_dalek::scalar::Scalar;
-        let (pc, bp) = (PedersenGens::default(), BulletproofGens::new(8, 1));
+        let (pc, bp) = (PedersenGens::<bulletproofs::Ristretto>::default(), BulletproofGens::new(8, 1));
         let after = |seed: u64| {
             let mut p = Prover::new(&pc, Sha256Transcript::new(b"after"));
             let (cx, x) = p.commit(Scalar::from(3u8), Scalar::from(seed));

@@ -8,12 +8,12 @@ use ff::Field as _;
 use group::Group;
 
 use super::gens::BpppGens;
-use crate::curve::{Curve, Ristretto};
+use crate::curve::Curve;
 use crate::errors::ProofError;
 
 /// `g G + <h, H> + <n, N> + sum k P = 0` over the generators `G`, `H`, `N` and the proof's own
 /// points `P` (shorter `h`, `n` are zero-padded).
-pub(crate) struct Terms<C: Curve = Ristretto> {
+pub(crate) struct Terms<C: Curve> {
     pub(crate) g: C::Scalar,
     pub(crate) h: Vec<C::Scalar>,
     pub(crate) n: Vec<C::Scalar>,

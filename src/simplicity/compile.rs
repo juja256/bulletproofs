@@ -535,7 +535,7 @@ mod tests {
     }
 
     fn gens() -> (PedersenGens<Secp256k1>, BulletproofGens<Secp256k1>) {
-        (PedersenGens::for_curve(), BulletproofGens::for_curve(64, 1))
+        (PedersenGens::default(), BulletproofGens::new(64, 1))
     }
 
     /// The circuit and the compile transcript for statement `V`.
@@ -543,7 +543,7 @@ mod tests {
         let mut ct = CompileTranscript::new(b"test");
         TranscriptBackend::append_message(&mut ct, SIGHASH_LABEL, &[0u8; 32]);
         let c = {
-            let mut v = Verifier::<_, Secp256k1>::for_curve(&mut ct);
+            let mut v = Verifier::<_, Secp256k1>::new(&mut ct);
             v.set_backend(Backend::Bppp);
             let (x, y) = (v.commit(V[0]), v.commit(V[1]));
             product(&mut v, x, y);
@@ -647,8 +647,8 @@ mod tests {
     fn chain_growth() {
         let env = dummy_env();
         for n in [2usize, 16, 32, 64] {
-            let pc = PedersenGens::<Secp256k1>::for_curve();
-            let bp = BulletproofGens::<Secp256k1>::for_curve(2 * n + 64, 1);
+            let pc = PedersenGens::<Secp256k1>::default();
+            let bp = BulletproofGens::<Secp256k1>::new(2 * n + 64, 1);
             let chain = |cs: &mut dyn FnMut(crate::r1cs::LinearCombination<K>, crate::r1cs::LinearCombination<K>) -> Variable, x: Variable| {
                 let mut v = lc(x);
                 for _ in 0..n {
@@ -667,7 +667,7 @@ mod tests {
             let proof = p.prove_with_rng(&bp, &mut rng).unwrap();
             let mut ct = CompileTranscript::new(b"chain");
             TranscriptBackend::append_message(&mut ct, SIGHASH_LABEL, &[0u8; 32]);
-            let mut v = Verifier::<_, Secp256k1>::for_curve(&mut ct);
+            let mut v = Verifier::<_, Secp256k1>::new(&mut ct);
             v.set_backend(Backend::Bppp);
             let xv = v.commit(cx);
             let _ = chain(&mut |a, b| v.multiply(a, b).2, xv);
@@ -746,8 +746,8 @@ mod tests {
 
     fn compile_circ(c: &Circ, env: &crate::simplicity::run::Env) -> (R1CSProof<Secp256k1>, Box<dyn Fn() -> SimplicityVerifier>) {
         let n = match c { Circ::Chain(n) => *n, Circ::Table(r, _) => 4 * *r as usize, _ => 0 };
-        let pc = PedersenGens::<Secp256k1>::for_curve();
-        let bp = BulletproofGens::<Secp256k1>::for_curve(2 * n + 256, 1);
+        let pc = PedersenGens::<Secp256k1>::default();
+        let bp = BulletproofGens::<Secp256k1>::new(2 * n + 256, 1);
         let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(77);
         let mut t = Sha256Transcript::new(b"rv");
         t.append_message(SIGHASH_LABEL, &sighash_of(env));
@@ -762,7 +762,7 @@ mod tests {
         let mk = move || {
             let mut ct = CompileTranscript::new(b"rv");
             TranscriptBackend::append_message(&mut ct, SIGHASH_LABEL, &[0u8; 32]);
-            let mut v = Verifier::<_, Secp256k1>::for_curve(&mut ct);
+            let mut v = Verifier::<_, Secp256k1>::new(&mut ct);
             v.set_backend(Backend::Bppp);
             let (x, y) = (v.commit(V[0]), v.commit(V[1]));
             circuit(&mut v, &cc, &[x, y], false);

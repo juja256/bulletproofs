@@ -11,9 +11,8 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use ff::Field as _;
-use merlin::Transcript;
 
-use crate::curve::{Curve, Ristretto};
+use crate::curve::Curve;
 
 use crate::errors::MPCError;
 use crate::generators::{BulletproofGens, PedersenGens};
@@ -83,7 +82,7 @@ impl Dealer {
 }
 
 /// A dealer waiting for the parties to send their [`BitCommitment`]s.
-pub struct DealerAwaitingBitCommitments<'a, 'b, C: Curve = Ristretto, X: TranscriptBackend + Clone = Transcript> {
+pub struct DealerAwaitingBitCommitments<'a, 'b, C: Curve, X: TranscriptBackend + Clone> {
     bp_gens: &'b BulletproofGens<C>,
     pc_gens: &'b PedersenGens<C>,
     transcript: &'a mut X,
@@ -140,7 +139,7 @@ impl<'a, 'b, C: Curve, X: TranscriptBackend + Clone> DealerAwaitingBitCommitment
 
 /// A dealer which has sent the [`BitChallenge`] to the parties and
 /// is waiting for their [`PolyCommitment`]s.
-pub struct DealerAwaitingPolyCommitments<'a, 'b, C: Curve = Ristretto, X: TranscriptBackend + Clone = Transcript> {
+pub struct DealerAwaitingPolyCommitments<'a, 'b, C: Curve, X: TranscriptBackend + Clone> {
     n: usize,
     m: usize,
     transcript: &'a mut X,
@@ -201,7 +200,7 @@ impl<'a, 'b, C: Curve, X: TranscriptBackend + Clone> DealerAwaitingPolyCommitmen
 /// A dealer which has sent the [`PolyChallenge`] to the parties and
 /// is waiting to aggregate their [`ProofShare`]s into a
 /// [`RangeProof`].
-pub struct DealerAwaitingProofShares<'a, 'b, C: Curve = Ristretto, X: TranscriptBackend + Clone = Transcript> {
+pub struct DealerAwaitingProofShares<'a, 'b, C: Curve, X: TranscriptBackend + Clone> {
     n: usize,
     m: usize,
     transcript: &'a mut X,

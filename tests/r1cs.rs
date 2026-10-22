@@ -12,14 +12,15 @@ use curve25519_dalek::scalar::Scalar;
 use merlin::Transcript;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
+use bulletproofs::curve::Ristretto;
 
 // Shuffle gadget (documented in markdown file)
 
 /// A proof-of-shuffle.
-struct ShuffleProof(R1CSProof);
+struct ShuffleProof(R1CSProof<Ristretto>);
 
 impl ShuffleProof {
-    fn gadget<CS: RandomizableConstraintSystem>(
+    fn gadget<CS: RandomizableConstraintSystem<Scalar>>(
         cs: &mut CS,
         x: Vec<Variable>,
         y: Vec<Variable>,
@@ -66,8 +67,8 @@ impl ShuffleProof {
     ///
     /// Returns a tuple `(proof, input_commitments || output_commitments)`.
     pub fn prove<'a, 'b>(
-        pc_gens: &'b PedersenGens,
-        bp_gens: &'b BulletproofGens,
+        pc_gens: &'b PedersenGens<Ristretto>,
+        bp_gens: &'b BulletproofGens<Ristretto>,
         transcript: &'a mut Transcript,
         input: &[Scalar],
         output: &[Scalar],
@@ -113,8 +114,8 @@ impl ShuffleProof {
     /// Attempt to verify a `ShuffleProof`.
     pub fn verify<'a, 'b>(
         &self,
-        pc_gens: &'b PedersenGens,
-        bp_gens: &'b BulletproofGens,
+        pc_gens: &'b PedersenGens<Ristretto>,
+        bp_gens: &'b BulletproofGens<Ristretto>,
         transcript: &'a mut Transcript,
         input_commitments: &Vec<CompressedRistretto>,
         output_commitments: &Vec<CompressedRistretto>,
@@ -225,14 +226,14 @@ fn shuffle_gadget_test_42() {
 }
 
 /// Constrains (a1 + a2) * (b1 + b2) = (c1 + c2)
-fn example_gadget<CS: ConstraintSystem>(
+fn example_gadget<CS: ConstraintSystem<Scalar>>(
     cs: &mut CS,
-    a1: LinearCombination,
-    a2: LinearCombination,
-    b1: LinearCombination,
-    b2: LinearCombination,
-    c1: LinearCombination,
-    c2: LinearCombination,
+    a1: LinearCombination<Scalar>,
+    a2: LinearCombination<Scalar>,
+    b1: LinearCombination<Scalar>,
+    b2: LinearCombination<Scalar>,
+    c1: LinearCombination<Scalar>,
+    c2: LinearCombination<Scalar>,
 ) {
     let (_, _, c_var) = cs.multiply(a1 + a2, b1 + b2);
     cs.constrain(c1 + c2 - c_var);
@@ -240,15 +241,15 @@ fn example_gadget<CS: ConstraintSystem>(
 
 // Prover's scope
 fn example_gadget_proof(
-    pc_gens: &PedersenGens,
-    bp_gens: &BulletproofGens,
+    pc_gens: &PedersenGens<Ristretto>,
+    bp_gens: &BulletproofGens<Ristretto>,
     a1: u64,
     a2: u64,
     b1: u64,
     b2: u64,
     c1: u64,
     c2: u64,
-) -> Result<(R1CSProof, Vec<CompressedRistretto>), R1CSError> {
+) -> Result<(R1CSProof<Ristretto>, Vec<CompressedRistretto>), R1CSError> {
     let mut transcript = Transcript::new(b"R1CSExampleGadget");
 
     // 1. Create a prover
@@ -279,10 +280,10 @@ fn example_gadget_proof(
 
 // Verifier logic
 fn example_gadget_verify(
-    pc_gens: &PedersenGens,
-    bp_gens: &BulletproofGens,
+    pc_gens: &PedersenGens<Ristretto>,
+    bp_gens: &BulletproofGens<Ristretto>,
     c2: u64,
-    proof: R1CSProof,
+    proof: R1CSProof<Ristretto>,
     commitments: Vec<CompressedRistretto>,
 ) -> Result<(), R1CSError> {
     let mut transcript = Transcript::new(b"R1CSExampleGadget");
@@ -367,9 +368,9 @@ fn example_gadget_serialization_test() {
 // Range Proof gadget
 
 /// Enforces that the quantity of v is in the range [0, 2^n).
-pub fn range_proof<CS: ConstraintSystem>(
+pub fn range_proof<CS: ConstraintSystem<Scalar>>(
     cs: &mut CS,
-    mut v: LinearCombination,
+    mut v: LinearCombination<Scalar>,
     v_assignment: Option<u64>,
     n: usize,
 ) -> Result<(), R1CSError> {
@@ -421,7 +422,7 @@ fn range_proof_gadget() {
 
 fn range_proof_helper(v_val: u64, n: usize) -> Result<(), R1CSError> {
     // Common
-    let pc_gens = PedersenGens::default();
+    let pc_gens = PedersenGens::<Ristretto>::default();
     let bp_gens = BulletproofGens::new(128, 1);
 
     // Prover's scope

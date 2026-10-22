@@ -9,7 +9,7 @@ use super::{
     RandomizedConstraintSystem, Variable,
 };
 
-use crate::curve::{Curve, Ristretto};
+use crate::curve::Curve;
 use crate::errors::R1CSError;
 use crate::generators::{BulletproofGens, PedersenGens};
 use crate::r1cs::Metrics;
@@ -28,7 +28,7 @@ use super::compact::{ConstraintStore, Flattened};
 /// When all constraints are added, the verifying code calls `verify`
 /// which consumes the `Verifier` instance, samples random challenges
 /// that instantiate the randomized constraints, and verifies the proof.
-pub struct Verifier<T: TranscriptRef, C: Curve = Ristretto> {
+pub struct Verifier<T: TranscriptRef, C: Curve> {
     transcript: T,
     constraints: ConstraintStore<C::Scalar>,
 
@@ -69,7 +69,7 @@ pub struct Verifier<T: TranscriptRef, C: Curve = Ristretto> {
 /// monomorphize the closures for the proving and verifying code.
 /// However, this type cannot be instantiated by the user and therefore can only be used within
 /// the callback provided to `specify_randomized_constraints`.
-pub struct RandomizingVerifier<T: TranscriptRef, C: Curve = Ristretto> {
+pub struct RandomizingVerifier<T: TranscriptRef, C: Curve> {
     verifier: Verifier<T, C>,
 }
 
@@ -274,13 +274,6 @@ impl<T: TranscriptRef<Backend = crate::simplicity::CompileTranscript>> Verifier<
     }
 }
 
-impl<T: TranscriptRef> Verifier<T, Ristretto> {
-    /// A verifier over ristretto255: [`Verifier::for_curve`] for the default curve.
-    pub fn new(transcript: T) -> Self {
-        Self::for_curve(transcript)
-    }
-}
-
 impl<T: TranscriptRef, C: Curve> Verifier<T, C> {
     /// Construct an empty constraint system with specified external
     /// input variables.
@@ -297,7 +290,7 @@ impl<T: TranscriptRef, C: Curve> Verifier<T, C> {
     /// Commit the external variables with [`Verifier::commit`] before any challenge is
     /// drawn (the randomized constraints of the second phase), so that the challenges are
     /// bound to them.
-    pub fn for_curve(mut transcript: T) -> Self {
+    pub fn new(mut transcript: T) -> Self {
         transcript.backend().r1cs_domain_sep();
         transcript.backend().curve_domain_sep::<C>();
 

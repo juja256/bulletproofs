@@ -12,7 +12,6 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use curve25519_dalek::scalar::Scalar;
 use ff::Field as _;
 use rand_core::{CryptoRng, RngCore};
 use zeroize::Zeroize;
@@ -29,7 +28,7 @@ use crate::{BulletproofGens, PedersenGens};
 /// a circuit needs at least one coefficient (`check` rejects an empty one), and one coefficient
 /// is a constant pole.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Pole<F: Field = Scalar>(pub Vec<F>);
+pub struct Pole<F: Field>(pub Vec<F>);
 
 impl<F: Field> From<F> for Pole<F> {
     fn from(t: F) -> Self {
@@ -47,7 +46,7 @@ impl<F: Field> Pole<F> {
 /// A reciprocal row (spec §4.1): `sum c * w'[col] / (X + t)` over the terms (no pole: `c *
 /// w'[col]`) plus `sum c / (X + t)` over the constants (no pole: `c`), which must vanish.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ReciprocalRow<F: Field = Scalar> {
+pub struct ReciprocalRow<F: Field> {
     /// `(column of w', coefficient, pole)`.
     pub terms: Vec<(usize, F, Option<Pole<F>>)>,
     /// `(coefficient, pole)`.
@@ -57,7 +56,7 @@ pub struct ReciprocalRow<F: Field = Scalar> {
 /// A component of a tuple pole: `sum c * w'[col] + constant` over early columns (`w_O` in
 /// slots `NormO`, `LinO`).
 #[derive(Clone, Debug, PartialEq)]
-pub struct Component<F: Field = Scalar> {
+pub struct Component<F: Field> {
     /// `(column of w', coefficient)`.
     pub terms: Vec<(usize, F)>,
     /// The constant.
@@ -67,7 +66,7 @@ pub struct Component<F: Field = Scalar> {
 /// A tuple pole (spec §4.1): `w_D,pole = sum_j eta^j x_j`, computed by the prover after `eta`
 /// (the witness's value for it is ignored).
 #[derive(Clone, Debug, PartialEq)]
-pub struct TuplePole<F: Field = Scalar> {
+pub struct TuplePole<F: Field> {
     /// The pole, `< n_p`.
     pub pole: usize,
     /// The components `x_0, x_1, ...` (at least one).
@@ -77,7 +76,7 @@ pub struct TuplePole<F: Field = Scalar> {
 /// A reciprocal form circuit (spec §4.1). Columns index
 /// `w' = w_D || w_L || w_P || w_R || w_O`.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ReciprocalCircuit<F: Field = Scalar> {
+pub struct ReciprocalCircuit<F: Field> {
     /// Number of poles.
     pub n_p: usize,
     /// Number of ordinary multiplications.
@@ -117,7 +116,7 @@ pub struct ReciprocalCircuit<F: Field = Scalar> {
 /// A witness for a [`ReciprocalCircuit`]; the reciprocals `w_P` are computed by the prover.
 /// Its `Debug` shows only the dimensions.
 #[derive(Clone)]
-pub struct ReciprocalWitness<F: Field = Scalar> {
+pub struct ReciprocalWitness<F: Field> {
     /// The poles.
     pub w_d: Vec<F>,
     /// Left inputs of the ordinary multiplications.
@@ -806,7 +805,7 @@ impl<C: Curve> ReciprocalProof<C> {
 /// The values committed after `alpha` (spec §4.3, two-phase prover): `w_R`, and the elements
 /// of `w_O` in slot `LinR`, in `w_O` order.
 #[derive(Clone)]
-pub struct LateWitness<F: Field = Scalar> {
+pub struct LateWitness<F: Field> {
     /// Right inputs of the ordinary multiplications.
     pub w_r: Vec<F>,
     /// The `LinR` elements of `w_O`, in `w_O` order.

@@ -7,7 +7,6 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use curve25519_dalek::scalar::Scalar;
 use ff::Field as _;
 use rand_core::{CryptoRng, RngCore};
 
@@ -17,7 +16,7 @@ use super::sparse::{BufHasher, SparseMatrix};
 pub(crate) use super::terms::Terms;
 use super::transcript::BpppTranscript;
 use super::wnla::{self, WnlaProof, WnlaStatement};
-use crate::curve::{Curve, Field, PointEncoding, Ristretto};
+use crate::curve::{Curve, Field, PointEncoding};
 use crate::errors::ProofError;
 use crate::{BulletproofGens, PedersenGens};
 use crate::util;
@@ -39,7 +38,7 @@ pub enum Slot {
 /// and `w_m`) and inputs `w_V = v_0 || ... || v_{k-1}` satisfy
 /// `w_l w + f_l w_V + a_l = 0` and `w_L ∘ w_R = w_m w + f_m w_V + a_m`.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ArithmeticCircuit<F: Field = Scalar> {
+pub struct ArithmeticCircuit<F: Field> {
     /// Number of multiplications, `|w_L| = |w_R|`; at least 1.
     pub n_m: usize,
     /// `|w_O|`.
@@ -68,7 +67,7 @@ pub struct ArithmeticCircuit<F: Field = Scalar> {
 
 /// A witness for an [`ArithmeticCircuit`]. Its `Debug` shows only the dimensions.
 #[derive(Clone)]
-pub struct CircuitWitness<F: Field = Scalar> {
+pub struct CircuitWitness<F: Field> {
     /// Left inputs of the multiplications.
     pub w_l: Vec<F>,
     /// Right inputs of the multiplications.
@@ -95,7 +94,7 @@ impl<F: Field> core::fmt::Debug for CircuitWitness<F> {
 
 /// A circuit proof: four commitments and a norm argument.
 #[derive(Clone, Debug, PartialEq)]
-pub struct CircuitProof<C: Curve = Ristretto> {
+pub struct CircuitProof<C: Curve> {
     /// Commitment to `w_L` (and the `LinL` slots).
     pub C_L: C::Compressed,
     /// Commitment to `w_R` (and the `LinR` slots).
@@ -728,7 +727,7 @@ impl<C: Curve> CircuitProof<C> {
     }
 
     /// Parse a proof for circuit `c`.
-    pub fn from_bytes(bytes: &[u8], c: &ArithmeticCircuit) -> Result<Self, ProofError> {
+    pub fn from_bytes(bytes: &[u8], c: &ArithmeticCircuit<C::Scalar>) -> Result<Self, ProofError> {
         Self::from_bytes_dims(bytes, c.n_lin, c.n_m)
     }
 

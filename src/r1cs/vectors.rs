@@ -112,7 +112,7 @@ fn prover_run<'a, C: Curve>(pc: &'a PedersenGens<C>, t: &'a mut Transcript, prog
 }
 
 fn verifier_run<'a, C: Curve>(t: &'a mut Transcript, program: &[Value], V: &[C::Compressed], backend: Backend) -> (Verifier<&'a mut Transcript, C>, Result<(), (usize, R1CSError)>) {
-    let mut v = Verifier::<_, C>::for_curve(t);
+    let mut v = Verifier::<_, C>::new(t);
     v.set_backend(backend);
     let mut it = V.iter();
     let r = run(&mut v, program, false, &mut |cs, _, _| cs.commit(*it.next().unwrap()));
@@ -127,8 +127,8 @@ where
         include_str!("../../tests/vectors/bppp/builder.json"),
         include_str!("../../tests/vectors/bppp/secp256k1/builder.json"),
     );
-    let pc = PedersenGens::<C>::for_curve();
-    let bp = BulletproofGens::<C>::for_curve(4096, 1);
+    let pc = PedersenGens::<C>::default();
+    let bp = BulletproofGens::<C>::new(4096, 1);
     let mut proven = 0;
     for case in file["cases"].as_array().unwrap() {
         let name = case["name"].as_str().unwrap();
@@ -190,8 +190,8 @@ where
             pc_case["satisfied"] = Value::Bool(true);
             pc_case["verifies"] = Value::Bool(true);
             let proof = testutil::run_recip_case::<C>(&pc_case, &cp, &w);
-            let pcg = PedersenGens::<C>::for_curve();
-            let bpg = BulletproofGens::<C>::for_curve(c.gens_capacity(), 1);
+            let pcg = PedersenGens::<C>::default();
+            let bpg = BulletproofGens::<C>::new(c.gens_capacity(), 1);
             let g = crate::bppp::BpppGens::new(&pcg, &bpg, c.n_lin, c.n_p + c.n_m).unwrap();
             let V: Vec<C::Compressed> = w.v.iter().zip(&w.s).map(|(v, s)| C::compress(&g.commit_input(v, *s))).collect();
             let ch = &case["chal"];

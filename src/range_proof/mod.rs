@@ -11,7 +11,7 @@ use core::marker::PhantomData;
 
 use ff::Field as _;
 
-use crate::curve::{Curve, Field, PointEncoding, Ristretto};
+use crate::curve::{Curve, Field, PointEncoding};
 
 use crate::errors::ProofError;
 use crate::generators::{BulletproofGens, PedersenGens};
@@ -53,7 +53,7 @@ pub mod party;
 /// module and can be used to perform online aggregation between
 /// parties without revealing secret values to each other.
 #[derive(Clone, Debug)]
-pub struct RangeProof<C: Curve = Ristretto> {
+pub struct RangeProof<C: Curve> {
     /// Commitment to the bits of the value
     A: C::Compressed,
     /// Commitment to the blinding factors
@@ -89,12 +89,12 @@ impl<C: Curve> RangeProof<C> {
     /// use merlin::Transcript;
     ///
     /// extern crate bulletproofs;
-    /// use bulletproofs::{BulletproofGens, PedersenGens, RangeProof};
+    /// use bulletproofs::{BulletproofGens, PedersenGens, RangeProof, Ristretto};
     ///
     /// # fn main() {
     /// // Generators for Pedersen commitments.  These can be selected
     /// // independently of the Bulletproofs generators.
-    /// let pc_gens = PedersenGens::default();
+    /// let pc_gens = PedersenGens::<Ristretto>::default();
     ///
     /// // Generators for Bulletproofs, valid for proofs up to bitsize 64
     /// // and aggregation size up to 1.
@@ -187,12 +187,12 @@ impl<C: Curve> RangeProof<C> {
     /// use merlin::Transcript;
     ///
     /// extern crate bulletproofs;
-    /// use bulletproofs::{BulletproofGens, PedersenGens, RangeProof};
+    /// use bulletproofs::{BulletproofGens, PedersenGens, RangeProof, Ristretto};
     ///
     /// # fn main() {
     /// // Generators for Pedersen commitments.  These can be selected
     /// // independently of the Bulletproofs generators.
-    /// let pc_gens = PedersenGens::default();
+    /// let pc_gens = PedersenGens::<Ristretto>::default();
     ///
     /// // Generators for Bulletproofs, valid for proofs up to bitsize 64
     /// // and aggregation size up to 16.
@@ -593,6 +593,7 @@ fn delta<F: Field>(n: usize, m: usize, y: &F, z: &F) -> F {
 
 #[cfg(test)]
 mod tests {
+    use crate::curve::Ristretto;
     use super::*;
     use merlin::Transcript;
     use curve25519_dalek::scalar::Scalar;
@@ -637,8 +638,8 @@ mod tests {
         serialize: S,
         deserialize: D,
     ) where
-        S: Fn(&RangeProof) -> T,
-        D: Fn(&T) -> RangeProof,
+        S: Fn(&RangeProof<Ristretto>) -> T,
+        D: Fn(&T) -> RangeProof<Ristretto>,
     {
         // Split the test into two scopes, so that it's explicit what
         // data is shared between the prover and the verifier.
@@ -681,7 +682,7 @@ mod tests {
         // Verifier's scope
         {
             // 3. Deserialize
-            let proof: RangeProof = deserialize(&serialized_proof);
+            let proof: RangeProof<Ristretto> = deserialize(&serialized_proof);
 
             // 4. Verify with the same customization label as above
             let mut transcript = Transcript::new(b"AggregatedRangeProofTest");
@@ -692,19 +693,19 @@ mod tests {
         }
     }
 
-    fn serialize_json(proof: &RangeProof) -> String {
+    fn serialize_json(proof: &RangeProof<Ristretto>) -> String {
         serde_json::to_string_pretty(proof).unwrap()
     }
 
-    fn deserialize_json(serialized_json: &String) -> RangeProof {
+    fn deserialize_json(serialized_json: &String) -> RangeProof<Ristretto> {
         serde_json::from_str(serialized_json).unwrap()
     }
 
-    fn serialize_bin(proof: &RangeProof) -> Vec<u8> {
+    fn serialize_bin(proof: &RangeProof<Ristretto>) -> Vec<u8> {
         bincode::serialize(&proof).unwrap()
     }
 
-    fn deserialize_bin(serialized_bytes: &Vec<u8>) -> RangeProof {
+    fn deserialize_bin(serialized_bytes: &Vec<u8>) -> RangeProof<Ristretto> {
         bincode::deserialize(&serialized_bytes).unwrap()
     }
 
@@ -767,7 +768,7 @@ mod tests {
         let m = 4;
         let n = 32;
 
-        let pc_gens = PedersenGens::default();
+        let pc_gens = PedersenGens::<Ristretto>::default();
         let bp_gens = BulletproofGens::new(n, m);
 
         use self::rand::Rng;
@@ -840,7 +841,7 @@ mod tests {
         let m = 1;
         let n = 32;
 
-        let pc_gens = PedersenGens::default();
+        let pc_gens = PedersenGens::<Ristretto>::default();
         let bp_gens = BulletproofGens::new(n, m);
 
         use self::rand::Rng;

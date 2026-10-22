@@ -174,7 +174,7 @@ impl Mul<Variable> for Scalar {
 /// [`Variables`](::r1cs::Variable).  Each term is represented by a
 /// `(Variable, F)` pair.
 #[derive(Clone, Debug, PartialEq)]
-pub struct LinearCombination<F: Field = Scalar> {
+pub struct LinearCombination<F: Field> {
     pub(super) terms: Vec<(Variable, F)>,
 }
 

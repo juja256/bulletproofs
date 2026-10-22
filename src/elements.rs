@@ -98,7 +98,7 @@ pub fn generator_generate_blinded(key: &[u8; 32], blind: &Scalar) -> ProjectiveP
 }
 
 /// secp256k1-zkp's default value generator H (`secp256k1_generator_h`, as in Mimblewimble), the
-/// `B` of `PedersenGens::<Secp256k1>::for_curve()`. Liquid commits a value with its asset's
+/// `B` of `PedersenGens::<Secp256k1>::default()`. Liquid commits a value with its asset's
 /// generator instead (blinded, or `generator_generate(asset_id)` for an explicit asset), never
 /// with H.
 pub fn h() -> ProjectivePoint {

@@ -11,13 +11,14 @@ use curve25519_dalek::scalar::Scalar;
 use merlin::Transcript;
 use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha20Rng;
+use bulletproofs::curve::Ristretto;
 
 enum Item {
-    Range(bppp::RangeProof, RangeStatement, Vec<CompressedRistretto>),
-    Mact(bppp::MactProof, MactStatement, Vec<CompressedRistretto>),
+    Range(bppp::RangeProof<Ristretto>, RangeStatement, Vec<CompressedRistretto>),
+    Mact(bppp::MactProof<Ristretto>, MactStatement, Vec<CompressedRistretto>),
 }
 
-fn items(pc: &PedersenGens, bp: &BulletproofGens) -> Vec<Item> {
+fn items(pc: &PedersenGens<Ristretto>, bp: &BulletproofGens<Ristretto>) -> Vec<Item> {
     let mut rng = ChaCha20Rng::seed_from_u64(5);
     let mut out = Vec::new();
     for (base, ranges, values) in [
@@ -38,7 +39,7 @@ fn items(pc: &PedersenGens, bp: &BulletproofGens) -> Vec<Item> {
     out
 }
 
-fn batch(pc: &PedersenGens, bp: &BulletproofGens, items: &[Item], seed: u64) -> Result<(), bulletproofs::ProofError> {
+fn batch(pc: &PedersenGens<Ristretto>, bp: &BulletproofGens<Ristretto>, items: &[Item], seed: u64) -> Result<(), bulletproofs::ProofError> {
     let mut b = BatchVerifier::new(pc, bp, ChaCha20Rng::seed_from_u64(seed));
     for it in items {
         match it {

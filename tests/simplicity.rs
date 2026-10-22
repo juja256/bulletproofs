@@ -7,7 +7,8 @@
 
 use bulletproofs::curve::{Curve, Secp256k1};
 use bulletproofs::r1cs::{lc, Backend, CircuitBuilder, ConstraintSystem, Prover, R1CSProof, RandomizableConstraintSystem, RandomizedConstraintSystem, Variable, Verifier};
-use bulletproofs::secp256k1::{BulletproofGens, PedersenGens, Scalar};
+use bulletproofs::{BulletproofGens, PedersenGens};
+use k256::Scalar;
 use bulletproofs::simplicity::{dummy_env, dummy_env_with_output, sighash_of, CompileTranscript, SimplicityVerifier, SIGHASH_LABEL};
 use bulletproofs::{Sha256Transcript, TranscriptBackend, TranscriptRef};
 use rand_chacha::rand_core::SeedableRng;
@@ -15,8 +16,8 @@ use rand_chacha::ChaCha20Rng;
 
 type Compressed = <Secp256k1 as Curve>::Compressed;
 
-fn gens() -> (PedersenGens, BulletproofGens) {
-    (PedersenGens::for_curve(), BulletproofGens::for_curve(64, 1))
+fn gens() -> (PedersenGens<Secp256k1>, BulletproofGens<Secp256k1>) {
+    (PedersenGens::<Secp256k1>::default(), BulletproofGens::<Secp256k1>::new(64, 1))
 }
 
 /// `x · y = 15` with committed `x`, `y`.
@@ -50,7 +51,7 @@ fn compile_with(V: &[Compressed], backend: Backend, sighash: bool, randomized: b
     if sighash {
         ct.append_message(SIGHASH_LABEL, &[0u8; 32]);
     }
-    let mut v = Verifier::<_, Secp256k1>::for_curve(&mut ct);
+    let mut v = Verifier::<_, Secp256k1>::new(&mut ct);
     v.set_backend(backend);
     let x = v.commit(V[0]);
     let y = v.commit(V[1]);
@@ -171,7 +172,7 @@ fn circuit_builder_gadgets_verify() {
     let proof = p.prove_with_rng(&bp, &mut rng).unwrap();
     let mut ct = CompileTranscript::new(b"gadgets");
     ct.append_message(SIGHASH_LABEL, &[0u8; 32]);
-    let mut v = Verifier::<_, Secp256k1>::for_curve(&mut ct);
+    let mut v = Verifier::<_, Secp256k1>::new(&mut ct);
     v.set_backend(Backend::Bppp);
     let (x, y) = (v.commit(cx), v.commit(cy));
     gadgets(&mut v, x, y, false);
@@ -197,8 +198,8 @@ fn chain<CS: ConstraintSystem<Scalar>>(cs: &mut CS, x: Variable, n: usize) {
 }
 
 fn chain_proof_and_verifier(n: usize, env: &bulletproofs::simplicity::Env) -> (R1CSProof<Secp256k1>, SimplicityVerifier) {
-    let pc = PedersenGens::for_curve();
-    let bp = BulletproofGens::for_curve(2 * n + 64, 1);
+    let pc = PedersenGens::<Secp256k1>::default();
+    let bp = BulletproofGens::<Secp256k1>::new(2 * n + 64, 1);
     let mut rng = ChaCha20Rng::seed_from_u64(n as u64);
     let mut t = Sha256Transcript::new(b"chain");
     t.append_message(SIGHASH_LABEL, &sighash_of(env));
@@ -209,7 +210,7 @@ fn chain_proof_and_verifier(n: usize, env: &bulletproofs::simplicity::Env) -> (R
     let proof = p.prove_with_rng(&bp, &mut rng).unwrap();
     let mut ct = CompileTranscript::new(b"chain");
     ct.append_message(SIGHASH_LABEL, &[0u8; 32]);
-    let mut v = Verifier::<_, Secp256k1>::for_curve(&mut ct);
+    let mut v = Verifier::<_, Secp256k1>::new(&mut ct);
     v.set_backend(Backend::Bppp);
     let x = v.commit(cx);
     chain(&mut v, x, n);
@@ -257,7 +258,7 @@ fn compile_eq(V: &[Compressed], c: u64) -> SimplicityVerifier {
     let (pc, bp) = gens();
     let mut ct = CompileTranscript::new(b"test");
     ct.append_message(SIGHASH_LABEL, &[0u8; 32]);
-    let mut v = Verifier::<_, Secp256k1>::for_curve(&mut ct);
+    let mut v = Verifier::<_, Secp256k1>::new(&mut ct);
     v.set_backend(Backend::Bppp);
     let (x, y) = (v.commit(V[0]), v.commit(V[1]));
     product_eq(&mut v, x, y, c);
@@ -341,8 +342,8 @@ fn table_circuit<CS: CircuitBuilder<Scalar>>(cs: &mut CS, rows: u64, lookups: u6
 
 /// The program of a table circuit, run on an honest proof.
 fn table_program(rows: u64, lookups: u64, env: &bulletproofs::simplicity::Env) -> (SimplicityVerifier, Result<bulletproofs::simplicity::Report, bulletproofs::simplicity::ExecError>) {
-    let pc = PedersenGens::for_curve();
-    let bp = BulletproofGens::for_curve((4 * rows + 256) as usize, 1);
+    let pc = PedersenGens::<Secp256k1>::default();
+    let bp = BulletproofGens::<Secp256k1>::new((4 * rows + 256) as usize, 1);
     let mut rng = ChaCha20Rng::seed_from_u64(rows);
     let mut t = Sha256Transcript::new(b"table");
     t.append_message(SIGHASH_LABEL, &sighash_of(env));
@@ -352,7 +353,7 @@ fn table_program(rows: u64, lookups: u64, env: &bulletproofs::simplicity::Env) -
     let proof = p.prove_with_rng(&bp, &mut rng).unwrap();
     let mut ct = CompileTranscript::new(b"table");
     ct.append_message(SIGHASH_LABEL, &[0u8; 32]);
-    let mut v = Verifier::<_, Secp256k1>::for_curve(&mut ct);
+    let mut v = Verifier::<_, Secp256k1>::new(&mut ct);
     v.set_backend(Backend::Bppp);
     table_circuit(&mut v, rows, lookups, false);
     let sv = v.compile_to_simplicity(&pc, &bp).unwrap();

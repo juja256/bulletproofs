@@ -11,6 +11,7 @@ use super::builder::cheat::{self, Cheat};
 use super::builder::CircuitBuilder;
 use super::{Backend, Prover, R1CSError, Verifier};
 use crate::{BulletproofGens, PedersenGens};
+use crate::curve::Ristretto;
 
 /// Prove `gadget` (prover values `Some`) with the cheat in place, then verify; `true` iff the
 /// verifier accepts. A prover error counts as rejected.
@@ -18,7 +19,7 @@ fn accepted<F>(backend: Backend, c: Cheat, gadget: F) -> bool
 where
     F: Fn(&mut dyn Gadget, bool) -> Result<(), R1CSError>,
 {
-    let pc = PedersenGens::default();
+    let pc = PedersenGens::<Ristretto>::default();
     let bp = BulletproofGens::new(64, 1);
     cheat::set(c);
     let mut t = Transcript::new(b"cheat");
@@ -45,18 +46,18 @@ trait Gadget {
 
 trait Ops {
     fn table(&mut self, rows: Vec<Vec<u64>>) -> super::TableId;
-    fn lookup(&mut self, t: super::TableId, x: &[super::LinearCombination]) -> Result<(), R1CSError>;
+    fn lookup(&mut self, t: super::TableId, x: &[super::LinearCombination<Scalar>]) -> Result<(), R1CSError>;
     fn witness_scalar(&mut self, v: Option<Scalar>) -> Result<super::Variable, R1CSError>;
     /// A multiplier `l * 1 = o` with `l = v`; `wire` gets its left wire.
     fn product_wire(&mut self, v: Option<Scalar>, wire: &mut Option<super::Variable>) -> Result<(), R1CSError>;
-    fn recip(&mut self, m: usize, private: Vec<(super::LinearCombination, Vec<super::LinearCombination>)>, public: Vec<(super::LinearCombination, Vec<u64>)>) -> Result<(), R1CSError>;
+    fn recip(&mut self, m: usize, private: Vec<(super::LinearCombination<Scalar>, Vec<super::LinearCombination<Scalar>>)>, public: Vec<(super::LinearCombination<Scalar>, Vec<u64>)>) -> Result<(), R1CSError>;
 }
 
-impl<C: CircuitBuilder> Ops for C {
+impl<C: CircuitBuilder<Scalar>> Ops for C {
     fn table(&mut self, rows: Vec<Vec<u64>>) -> super::TableId {
         CircuitBuilder::table(self, rows).unwrap()
     }
-    fn lookup(&mut self, t: super::TableId, x: &[super::LinearCombination]) -> Result<(), R1CSError> {
+    fn lookup(&mut self, t: super::TableId, x: &[super::LinearCombination<Scalar>]) -> Result<(), R1CSError> {
         CircuitBuilder::lookup(self, t, x)
     }
     fn witness_scalar(&mut self, v: Option<Scalar>) -> Result<super::Variable, R1CSError> {
@@ -68,7 +69,7 @@ impl<C: CircuitBuilder> Ops for C {
         *wire = Some(l);
         Ok(())
     }
-    fn recip(&mut self, m: usize, private: Vec<(super::LinearCombination, Vec<super::LinearCombination>)>, public: Vec<(super::LinearCombination, Vec<u64>)>) -> Result<(), R1CSError> {
+    fn recip(&mut self, m: usize, private: Vec<(super::LinearCombination<Scalar>, Vec<super::LinearCombination<Scalar>>)>, public: Vec<(super::LinearCombination<Scalar>, Vec<u64>)>) -> Result<(), R1CSError> {
         let r = self.reciprocal(m)?;
         for (n, x) in private {
             r.add_weighted(self, n, &x)?;
@@ -80,7 +81,7 @@ impl<C: CircuitBuilder> Ops for C {
     }
 }
 
-impl<C: CircuitBuilder> Gadget for C {
+impl<C: CircuitBuilder<Scalar>> Gadget for C {
     fn w(&mut self, v: Option<u64>) -> super::Variable {
         self.witness(v.map(Scalar::from)).unwrap()
     }
@@ -125,7 +126,7 @@ fn packed_collisions_are_rejected() {
             let g = move |cs: &mut dyn Gadget, p: bool| {
                 let a_val = if p { Some(x0) } else { None };
                 // the first component as a fresh witness or as the left wire of a product
-                let first: LinearCombination = if wire {
+                let first: LinearCombination<Scalar> = if wire {
                     let mut l = None;
                     cs.cs().product_wire(a_val, &mut l)?;
                     l.unwrap().into()
@@ -148,7 +149,7 @@ fn packed_collisions_are_rejected() {
     // the honest statement (3, 5) is accepted in both forms
     for wire in [false, true] {
         let g = move |cs: &mut dyn Gadget, p: bool| {
-            let first: LinearCombination = if wire {
+            let first: LinearCombination<Scalar> = if wire {
                 let mut l = None;
                 cs.cs().product_wire(if p { Some(s(3)) } else { None }, &mut l)?;
                 l.unwrap().into()

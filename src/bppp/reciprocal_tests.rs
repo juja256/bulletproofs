@@ -10,12 +10,13 @@ use crate::{BulletproofGens, PedersenGens};
 use merlin::Transcript;
 use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha20Rng;
+use crate::curve::Ristretto;
 
 /// A reciprocal range proof (paper §6.4) for `value` with `n_digits` digits in `base`:
 /// poles are the digits, numerators 1, one reciprocal row
 /// `sum_j 1/(X + d_j) - sum_s m_s/(X + s) = 0`, one linear row `sum_j base^j d_j = v`.
 /// Multiplicities sit in `LinL` slots (`shared`) or `NormO` slots (inline).
-fn range_proof(base: u64, n_digits: usize, digits: &[u64], shared: bool) -> (ReciprocalCircuit, ReciprocalWitness) {
+fn range_proof(base: u64, n_digits: usize, digits: &[u64], shared: bool) -> (ReciprocalCircuit<Scalar>, ReciprocalWitness<Scalar>) {
     let b = base as usize;
     let n_p = n_digits;
     let n_m = if shared { 0 } else { b.saturating_sub(n_p) };
@@ -89,11 +90,11 @@ fn digits_of(mut v: u64, base: u64, n: usize) -> Vec<u64> {
         .collect()
 }
 
-fn setup(c: &ReciprocalCircuit) -> (PedersenGens, BulletproofGens) {
+fn setup(c: &ReciprocalCircuit<Scalar>) -> (PedersenGens<Ristretto>, BulletproofGens<Ristretto>) {
     (PedersenGens::default(), BulletproofGens::new(c.gens_capacity(), 1))
 }
 
-fn inputs(g: &BpppGens, w: &ReciprocalWitness) -> Vec<CompressedRistretto> {
+fn inputs(g: &BpppGens<'_, Ristretto>, w: &ReciprocalWitness<Scalar>) -> Vec<CompressedRistretto> {
     w.v.iter().zip(&w.s).map(|(v, s)| g.commit_input(v, *s).compress()).collect()
 }
 
@@ -259,7 +260,7 @@ fn late_columns_are_rejected() {
     assert!(c.check().is_ok());
     let n_mm = c.n_p + c.n_m;
     let w_r_col = n_mm + c.n_p;
-    let numerator_on = |col: usize, c: &ReciprocalCircuit| {
+    let numerator_on = |col: usize, c: &ReciprocalCircuit<Scalar>| {
         let mut x = c.clone();
         let mut w_n = SparseMatrix::new(x.w_n.n_cols());
         w_n.push_row(vec![(col, Scalar::ONE)]);
@@ -348,7 +349,7 @@ fn public_pole_at_alpha_fails() {
 
 /// Rebuild a matrix with more columns (inserting none: the new columns are at the end of
 /// `w_O`, after every existing column).
-fn widen(m: &SparseMatrix, n_cols: usize) -> SparseMatrix {
+fn widen(m: &SparseMatrix<Scalar>, n_cols: usize) -> SparseMatrix<Scalar> {
     let mut out = SparseMatrix::new(n_cols);
     for r in 0..m.n_rows() {
         out.push_row(m.row(r).map(|(c, v)| (c, *v)));
@@ -425,7 +426,7 @@ fn two_phase_prover_takes_late_values_from_callback() {
 /// `w_O`, a public table `rows` with multiplicities in `w_O`; poles `w_D,q = x_q0 + eta x_q1`,
 /// public poles `(r_0, r_1)` as polynomials in `eta`. One reciprocal row:
 /// `sum_q 1/(X + w_D,q) - sum_r m_r/(X + r_0 + eta r_1) = 0`.
-fn tuple_lookup(tuples: &[(Scalar, Scalar)], rows: &[(u64, u64)], mult: &[u64]) -> (ReciprocalCircuit, ReciprocalWitness) {
+fn tuple_lookup(tuples: &[(Scalar, Scalar)], rows: &[(u64, u64)], mult: &[u64]) -> (ReciprocalCircuit<Scalar>, ReciprocalWitness<Scalar>) {
     let n_p = tuples.len();
     let n_m = 0;
     let n_mm = n_p + n_m;
@@ -435,7 +436,7 @@ fn tuple_lookup(tuples: &[(Scalar, Scalar)], rows: &[(u64, u64)], mult: &[u64]) 
     let col_o = |e: usize| 2 * n_mm + e;
     let mut w_n = SparseMatrix::new(n_w);
     (0..n_p).for_each(|_| w_n.push_row(vec![]));
-    let mut terms: Vec<(usize, Scalar, Option<Pole>)> = (0..n_p).map(|q| (n_mm + q, Scalar::ONE, None)).collect();
+    let mut terms: Vec<(usize, Scalar, Option<Pole<Scalar>>)> = (0..n_p).map(|q| (n_mm + q, Scalar::ONE, None)).collect();
     for (r, &(a, b)) in rows.iter().enumerate() {
         terms.push((col_o(2 * n_p + r), -Scalar::ONE, Some(Pole(vec![Scalar::from(a), Scalar::from(b)]))));
     }
@@ -469,7 +470,7 @@ fn rows16() -> Vec<(u64, u64)> {
     (0..16u64).map(|i| (i, (i * 7) % 16)).collect()
 }
 
-fn tuple_gens(c: &ReciprocalCircuit) -> (PedersenGens, BulletproofGens) {
+fn tuple_gens(c: &ReciprocalCircuit<Scalar>) -> (PedersenGens<Ristretto>, BulletproofGens<Ristretto>) {
     setup(c)
 }
 
@@ -616,7 +617,7 @@ fn tuple_poles_batch() {
     let mut rng = ChaCha20Rng::seed_from_u64(9);
     let p1 = prove(&c, &g, &[], &w, &mut Transcript::new(b"b"), &mut rng).unwrap();
     let p2 = prove(&r, &gr, &Vr, &rw, &mut Transcript::new(b"b"), &mut rng).unwrap();
-    let run = |p1: &CircuitProof| {
+    let run = |p1: &CircuitProof<Ristretto>| {
         let mut b = crate::bppp::BatchVerifier::new(&pc, &bp, ChaCha20Rng::seed_from_u64(1));
         b.add_reciprocal(&ReciprocalProof(p1.clone()), &c, &[], &mut Transcript::new(b"b"))?;
         b.add_reciprocal(&ReciprocalProof(p2.clone()), &r, &Vr, &mut Transcript::new(b"b"))?;
@@ -732,7 +733,7 @@ fn shape_check_agrees_with_compiling() {
     for case in file["cases"].as_array().unwrap() {
         let c = crate::bppp::testutil::recip_circuit::<Scalar>(case);
         let mut variants = vec![c.clone()];
-        let mut push = |f: &dyn Fn(&mut ReciprocalCircuit)| {
+        let mut push = |f: &dyn Fn(&mut ReciprocalCircuit<Scalar>)| {
             let mut x = c.clone();
             f(&mut x);
             variants.push(x);

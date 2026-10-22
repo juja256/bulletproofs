@@ -11,6 +11,7 @@ use curve25519_dalek::scalar::Scalar;
 use merlin::Transcript;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
+use bulletproofs::curve::Ristretto;
 
 /// Mutations of `good`: one flipped byte, a truncation, an extension, a swapped 32-byte
 /// block, and random strings of nearby lengths.
@@ -42,7 +43,7 @@ fn mutations(good: &[u8], rng: &mut ChaCha20Rng, n: usize) -> Vec<Vec<u8>> {
 
 #[test]
 fn range_and_mact_proofs() {
-    let pc = PedersenGens::default();
+    let pc = PedersenGens::<Ristretto>::default();
     let bp = BulletproofGens::new(512, 1);
     let mut rng = ChaCha20Rng::seed_from_u64(11);
     for base in [16u64, 256] {
@@ -67,7 +68,7 @@ fn range_and_mact_proofs() {
     }
 }
 
-fn gadget<CS: CircuitBuilder>(cs: &mut CS, x: bulletproofs::r1cs::Variable, v: Option<u64>) {
+fn gadget<CS: CircuitBuilder<Scalar>>(cs: &mut CS, x: bulletproofs::r1cs::Variable, v: Option<u64>) {
     let t = cs.table((0..16u64).map(|i| vec![i]).collect()).unwrap();
     let a = cs.lookup_value(t, v.map(|v| v & 15)).unwrap();
     let b = cs.lookup_value(t, v.map(|v| v >> 4)).unwrap();
@@ -93,7 +94,7 @@ fn r1cs_proofs_of_every_kind() {
             p.constrain(o - Scalar::from(0xb4u64));
         }
         let good = p.prove_with_rng(&bp, &mut rng).unwrap().to_bytes();
-        let verify = |proof: &R1CSProof| {
+        let verify = |proof: &R1CSProof<Ristretto>| {
             let mut t = Transcript::new(b"r");
             let mut v = Verifier::new(&mut t);
             v.set_backend(backend);

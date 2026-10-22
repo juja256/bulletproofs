@@ -17,7 +17,7 @@ use crate::generators::{BulletproofGens, PedersenGens};
 use crate::r1cs::R1CSProof;
 use crate::simplicity::ir::{Op, Options, Prog, Ty, Val};
 use crate::simplicity::point::{assert_infinity, const_gej, const_gej_compressed, ge_to_gej, msm, witness_point, witness_scalar, WitPoint};
-use crate::simplicity::run::{bit_value, execute_term, weight_of, word_value, Env, ExecError, Report, MAX_CELLS};
+use crate::simplicity::run::{bit_value, execute_term, spend_term, weight_of, word_value, Env, ExecError, Report, Spend, Weight, MAX_CELLS};
 use crate::simplicity::term::Term;
 use crate::simplicity::sha::{lower_log, ChallengeVals, Part, Rec};
 use crate::simplicity::trace::{register_witness_point, register_witness_scalar, with_tape, NodeId, PointSrc, TOp, Tape, Traced, TracedCurve, TracedPoint};
@@ -69,6 +69,13 @@ pub struct Stats {
     pub live_bits: u64,
     /// The lowering the compiler chose (the lightest; the CMR depends on it).
     pub lowering: String,
+    /// The static cost of the (unpruned) program, in mWU.
+    pub cost_mwu: u64,
+    /// The budget its program and witness bytes pay for, in mWU: at least `cost_mwu` unless no
+    /// lowering fits (then the spend needs annex padding, non-standard on Liquid). The pruned
+    /// program a node runs has the same cost and a slightly different size (a hidden branch is
+    /// 32 bytes): [`SimplicityVerifier::spend`] checks the real one.
+    pub budget_mwu: u64,
 }
 
 fn gadget_err(s: &str) -> R1CSError {
@@ -105,6 +112,13 @@ impl SimplicityVerifier {
     /// Run the program with `w` in the transaction `env`, as a node would.
     pub fn execute(&self, w: &SimplicityWitness, env: &Env) -> Result<Report, ExecError> {
         execute_term(&self.term, &w.0, env, true)
+    }
+
+    /// The witness stack items of a spend in `env`: the pruned program and its witness data,
+    /// encoded as consensus does, after running them as a node would (cost within the budget,
+    /// cells within the limit). The stack is `[witness, program, cmr, control block]`.
+    pub fn spend(&self, w: &SimplicityWitness, env: &Env) -> Result<Spend, ExecError> {
+        spend_term(&self.term, &w.0, env, true)
     }
 }
 
@@ -274,6 +288,8 @@ pub(crate) fn compile_with<R: rand_core::RngCore + rand_core::CryptoRng>(
         stored: low.stored,
         live_bits: low.live_bits,
         lowering,
+        cost_mwu: weight.cost,
+        budget_mwu: weight.budget,
     };
     Ok(SimplicityVerifier { term, text: std::sync::OnceLock::new(), cmr, n_lin, n_mm, stats })
 }
@@ -427,23 +443,24 @@ fn build(tr: &Trace, proof: &DummyProof, gens: &BpppGens<Secp256k1>, compressed:
 }
 
 /// The lightest lowering of the programs `progs` (generator modes): (weight, index of the
-/// program, options). Weights come from the dummy proof's witness (the same types, so the same
+/// program, options), preferring programs that fit their budget without annex padding
+/// ([`Weight::key`]). Weights come from the dummy proof's witness (the same types, so the same
 /// bytes and cost). The candidates are weighed on all cores, a worker returning only a weight;
 /// the choice is the sequential one, the first lightest in a fixed order, so the CMR does not
 /// depend on the threads. A candidate that needs more cells than consensus allows is never
 /// kept. `forced` (tests) weighs one lowering only.
-fn lightest_lowering(progs: &[(Prog, usize)], dummy: &HashMap<Arc<str>, ::simplicity::Value>, forced: Option<Options>) -> Result<(u64, usize, Options), R1CSError> {
-    let weigh = |k: usize, opts: &Options| -> Result<Option<u64>, R1CSError> {
+fn lightest_lowering(progs: &[(Prog, usize)], dummy: &HashMap<Arc<str>, ::simplicity::Value>, forced: Option<Options>) -> Result<(Weight, usize, Options), R1CSError> {
+    let weigh = |k: usize, opts: &Options| -> Result<Option<Weight>, R1CSError> {
         let l = progs[k].0.lower(opts);
         let (w, cells) = weight_of(&l.term, dummy).map_err(|e| gadget_err(&format!("the generated program does not type: {:?}", e)))?;
         Ok((cells <= MAX_CELLS).then_some(w))
     };
-    // the first lightest of `cands` (index of the program, options), in their order
-    let lightest = |cands: &[(usize, Options)], weights: &[Option<u64>]| -> Option<(u64, usize, Options)> {
-        let mut best: Option<(u64, usize, Options)> = None;
+    // the first preferred of `cands` (index of the program, options), in their order
+    let lightest = |cands: &[(usize, Options)], weights: &[Option<Weight>]| -> Option<(Weight, usize, Options)> {
+        let mut best: Option<(Weight, usize, Options)> = None;
         for (&(k, o), w) in cands.iter().zip(weights) {
             if let Some(w) = *w {
-                if best.map_or(true, |(b, ..)| w < b) {
+                if best.map_or(true, |(b, ..)| w.key() < b.key()) {
                     best = Some((w, k, o));
                 }
             }
@@ -457,7 +474,7 @@ fn lightest_lowering(progs: &[(Prog, usize)], dummy: &HashMap<Arc<str>, ::simpli
     let weights = par_map(&cands, |(k, o)| weigh(*k, o)).into_iter().collect::<Result<Vec<_>, _>>()?;
     // each generator mode's best, then small constant words and shared functions on it (they
     // trade a little cost for bytes)
-    let mut per_mode: Vec<Option<(u64, usize, Options)>> = (0..progs.len())
+    let mut per_mode: Vec<Option<(Weight, usize, Options)>> = (0..progs.len())
         .map(|k| {
             let idx: Vec<usize> = (0..cands.len()).filter(|i| cands[*i].0 == k).collect();
             lightest(&idx.iter().map(|i| cands[*i]).collect::<Vec<_>>(), &idx.iter().map(|i| weights[*i]).collect::<Vec<_>>())

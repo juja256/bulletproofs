@@ -82,8 +82,10 @@ The compiler traces the crate's own BP++ verifier (`reciprocal::terms`):
   has the real one's types, so the unpruned program has the same bytes and static cost as with a
   real proof; the pruned program a node runs differs by about 32 bytes per selection), drops any
   that needs more cells than consensus allows, and keeps the smallest max(budget, cost):
-  byte-bound programs choose fewer bytes, cost-bound ones a lower cost. `Stats::lowering` names
-  the choice, on which the CMR depends.
+  byte-bound programs choose fewer bytes, cost-bound ones a lower cost. Programs whose own bytes
+  pay for their cost come first (2026-10-22): the rest needs annex padding, which Liquid does not
+  relay (non-standard; Elements PR 1539, open in 2026-10). `Stats::lowering` names the choice, on
+  which the CMR depends; `Stats::cost_mwu` and `Stats::budget_mwu` give its cost and budget.
 - **The multiscalar multiplication is a balanced tree** of `gej_add`; with the coefficients
   recomputed where they are read, the whole sum is one expression over the stored values.
 - **Scheduling.** Steps are ordered to keep few bits alive: on demand from each sink, deepest
@@ -131,7 +133,9 @@ C_S`, then `X_r, R_r` per round), as (parity bit, x), and `s<i>` for its final s
 
 The budget `execute` checks is the node's: 1000 · (witness stack + 50) mWU, where the stack holds
 the witness data, the program, the CMR and the control block. It also checks consensus's cell
-limit (5 242 880).
+limit (5 242 880). `spend` runs the same checks and returns the encodings a spend puts on the
+witness stack, `[witness, program, cmr, control block]`: the pruned program and its witness data
+(`Spend::program`, `Spend::witness`).
 
 **Limitations.**
 - Only BP++, without randomized constraints.
@@ -216,7 +220,9 @@ as a direct R1CS circuit (`x · y = 15` in the tests) is about 5 kWU.
 **What this says.**
 
 - The chain of 1 024 gates fits a standard transaction (400 kWU): its cost (398.8 M mWU) passes
-  its budget, so the input is padded to about 398.8 kWU, 0.3% under the limit. From 256 gates
+  its budget, so the input is padded to about 398.8 kWU, 0.3% under the limit. *(2026-10-22: that
+  padding is annex padding, non-standard on Liquid; the compiler now prefers programs that need
+  none, not measured again for this chain.)* From 256 gates
   the cost sets the weight; below, the bytes.
 - The jets of the multiscalar multiplication (`scale` and `gej_add`, about 77 WU per term with a
   minimal coefficient) put the ceiling of a standard transaction near 5 000 gates; at 512 gates

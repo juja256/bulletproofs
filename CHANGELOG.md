@@ -4,6 +4,10 @@ Entries are listed in reverse chronological order.
 
 ## Unreleased (this fork)
 
+* Simplicity: the compiler prefers programs whose own bytes pay for their cost (annex padding
+  is not relayed on Liquid); `Stats::cost_mwu`, `Stats::budget_mwu`; `SimplicityVerifier::spend`
+  returns the pruned program and witness encodings for a transaction (`Spend`). The verifier of
+  bpvm's `mul` guest: cost 295.6 M mWU within its budget of 299.3 M.
 * Breaking changes (API refactor, 2026-10-22).
   * Features: only `parallel`, `simplicity` and `cheats` remain. R1CS (`yoloproofs`),
     Bulletproofs++ (`bppp`), the curve secp256k1 (`secp256k1`) and `Sha256Transcript`

@@ -12,7 +12,7 @@ mod sha;
 mod term;
 mod trace;
 
-pub use self::run::{dummy_env, dummy_env_with_output, sighash_of, Env, ExecError, Report, MAX_CELLS};
+pub use self::run::{dummy_env, dummy_env_with_output, sighash_of, Env, ExecError, Report, Spend, MAX_CELLS};
 
 /// The transcript label of the spending transaction's hash: the prover appends
 /// `sighash_of(env)` under it, and the program replaces the message with `jet_sig_all_hash`.

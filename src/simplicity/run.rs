@@ -44,6 +44,17 @@ pub struct Report {
     pub cmr: Cmr,
 }
 
+/// The data a spend puts on the witness stack, and what running it measured.
+#[derive(Clone, Debug)]
+pub struct Spend {
+    /// The pruned program's consensus encoding.
+    pub program: Vec<u8>,
+    /// The witness data's encoding.
+    pub witness: Vec<u8>,
+    /// The measurements.
+    pub report: Report,
+}
+
 /// Why a program did not run to completion.
 #[derive(Clone, Debug)]
 pub enum ExecError {
@@ -233,16 +244,42 @@ pub(crate) fn breakdown(root: &Arc<RedeemNode>) -> std::collections::BTreeMap<St
     go(root, &mut HashMap::new())
 }
 
-/// The weight a program puts on its input, in mWU, and its cells: the larger of its budget
-/// (1000 · (stack + 50), the stack holding `witness`'s encoding) and its static cost, of the
-/// unpruned program (no execution: any witness of the right types will do). A node runs the
-/// pruned program, whose encoding differs by a hidden branch (about 32 bytes) per selection.
-pub(crate) fn weight_of(t: &crate::simplicity::term::Term, witness: &HashMap<Arc<str>, Value>) -> Result<(u64, usize), ExecError> {
+/// The static cost of a program and the budget its own bytes pay for, in mWU.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Weight {
+    pub(crate) cost: u64,
+    /// 1000 · (stack + 50), the stack holding the program and the witness.
+    pub(crate) budget: u64,
+}
+
+impl Weight {
+    /// What the program puts on its input: its budget, or its cost if that is larger (the
+    /// difference then has to be bought with annex padding).
+    pub(crate) fn mwu(self) -> u64 {
+        self.cost.max(self.budget)
+    }
+
+    /// Whether the program's own bytes pay for its cost. Annex padding is non-standard on
+    /// Liquid (2026-10: Elements PR 1539 is open), so a program that needs it is not relayed.
+    pub(crate) fn fits(self) -> bool {
+        self.cost <= self.budget
+    }
+
+    /// The order of preference: programs that fit their budget first, then the lightest.
+    pub(crate) fn key(self) -> (bool, u64) {
+        (!self.fits(), self.mwu())
+    }
+}
+
+/// The weight of a program and its cells, of the unpruned program (no execution: any witness
+/// of the right types will do). A node runs the pruned program, whose encoding differs by a
+/// hidden branch (about 32 bytes) per selection; its cost is the same or lower.
+pub(crate) fn weight_of(t: &crate::simplicity::term::Term, witness: &HashMap<Arc<str>, Value>) -> Result<(Weight, usize), ExecError> {
     types::Context::with_context(|ctx| {
         let node = t.to_node(&ctx, Some(witness)).map_err(|e| ExecError::Finalize(e.to_string()))?;
         let program = node.finalize_unpruned().map_err(|e| ExecError::Finalize(e.to_string()))?;
         let (p, w) = program.to_vec_with_witness();
-        Ok((budget(p.len(), w.len()).max(cost_of(&program)), program.bounds().extra_cells))
+        Ok((Weight { cost: cost_of(&program), budget: budget(p.len(), w.len()) }, program.bounds().extra_cells))
     })
 }
 
@@ -260,6 +297,11 @@ pub(crate) fn execute_text(program: &str, witness: &HashMap<Arc<str>, Value>, en
 
 /// Run a program given as a combinator DAG, as a node would ([`execute_text`]'s checks).
 pub(crate) fn execute_term(t: &crate::simplicity::term::Term, witness: &HashMap<Arc<str>, Value>, env: &Env, budgeted: bool) -> Result<Report, ExecError> {
+    spend_term(t, witness, env, budgeted).map(|s| s.report)
+}
+
+/// [`execute_term`], with the encodings a spend puts on the witness stack.
+pub(crate) fn spend_term(t: &crate::simplicity::term::Term, witness: &HashMap<Arc<str>, Value>, env: &Env, budgeted: bool) -> Result<Spend, ExecError> {
     types::Context::with_context(|ctx| {
         let node = t.to_node(&ctx, Some(witness)).map_err(|e| ExecError::Finalize(e.to_string()))?;
         run_node(node, env, budgeted)
@@ -270,11 +312,11 @@ pub(crate) fn execute_term(t: &crate::simplicity::term::Term, witness: &HashMap<
 pub(crate) fn execute_forest(forest: &Forest, witness: &HashMap<Arc<str>, Value>, env: &Env, budgeted: bool) -> Result<Report, ExecError> {
     types::Context::with_context(|ctx| {
         let node = forest.to_witness_node(&ctx, witness).ok_or_else(|| ExecError::Parse("no main".into()))?;
-        run_node(node, env, budgeted)
+        run_node(node, env, budgeted).map(|s| s.report)
     })
 }
 
-fn run_node(node: Arc<::simplicity::ConstructNode<'_>>, env: &Env, budgeted: bool) -> Result<Report, ExecError> {
+fn run_node(node: Arc<::simplicity::ConstructNode<'_>>, env: &Env, budgeted: bool) -> Result<Spend, ExecError> {
     {
         let program = node.finalize_pruned(env).map_err(|e| ExecError::Finalize(e.to_string()))?;
         let mut mac = BitMachine::for_program(&program).map_err(|e| ExecError::Machine(e.to_string()))?;
@@ -319,7 +361,7 @@ fn run_node(node: Arc<::simplicity::ConstructNode<'_>>, env: &Env, budgeted: boo
         if budgeted && cost_mwu > budget_mwu {
             return Err(ExecError::Budget { cost_mwu, budget_mwu });
         }
-        Ok(Report {
+        let report = Report {
             cost_mwu,
             data_mwu,
             budget_mwu,
@@ -328,7 +370,8 @@ fn run_node(node: Arc<::simplicity::ConstructNode<'_>>, env: &Env, budgeted: boo
             cells: bounds.extra_cells,
             frames: bounds.extra_frames,
             cmr: program.cmr(),
-        })
+        };
+        Ok(Spend { program: p, witness: w, report })
     }
 }
 
@@ -337,6 +380,20 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::sync::Arc;
+
+    /// A program that fits its budget beats a lighter one that needs annex padding; among
+    /// those that fit (or among those that do not), the lighter wins.
+    #[test]
+    fn programs_that_fit_their_budget_are_preferred() {
+        let w = |cost, budget| Weight { cost, budget };
+        let over = w(10, 9);
+        let fits = w(8, 12);
+        assert!(!over.fits() && fits.fits());
+        assert!(over.mwu() < fits.mwu());
+        assert!(fits.key() < over.key());
+        assert!(w(5, 11).key() < fits.key());
+        assert!(w(10, 2).key() < w(11, 2).key());
+    }
 
     fn wit(name: &str, v: ::simplicity::Value) -> HashMap<Arc<str>, ::simplicity::Value> {
         let mut m = HashMap::new();

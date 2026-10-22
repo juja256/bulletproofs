@@ -46,7 +46,7 @@ pub struct PolyChallenge<C: Curve> {
 }
 
 /// A party's proof share, ready for aggregation into the final
-/// [`RangeProof`](::RangeProof).
+/// [`RangeProof`](crate::RangeProof).
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(bound = "")]
 pub struct ProofShare<C: Curve> {

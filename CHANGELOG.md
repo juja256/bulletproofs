@@ -39,6 +39,8 @@ Entries are listed in reverse chronological order.
   * `Variable` is opaque (`Variable::ONE` for the constant); the backends' wires are private.
     Operators that made ristretto255 linear combinations from variables alone
     (`var ± var`, `-var`, `var ± u64`, `var * u64`) are gone: write `lc(a) + b`.
+* `multiply` with an input variable that does not exist (from another constraint system) is a
+  `GadgetError` on both sides; the prover used to panic.
 * Fixed: with both `simplicity` and `parallel`, compiling a Simplicity verifier failed ("the
   verifier is not traceable"): the tracer's tape is per thread and the verifier's rayon calls
   ran elsewhere. Tracing now runs in a pool of one thread.

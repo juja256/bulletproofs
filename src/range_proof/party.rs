@@ -8,7 +8,7 @@
 //!
 //! For more explanation of how the `dealer`, `party`, and `messages`
 //! modules orchestrate the protocol execution, see the documentation
-//! in the [`aggregation`](::range_proof_mpc) module.
+//! in the [`aggregation`](crate::range_proof_mpc) module.
 
 extern crate alloc;
 

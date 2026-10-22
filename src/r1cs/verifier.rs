@@ -74,6 +74,10 @@ impl<T: TranscriptRef, C: Curve> ConstraintSystem<C::Scalar> for Verifier<T, C> 
     }
 
     fn multiply(&mut self, left: LinearCombination<C::Scalar>, right: LinearCombination<C::Scalar>) -> Result<Variable, R1CSError> {
+        // the inputs must exist: the prover evaluates them now
+        let c = self.counts();
+        self.builder.check_lc(&left, c)?;
+        self.builder.check_lc(&right, c)?;
         let i = self.num_vars;
         let fold = (self.builder.fold(&left, Wire::Left(i)), self.builder.fold(&right, Wire::Right(i)));
         Ok(self.multiplier(left, right, fold).2)
@@ -248,13 +252,12 @@ impl<T: TranscriptRef, C: Curve> Verifier<T, C> {
     ///
     /// The `commitment` parameter is a Pedersen commitment
     /// to the external variable for the constraint system.  All
-    /// external variables must be passed up-front, so that challenges
-    /// produced by [`ConstraintSystem::challenge_scalar`] are bound
-    /// to the external variables.
+    /// external variables must be committed before the first challenge (the second
+    /// phase of the BP backend), so that the challenges are bound to them.
     ///
     /// # Returns
     ///
-    /// Returns a pair of a Pedersen commitment (as a compressed Ristretto point),
+    /// Returns a pair of a Pedersen commitment (compressed, in the curve's encoding),
     /// and a [`Variable`] corresponding to it, which can be used to form constraints.
     pub fn commit(&mut self, commitment: C::Compressed) -> Variable {
         let i = self.V.len();

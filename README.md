@@ -86,9 +86,8 @@ section below for details on how to run them all.
 The following example shows how to create and verify a 32-bit rangeproof.
 
 ```rust
-# // The #-commented lines are hidden in Rustdoc but not in raw
-# // markdown rendering, and contain boilerplate code so that the
-# // code in the README.md is actually run as part of the test suite.
+# // The #-commented lines are boilerplate that makes the example a complete program
+# // (upstream ran it as a doc test; tests/range_proof.rs covers the same calls).
 #
 # extern crate rand;
 # use rand::thread_rng;
@@ -174,7 +173,7 @@ verifiers (see [Simplicity verifier](#simplicity-verifier-experimental)).
 ### Prover and verifier optimisations in this fork
 
 Compared to upstream, the R1CS prover needs about 3x less memory and is faster, the
-verifier too, with byte-identical proofs (`tests/golden.rs` pins proof bytes produced by
+verifier too, with byte-identical proofs (`src/r1cs/tests/golden.rs` pins proof bytes produced by
 upstream `d27dde0` with fixed randomness via `Prover::prove_with_rng`):
 
 - multiscalar multiplications run in chunks over slices (no lookup tables or buffers
@@ -185,23 +184,9 @@ upstream `d27dde0` with fixed randomness via `Prover::prove_with_rng`):
 - the inner-product prover computes the first rounds from the input generators and
   materialises the folded generators once, instead of folding them every round.
 
-The `avx2_backend` feature enables `curve25519-dalek`'s AVX2 backend,
-which implements curve arithmetic using [parallel
-formulas][parallel_edwards].  To use it for Bulletproofs, the
-`target_cpu` must support AVX2:
-
-```text
-RUSTFLAGS="-C target_cpu=skylake" cargo bench --features "avx2_backend"
-```
-
-Skylake-X CPUs have double the AVX2 registers. To use them, try
-
-```text
-RUSTFLAGS="-C target_cpu=skylake-avx512" cargo bench --features "avx2_backend"
-```
-
-This prevents spills in the AVX2 parallel field multiplication code, but causes
-worse code generation elsewhere ¯\\\_(ツ)\_/¯
+On ristretto255, `curve25519-dalek` 4 picks its SIMD backend (AVX2, or AVX-512 with nightly) by
+CPU detection at run time; `RUSTFLAGS="-C target_cpu=native"` lets the compiler use the same
+instructions elsewhere.
 
 ## Curves
 
@@ -347,8 +332,8 @@ the witness format and the measurements.
 
 ## Bulletproofs++ (experimental)
 
-The `bppp` feature adds Bulletproofs++ (Eagen, Kanjalkar, Ruffing, Nick, ePrint 2022/510) on
-ristretto255. **Not audited; the API and the proof format will change.** The protocol as
+`bulletproofs::bppp` is Bulletproofs++ (Eagen, Kanjalkar, Ruffing, Nick, ePrint 2022/510) on
+both curves. **Not audited; the API and the proof format will change.** The protocol as
 implemented is pinned in [`docs/bppp/spec.md`](docs/bppp/spec.md). `ref/bppp_ref.py` is a
 spec-level Python reference (symbolic group elements, a naive recursive verifier) that
 generates the test vectors in `tests/vectors/bppp/`. Its norm-argument part has the same author

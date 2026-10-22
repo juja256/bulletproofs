@@ -17,10 +17,10 @@ const ONE_PHASE_COMMITMENTS: u8 = 0;
 const TWO_PHASE_COMMITMENTS: u8 = 1;
 
 /// A proof of some statement specified by a
-/// [`ConstraintSystem`](::r1cs::ConstraintSystem).
+/// [`ConstraintSystem`](crate::r1cs::ConstraintSystem).
 ///
 /// Statements are specified by writing gadget functions which add
-/// constraints to a [`ConstraintSystem`](::r1cs::ConstraintSystem)
+/// constraints to a [`ConstraintSystem`](crate::r1cs::ConstraintSystem)
 /// implementation.  To construct an [`R1CSProof`], a prover constructs
 /// a [`Prover`](crate::r1cs::Prover), then passes it to gadget
 /// functions to build the constraint system, then consumes the

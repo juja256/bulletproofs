@@ -15,9 +15,11 @@ use crate::transcript::TranscriptBackend;
 /// statement: gadgets are written once against this trait (with `F` the scalar field, or
 /// generic over [`Field`] to run on every curve).
 ///
-/// Every operation is recorded independently of the backend and lowered when the proof is made
-/// or checked: to Bulletproofs (BP, spec §7.5) or to a Bulletproofs++ reciprocal form circuit
-/// (BP++, §7.6). Every variable an operation reads must exist.
+/// `multiply` and `constrain` are R1CS multipliers and constraints, as upstream; the builder
+/// operations (witnesses, products, lookups, reciprocal arguments) are recorded independently
+/// of the backend. All are lowered when the proof is made or checked: to Bulletproofs (BP,
+/// spec §7.5) or to a Bulletproofs++ reciprocal form circuit (BP++, §7.6). Every variable an
+/// operation reads must exist.
 pub trait ConstraintSystem<F: Field> {
     /// Leases the proof transcript to the user, so they can add extra data to which the proof
     /// must be bound, but which is not available before creation of the constraint system

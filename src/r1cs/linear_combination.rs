@@ -144,7 +144,7 @@ impl Mul<Variable> for Scalar {
 }
 
 /// Represents a linear combination of
-/// [`Variables`](::r1cs::Variable).  Each term is represented by a
+/// [`Variables`](crate::r1cs::Variable).  Each term is represented by a
 /// `(Variable, F)` pair.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LinearCombination<F: Field> {

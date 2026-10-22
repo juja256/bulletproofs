@@ -125,11 +125,11 @@ the round algebra, the weights and the length-1 rule are theirs.
 
 Note on constant time: secp256k1-zkp computes the norm argument in variable time, since inside
 the circuit protocol its inputs are uniformly distributed given the transcript (paper,
-Theorem 2: $l(\tau)$, $n(\tau)$ are masked by the fresh $l_S$, $n_S$, $r_S$ of $C_S$). This crate uses
-constant-time multiscalar multiplications for $X$ and $R$ by default; the feature
-`bppp-vartime` computes them in variable time **inside the circuit protocol only** (the
-standalone argument, whose inputs are the caller's witness, and every commitment to the witness
-stay constant time). The proofs are identical.
+Theorem 2: $l(\tau)$, $n(\tau)$ are masked by the fresh $l_S$, $n_S$, $r_S$ of $C_S$). This crate does
+the same: the multiscalar multiplications for $X$ and $R$ run in variable time **inside the
+circuit protocol** (always, since 2026-10-22; before, constant time unless the feature
+`bppp-vartime`, now removed). The standalone argument, whose inputs are the caller's witness, and
+every commitment to the witness stay constant time. The proofs are identical either way.
 
 Implementation note (no effect on the proofs): the prover computes $X$ and $R$ of the first
 rounds directly from the input generators with accumulated public coefficients and folds the

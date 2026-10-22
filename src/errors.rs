@@ -113,7 +113,7 @@ pub enum R1CSError {
     #[error("Proof data could not be parsed.")]
     FormatError,
     /// Occurs when verification of an
-    /// [`R1CSProof`](::r1cs::R1CSProof) fails.
+    /// [`R1CSProof`](crate::r1cs::R1CSProof) fails.
     #[error("R1CSProof did not verify correctly.")]
     VerificationError,
 

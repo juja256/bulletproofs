@@ -33,7 +33,7 @@ impl core::fmt::Display for Backend {
     }
 }
 
-/// A backend name other than `"bp"` or (with the `bppp` feature) `"bppp"`.
+/// A backend name other than `"bp"` or `"bppp"`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UnknownBackend;
 

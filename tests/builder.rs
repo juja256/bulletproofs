@@ -600,3 +600,21 @@ fn foreign(n_w: usize, n: usize, k: usize) -> (Vec<Variable>, Vec<Variable>, Vec
     let c = (0..k).map(|_| p.commit(Scalar::from(1u64), Scalar::from(1u64)).1).collect();
     (w, o, c)
 }
+
+/// `multiply` with a variable of another constraint system is a `GadgetError` on both sides
+/// (the prover used to panic evaluating it).
+#[test]
+fn multiply_with_missing_variables_is_an_error() {
+    let (w, o, c) = foreign(5, 3, 2);
+    for y in [w[4], o[2], c[1]] {
+        let pc = PedersenGens::<Ristretto>::default();
+        let mut t = Transcript::new(b"m");
+        let mut p = Prover::new(&pc, &mut t);
+        let x = p.witness(Some(Scalar::from(2u64))).unwrap();
+        assert!(matches!(p.multiply(x.into(), y.into()), Err(R1CSError::GadgetError { .. })), "prover {:?}", y);
+        let mut t = Transcript::new(b"m");
+        let mut v = Verifier::<_, Ristretto>::new(&mut t);
+        let x = v.witness(None).unwrap();
+        assert!(matches!(v.multiply(y.into(), x.into()), Err(R1CSError::GadgetError { .. })), "verifier {:?}", y);
+    }
+}

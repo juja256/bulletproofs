@@ -46,16 +46,20 @@ impl<'a, C: Curve> BpppGens<'a, C> {
     }
 
     /// The cached table of `h[1..] || n` when a multiplication over them and `other` further
-    /// points gains from it (`Curve::TABLE_CROSSOVER`, the others weighing 3 each) and the
-    /// table is of these very generators (they are public fields).
+    /// points gains from it (`Curve::TABLE_CROSSOVER`, the others weighing 3 each) and they are
+    /// still the setup's own generators (they are public fields): checked before a table is
+    /// built, so other generators never build or use one.
     pub(crate) fn table(&self, other: usize) -> Option<Arc<Fixed<C>>> {
         let bp = self.bp?;
         let (nh, nn) = (self.h.len().checked_sub(1)?, self.n.len());
         if nh + nn + 3 * other > C::TABLE_CROSSOVER {
             return None;
         }
-        let t = bp.table(nh, nn);
-        (t.points[..nh] == self.h[1..] && t.points[nh..] == *self.n).then(|| t)
+        let (g, h) = bp.party0();
+        if g.get(..nn)? != self.n || h.get(..nh)? != &self.h[1..] {
+            return None;
+        }
+        Some(bp.table(nh, nn))
     }
 
     /// The `BulletproofGens` capacity for a linear part of length `n_lin` and `n_m` norm

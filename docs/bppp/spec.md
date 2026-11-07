@@ -305,16 +305,19 @@ $(v', h, n', \gamma)$ of §2.4 ($v'$ the coefficient of $G$):
 $$(v' - p_s(\tau)) G + \langle h, H\rangle + \langle n' - p_n(\tau), N\rangle - \tau^{-1} C_S - \delta C_O - \tau C_L - \tau^2 C_R - \sum_i \tau^3 \nu_i V_i - \sum_r \left(\gamma_r X_r + (\gamma_r^2 - 1) R_r\right) = 0 .$$
 
 **Fixed-generator tables** (2026-11-07; implementation, the proofs are unchanged). $H_1, \dots$
-and $N$ are prefixes of `BulletproofGens`, so their multiples are precomputed once per
-$(|H| - 1, N_m)$ and cached in it (shared by clones): ristretto255 uses curve25519-dalek's
-`VartimeRistrettoPrecomputation`, secp256k1 a Straus multiplication with width-7 NAF tables of odd
-multiples in affine coordinates (the other points get width-5 tables per call). The verifier's
-multiplication and the prover's deferred norm-argument rounds (§2, variable time inside this
-protocol) use them while $|H| - 1 + N_m + 3 \cdot (\text{other points}) \le$
-`Curve::TABLE_CROSSOVER` — 256 for ristretto255, 1536 for secp256k1 (measured, Apple M4 Pro) —
-and only if the cached points still equal the statement's generators (`BpppGens` has public
-fields). Range proofs, verify: secp256k1 about 2× faster in every configuration of
-`examples/bppp_range_configs.rs`, ristretto255 about 10% for small ones.
+and $N$ are prefixes of `BulletproofGens`, so their multiples can be precomputed once per
+$(|H| - 1, N_m)$ and cached in it (shared by clones, at most 8 tables, the oldest dropped).
+secp256k1 uses a Straus multiplication with width-7 NAF tables of odd multiples in affine
+coordinates (the other points get width-5 tables per call); ristretto255 uses none, since
+curve25519-dalek's precomputation costs about 40 multiplications to build and saves 2–10%.
+The verifier's multiplication and the prover's deferred norm-argument rounds (§2, variable time
+inside this protocol) use them while $|H| - 1 + N_m + 3 \cdot (\text{other points}) \le$
+`Curve::TABLE_CROSSOVER` (secp256k1: 1536 serial, 128 with `parallel`, where Pippenger runs on
+every core; measured on an Apple M4 Pro) and only if the statement's generators are still the
+setup's own (`BpppGens` has public fields), which is checked before a table is built. Range
+proofs on secp256k1 (`examples/bppp_range_configs.rs`, first and median runs alike): serial,
+verify about 2× faster in every configuration and prove 1.1–1.8×; with `parallel`, verify
+25–45% faster for small configurations, the rest unchanged.
 
 ### 3.8 Transcript
 

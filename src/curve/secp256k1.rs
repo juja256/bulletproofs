@@ -181,8 +181,13 @@ impl Curve for Secp256k1 {
     }
 
     type Table = super::straus::Table;
-    // 2.5x at 260 weighted points, 1.1x at 1300, 0.9x at 2500 (Apple M4 Pro, 2026-11-07)
+    // Straus with tables runs on one thread, Pippenger on all with `parallel`. Serial: 2.5x at
+    // 260 weighted points, 1.1x at 1300, 0.9x at 2500; parallel: 1.5x at 100, 1.1x at 140, 0.98x
+    // at 176 (Apple M4 Pro, 2026-11-07).
+    #[cfg(not(feature = "parallel"))]
     const TABLE_CROSSOVER: usize = 1536;
+    #[cfg(feature = "parallel")]
+    const TABLE_CROSSOVER: usize = 128;
 
     fn table(p: &[ProjectivePoint]) -> super::straus::Table {
         super::straus::table(p)

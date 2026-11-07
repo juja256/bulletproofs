@@ -78,8 +78,10 @@ impl Curve for Ristretto {
     }
 
     type Table = VartimeRistrettoPrecomputation;
-    // 1.2x below 120 fixed points, even at 300 (Apple M4 Pro, 2026-11-07)
-    const TABLE_CROSSOVER: usize = 256;
+    // Never: curve25519-dalek's tables (width-8 NAF of affine Niels points, used with width-5
+    // digits) cost about 40 multiplications to build and save 2-10% per multiplication
+    // (Apple M4 Pro, 2026-11-07); the first proof of a shape would be 2-3x slower.
+    const TABLE_CROSSOVER: usize = 0;
 
     fn table(p: &[RistrettoPoint]) -> VartimeRistrettoPrecomputation {
         VartimeRistrettoPrecomputation::new(p.iter())

@@ -1,6 +1,6 @@
-//! Size and median prove / verify time of BP++ range proofs for `bits`-bit values in batches of
-//! `count` (the configurations fastcrypto's README reports), serial unless built with
-//! `parallel`:
+//! Size, first and median prove / verify time of BP++ range proofs for `bits`-bit values in
+//! batches of `count` (the configurations fastcrypto's README reports); the first proof of a
+//! shape also builds the cached generator tables. Serial unless built with `parallel`:
 //!
 //! ```sh
 //! cargo run --release --example bppp_range_configs                      # ristretto255, base 16, 50 runs
@@ -40,7 +40,7 @@ fn run<C: Curve>(base: u64, runs: usize) {
     let mut rng = ChaCha20Rng::seed_from_u64(1);
     let pc = PedersenGens::<C>::default();
     println!("{}, base {}, median of {} runs", C::NAME, base, runs);
-    println!("{:>6} {:>6} {:>10} {:>10}", "config", "bytes", "prove ms", "verify ms");
+    println!("{:>6} {:>6} {:>10} {:>10} {:>10} {:>10}", "config", "bytes", "1st prove", "1st verify", "prove ms", "verify ms");
     for (bits, count) in CONFIGS {
         let bound = 1u128 << bits;
         let st = RangeStatement::new(base, vec![(0, bound); count]).unwrap();
@@ -58,6 +58,7 @@ fn run<C: Curve>(base: u64, runs: usize) {
             proof.verify(&st, &pc, &bp, &V, &mut Transcript::new(b"cfg")).unwrap();
             verify.push(t.elapsed().as_secs_f64() * 1e3);
         }
-        println!("{:>6} {:>6} {:>10.2} {:>10.2}", format!("{}x{}", bits, count), bytes, median(prove), median(verify));
+        let (p1, v1) = (prove[0], verify[0]);
+        println!("{:>6} {:>6} {:>10.2} {:>10.2} {:>10.2} {:>10.2}", format!("{}x{}", bits, count), bytes, p1, v1, median(prove), median(verify));
     }
 }

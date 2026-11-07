@@ -9,6 +9,9 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 use std::sync::{Arc, Mutex};
+
+/// At most this many tables are cached per `BulletproofGens` (the oldest is dropped).
+pub(crate) const MAX_TABLES: usize = 8;
 use digest::{ExtendableOutput, Update, XofReader};
 use sha3::{Shake256, Shake256Reader};
 
@@ -218,15 +221,28 @@ impl<C: Curve> BulletproofGens<C> {
         }
     }
 
-    /// The table of `H_0[..h] || G_0[..n]` (party 0), built on first use and cached. Panics
-    /// beyond the capacity.
+    /// The party-0 generators `(G, H)`.
+    pub(crate) fn party0(&self) -> (&[C::Point], &[C::Point]) {
+        (&self.G_vec[0], &self.H_vec[0])
+    }
+
+    /// The table of `H_0[..h] || G_0[..n]` (party 0), built on first use (outside the lock)
+    /// and cached; at most [`MAX_TABLES`] are kept, the oldest dropped. Panics beyond the
+    /// capacity.
     pub(crate) fn table(&self, h: usize, n: usize) -> Arc<crate::curve::Fixed<C>> {
-        let mut tables = self.tables.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((_, t)) = tables.iter().find(|(k, _)| *k == (h, n)) {
+        let lock = || self.tables.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, t)) = lock().iter().find(|(k, _)| *k == (h, n)) {
             return t.clone();
         }
         let points = self.H_vec[0][..h].iter().chain(&self.G_vec[0][..n]).copied().collect();
         let t = Arc::new(crate::curve::Fixed::new(points));
+        let mut tables = lock();
+        if let Some((_, other)) = tables.iter().find(|(k, _)| *k == (h, n)) {
+            return other.clone();
+        }
+        if tables.len() >= MAX_TABLES {
+            tables.remove(0);
+        }
         tables.push(((h, n), t.clone()));
         t
     }

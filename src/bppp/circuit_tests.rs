@@ -592,31 +592,110 @@ fn off_form_hook_with_zeros_is_honest() {
     assert!(proof.verify(&c, &g, &V, &mut Transcript::new(b"off")).is_ok());
 }
 
-/// The verifier multiplies with tables cached per `BulletproofGens` (spec §3.7) only for the
-/// generators they were built from: generators changed after `BpppGens::new` are used as they
-/// are, before and after the table exists.
+/// The verifier and the prover multiply with tables cached per `BulletproofGens` (spec §3.7)
+/// only for the generators they were built from: generators changed after `BpppGens::new` are
+/// used as they are once the table exists (secp256k1; ristretto255 builds no tables).
 #[test]
 fn changed_generators_do_not_use_cached_tables() {
+    type C = crate::curve::Secp256k1;
     let mut rng = ChaCha20Rng::seed_from_u64(93);
-    let s = Shape { n_m: 4, n_o: 2, n_v: 2, n_lin: 3, k: 2, n_l: 5, f_l: true, f_m: true, spread: true };
-    let (c, w) = instance(&mut rng, &s);
-    let (pc, bp) = gens_for(&c);
+    let (c, w) = tiny::<<C as Curve>::Scalar, _>(&mut rng, 3);
+    let pc = PedersenGens::<C>::default();
+    let bp = BulletproofGens::<C>::new(c.gens_capacity(), 1);
     let g = BpppGens::new(&pc, &bp, c.n_lin, c.n_m).unwrap();
-    let V = commitments(&g, &w);
-    let proof = prove_unchecked(&c, &g, &V, &w, &mut Transcript::new(b"tab"), &mut rng).unwrap();
+    let V: Vec<_> = w.v.iter().zip(&w.s).map(|(v, s)| C::compress(&g.commit_input(v, *s))).collect();
+    let proof = prove_impl(&c, &g, &V, &w, &mut Transcript::new(b"tab"), |_, _| &mut rng, false, &[]).unwrap();
     proof.verify(&c, &g, &V, &mut Transcript::new(b"tab")).unwrap();
     assert!(bp.cached_tables() > 0, "the verifier built a table");
-    let other: Vec<RistrettoPoint> = (0..c.n_m).map(|_| RistrettoPoint::random(&mut rng)).collect();
+    let random = |rng: &mut ChaCha20Rng| <<C as Curve>::Point as group::Group>::random(rng);
+    let other: Vec<_> = (0..c.n_m).map(|_| random(&mut rng)).collect();
     for change in 0..3 {
         let mut g2 = BpppGens::new(&pc, &bp, c.n_lin, c.n_m).unwrap();
         match change {
-            0 => g2.h[3] = RistrettoPoint::random(&mut rng),
-            1 => g2.h[H_FIXED + 1] = RistrettoPoint::random(&mut rng),
+            0 => g2.h[3] = random(&mut rng),
+            1 => g2.h[H_FIXED + 1] = random(&mut rng),
             _ => g2.n = &other,
         }
-        let V2 = commitments(&g2, &w);
         assert!(proof.verify(&c, &g2, &V, &mut Transcript::new(b"tab")).is_err(), "change {}", change);
-        let proof2 = prove_unchecked(&c, &g2, &V2, &w, &mut Transcript::new(b"tab"), &mut rng).unwrap();
-        proof2.verify(&c, &g2, &V2, &mut Transcript::new(b"tab")).unwrap_or_else(|e| panic!("change {}: {:?}", change, e));
+        prove_verify(&c, &w, &g2, &mut rng).unwrap_or_else(|e| panic!("change {}: {:?}", change, e));
     }
+}
+
+/// A small satisfiable circuit over any field: two multiplications, one input `v` with
+/// `w_L[0] + v + a_l = 0`, and `n_lin` unused linear slots.
+fn tiny<F: Field, R: RngCore>(rng: &mut R, n_lin: usize) -> (ArithmeticCircuit<F>, CircuitWitness<F>) {
+    let r = |rng: &mut R| F::random(&mut *rng);
+    let w = CircuitWitness { w_l: vec![r(rng), r(rng)], w_r: vec![r(rng), r(rng)], w_o: vec![], v: vec![vec![r(rng)]], s: vec![r(rng)] };
+    let mut w_l = SparseMatrix::new(4);
+    w_l.push_row(vec![(0, F::ONE)]);
+    let mut w_m = SparseMatrix::new(4);
+    w_m.push_row(vec![]);
+    w_m.push_row(vec![]);
+    let a_l = vec![-(w.w_l[0] + w.v[0][0])];
+    let a_m = vec![w.w_l[0] * w.w_r[0], w.w_l[1] * w.w_r[1]];
+    let c = ArithmeticCircuit { n_m: 2, n_o: 0, n_v: 1, n_lin, k: 1, w_l, a_l, w_m, a_m, f_l: true, f_m: false, partition: vec![] };
+    assert!(c.is_satisfied(&w));
+    (c, w)
+}
+
+/// Prove and verify `c` over `gens`.
+fn prove_verify<C: Curve>(c: &ArithmeticCircuit<C::Scalar>, w: &CircuitWitness<C::Scalar>, g: &BpppGens<C>, rng: &mut ChaCha20Rng) -> Result<(), ProofError> {
+    let V: Vec<C::Compressed> = w.v.iter().zip(&w.s).map(|(v, s)| C::compress(&g.commit_input(v, *s))).collect();
+    let proof = prove_impl(c, g, &V, w, &mut Transcript::new(b"tiny"), |_, _| &mut *rng, false, &[])?;
+    proof.verify(c, g, &V, &mut Transcript::new(b"tiny"))
+}
+
+/// Generators lengthened past the `BulletproofGens` they came from (public fields) are used
+/// as they are, without tables: no panic. Found in the final review.
+fn generators_past_the_setup<C: Curve>() {
+    let mut rng = ChaCha20Rng::seed_from_u64(94);
+    let (c, w) = tiny::<C::Scalar, _>(&mut rng, 3);
+    let pc = PedersenGens::<C>::default();
+    let bp = BulletproofGens::<C>::new(6, 1);
+    let mut g = BpppGens::new(&pc, &bp, 0, 2).unwrap();
+    g.h.extend((0..3).map(|_| <C::Point as group::Group>::random(&mut rng)));
+    prove_verify(&c, &w, &g, &mut rng).unwrap();
+}
+
+#[test]
+fn generators_past_the_setup_ristretto() {
+    generators_past_the_setup::<Ristretto>();
+}
+
+#[test]
+fn generators_past_the_setup_secp256k1() {
+    generators_past_the_setup::<crate::curve::Secp256k1>();
+}
+
+/// A table is built only for the setup's own generators: changed ones (public fields) build
+/// none and are used as they are; the setup's generators then build one.
+#[test]
+fn changed_generators_build_no_table() {
+    type C = crate::curve::Secp256k1;
+    let mut rng = ChaCha20Rng::seed_from_u64(95);
+    let (c, w) = tiny::<<C as Curve>::Scalar, _>(&mut rng, 3);
+    let pc = PedersenGens::<C>::default();
+    let bp = BulletproofGens::<C>::new(c.gens_capacity(), 1);
+    let mut g = BpppGens::new(&pc, &bp, 3, 2).unwrap();
+    g.h[2] = <<C as Curve>::Point as group::Group>::random(&mut rng);
+    prove_verify(&c, &w, &g, &mut rng).unwrap();
+    assert_eq!(bp.cached_tables(), 0);
+    let g = BpppGens::new(&pc, &bp, 3, 2).unwrap();
+    prove_verify(&c, &w, &g, &mut rng).unwrap();
+    assert_eq!(bp.cached_tables(), 1);
+}
+
+/// The cache keeps a bounded number of tables, however many shapes are verified.
+#[test]
+fn table_cache_is_bounded() {
+    type C = crate::curve::Secp256k1;
+    let mut rng = ChaCha20Rng::seed_from_u64(96);
+    let pc = PedersenGens::<C>::default();
+    let bp = BulletproofGens::<C>::new(64, 1);
+    for n_lin in 0..20 {
+        let (c, w) = tiny::<<C as Curve>::Scalar, _>(&mut rng, n_lin);
+        let g = BpppGens::new(&pc, &bp, n_lin, 2).unwrap();
+        prove_verify(&c, &w, &g, &mut rng).unwrap();
+    }
+    assert!(bp.cached_tables() <= crate::generators::MAX_TABLES, "{} tables", bp.cached_tables());
 }

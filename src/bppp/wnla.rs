@@ -325,10 +325,13 @@ fn prove_rounds<C: Curve, T: BpppTranscript + ?Sized>(
         let r_l = |j: usize| l[j];
         let r_n = |j: usize| s * n[j];
         let msm = |odd: bool, fl: &(dyn Fn(usize) -> C::Scalar + Sync), fnn: &(dyn Fn(usize) -> C::Scalar + Sync)| {
-            if let (true, Some(t), Some(hs), Some(gs)) = (vartime, table, h.input_scalars(odd, fl), g.input_scalars(odd, fnn)) {
-                // over the input generators: h[0] with the other points, h[1..] || n in the table
-                let s: Vec<C::Scalar> = hs[1..].iter().chain(&gs).copied().collect();
-                return t.msm(&s, &hs[..1], &st.h[..1]);
+            // over the input generators while deferred: h[0] with the other points, h[1..] || n
+            // in the table (the scalars only computed then)
+            if let (true, Some(t)) = (vartime, table) {
+                if let (Some(hs), Some(gs)) = (h.input_scalars(odd, fl), g.input_scalars(odd, fnn)) {
+                    let s: Vec<C::Scalar> = hs[1..].iter().chain(&gs).copied().collect();
+                    return t.msm(&s, &hs[..1], &st.h[..1]);
+                }
             }
             let ((hn, ht), (gn, gt)) = (h.terms(odd), g.terms(odd));
             C::msm_index(hn + gn, vartime, |v| {

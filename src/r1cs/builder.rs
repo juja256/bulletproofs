@@ -186,7 +186,7 @@ impl Placement {
 
     /// The free slot of witness `i` (not folded).
     pub(super) fn slot(&self, i: usize) -> usize {
-        self.slot.get(i).copied().unwrap_or(i - self.n_folded)
+        self.slot.get(i).copied().unwrap_or_else(|| i - self.n_folded)
     }
 
     /// The BP multiplier input of every witness: a folded one is the input of its product

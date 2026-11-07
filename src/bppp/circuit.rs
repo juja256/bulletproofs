@@ -285,12 +285,18 @@ struct Weights<F: Field> {
     c_lr: Vec<F>,
     c_v: Vec<F>,
     nu: Vec<F>,
+    /// The shape rows (spec §3.4): `T^0` weights on the coordinates outside the inputs' form,
+    /// on `N` (divided by `mu`), on `H_1..H_6` (index 0, `H_0`, is zero) and on the linear
+    /// slots from `n_v - 1` on; empty or zero without inputs.
+    shape_n: Vec<F>,
+    shape_h: [F; 7],
+    shape_l: Vec<F>,
     /// `2 <mu, a_m> - 2 <Lambda, a_l>`.
     affine: F,
 }
 
 impl<F: Field> Weights<F> {
-    fn new(c: &ArithmeticCircuit<F>, rho: F, lambda: F) -> Self {
+    fn new(c: &ArithmeticCircuit<F>, rho: F, lambda: F, kappa: F) -> Self {
         let (n_m, n_lin) = (c.n_m, c.n_lin);
         let pw = |x: &F, e: usize| util::scalar_exp_vartime(x, e as u64);
         let mu = rho * rho;
@@ -330,29 +336,39 @@ impl<F: Field> Weights<F> {
         for j in 1..c.n_v {
             c_v[j - 1] = -(flag::<F>(c.f_m) * pw(&mu, j) + flag::<F>(c.f_l) * pw(&lambda, j));
         }
+        // kappa^1, kappa^2, ... over N_0.., H_1..H_6, the linear slots n_v - 1..
+        let (mut shape_n, mut shape_h, mut shape_l) = (Vec::new(), [F::ZERO; 7], vec![F::ZERO; n_lin]);
+        if c.k > 0 {
+            let extra = n_lin + 1 - c.n_v;
+            let kp = util::powers(kappa, n_m + 6 + extra + 1).split_off(1);
+            shape_n = util::map_index(n_m, |t| kp[t] * mu_inv_vec[t]);
+            shape_h[1..].copy_from_slice(&kp[n_m..n_m + 6]);
+            shape_l[c.n_v - 1..].copy_from_slice(&kp[n_m + 6..]);
+        }
         let affine = two * ip(&mu_vec, &c.a_m) - two * ip(&lam, &c.a_l);
-        Weights { mu_vec, c_nl, c_nr, c_no, c_lo, c_ll, c_lr, c_v, nu, affine }
+        Weights { mu_vec, c_nl, c_nr, c_no, c_lo, c_ll, c_lr, c_v, nu, shape_n, shape_h, shape_l, affine }
     }
 
-    /// `p_n(T) = delta^-1 T^3 c_nO + T^2 c_nL + T c_nR`.
+    /// `p_n(T) = delta^-1 T^3 c_nO + T^2 c_nL + T c_nR + c_nV`.
     fn p_n(&self, delta_inv: F) -> VecPoly<F> {
-        VecPoly(vec![(1, self.c_nr.clone()), (2, self.c_nl.clone()), (3, scaled(&self.c_no, delta_inv))])
+        VecPoly(vec![(0, self.shape_n.clone()), (1, self.c_nr.clone()), (2, self.c_nl.clone()), (3, scaled(&self.c_no, delta_inv))])
     }
 
-    /// `c_l(T) = 2 (delta^-1 T^3 c_lO + T^2 c_lL + T c_lR) + c_V`.
+    /// `c_l(T) = 2 (delta^-1 T^3 c_lO + T^2 c_lL + T c_lR) + c_V + c_lV`.
     fn c_l(&self, delta_inv: F) -> VecPoly<F> {
         let two = F::from(2u64);
         VecPoly(vec![
-            (0, self.c_v.clone()),
+            (0, added(&self.c_v, &self.shape_l)),
             (1, scaled(&self.c_lr, two)),
             (2, scaled(&self.c_ll, two)),
             (3, scaled(&self.c_lo, two * delta_inv)),
         ])
     }
-}
 
-fn c_r<F: Field>(beta: F, tau: F, tau_inv: F) -> impl Iterator<Item = F> {
-    E_R.iter().map(move |&e| beta * pow_signed(tau, tau_inv, e))
+    /// `c_r(T) + c_hV`: the weights of the blinding slots `H_0..H_6`.
+    fn c_r(&self, beta: F, tau: F, tau_inv: F) -> impl Iterator<Item = F> + '_ {
+        E_R.iter().zip(&self.shape_h).map(move |(&e, s)| beta * pow_signed(tau, tau_inv, e) + s)
+    }
 }
 
 /// `r_0 G + <r_{1..7} || l, H> + <n, N>` (constant time).
@@ -406,7 +422,17 @@ pub(crate) fn prove<C: Curve, T: BpppTranscript + ?Sized, R: RngCore + CryptoRng
     rng: &mut R,
 ) -> Result<CircuitProof<C>, ProofError> {
     let secrets = w.w_l.iter().chain(&w.w_r).chain(&w.w_o).chain(w.v.iter().flatten()).chain(&w.s);
-    prove_impl(c, gens, V, w, transcript, |t, digest| super::transcript::prover_rng(t, b"circuit", digest, secrets, rng), true)
+    prove_impl(c, gens, V, w, transcript, |t, digest| super::transcript::prover_rng(t, b"circuit", digest, secrets, rng), true, &[])
+}
+
+/// A coordinate of an input commitment outside the form of spec §3.2: `V_i` with `x` on `H_a`
+/// (`1 <= a <= 6`), on the linear slot `t` (`t >= n_v - 1`) or on `N_t`. Only a forging prover
+/// (the tests) knows such openings; spec §3.4 makes them fail.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Off {
+    H(usize),
+    Lin(usize),
+    Norm(usize),
 }
 
 /// The prover with the randomness `rng_for(transcript, digest)`, made once the statement is
@@ -419,6 +445,7 @@ fn prove_impl<C, T, R, RF>(
     transcript: &mut T,
     rng_for: RF,
     require_satisfied: bool,
+    off: &[(usize, Off, C::Scalar)],
 ) -> Result<CircuitProof<C>, ProofError>
 where
     C: Curve,
@@ -441,7 +468,7 @@ where
     transcript.append_point(b"C_L", &ol.C_L);
     transcript.append_point(b"C_R", &r.C_R);
     transcript.append_point(b"C_O", &ol.o.C_O);
-    prove_inner(c, gens, w, &ol, &r, transcript, rng, require_satisfied)
+    prove_inner_off(c, gens, w, &ol, &r, transcript, rng, require_satisfied, off)
 }
 
 /// The prover's commitments to the initial witness (spec §3.3, CommitOL): `w_L` and the
@@ -548,6 +575,22 @@ pub(crate) fn prove_inner<C: Curve, T: BpppTranscript + ?Sized, R: RngCore + Cry
     rng: &mut R,
     require_satisfied: bool,
 ) -> Result<CircuitProof<C>, ProofError> {
+    prove_inner_off(c, gens, w, ol, cr, transcript, rng, require_satisfied, &[])
+}
+
+/// [`prove_inner`] for inputs that also carry the coordinates `off` (input, coordinate, value).
+#[allow(clippy::too_many_arguments)]
+fn prove_inner_off<C: Curve, T: BpppTranscript + ?Sized, R: RngCore + CryptoRng>(
+    c: &ArithmeticCircuit<C::Scalar>,
+    gens: &BpppGens<C>,
+    w: &CircuitWitness<C::Scalar>,
+    ol: &CommittedOL<C>,
+    cr: &CommittedR<C>,
+    transcript: &mut T,
+    rng: &mut R,
+    require_satisfied: bool,
+    off: &[(usize, Off, C::Scalar)],
+) -> Result<CircuitProof<C>, ProofError> {
     let (n_m, n_lin) = (c.n_m, c.n_lin);
     let zero = C::Scalar::ZERO;
     let (r_o, r_l, r_r) = (ol.o.r_o, ol.r_l, cr.r_r);
@@ -555,7 +598,8 @@ pub(crate) fn prove_inner<C: Curve, T: BpppTranscript + ?Sized, R: RngCore + Cry
     let lambda: C::Scalar = transcript.challenge(b"lambda");
     let beta: C::Scalar = nonzero(transcript, b"beta")?;
     let delta: C::Scalar = nonzero(transcript, b"delta")?;
-    let wt = Weights::new(c, rho, lambda);
+    let kappa: C::Scalar = transcript.challenge(b"kappa");
+    let wt = Weights::new(c, rho, lambda, kappa);
     let delta_inv = util::invert(delta);
 
     // Inputs (spec §3.4).
@@ -566,7 +610,15 @@ pub(crate) fn prove_inner<C: Curve, T: BpppTranscript + ?Sized, R: RngCore + Cry
             l_v[j] += *nu * x;
         }
     }
-    let r_v = [zero, ip(&wt.nu, &w.s), zero, zero, zero, zero, zero, zero];
+    let mut r_v = [zero, ip(&wt.nu, &w.s), zero, zero, zero, zero, zero, zero];
+    let mut n_v = vec![zero; n_m];
+    for &(i, at, x) in off {
+        match at {
+            Off::H(a) => r_v[a + 1] += wt.nu[i] * x,
+            Off::Lin(t) => l_v[t] += wt.nu[i] * x,
+            Off::Norm(t) => n_v[t] += wt.nu[i] * x,
+        }
+    }
     let (l_s, n_s) = (draw(rng, n_lin), draw(rng, n_m));
 
     // Polynomials (spec §3.5).
@@ -574,9 +626,10 @@ pub(crate) fn prove_inner<C: Curve, T: BpppTranscript + ?Sized, R: RngCore + Cry
     let n_t = VecPoly(vec![
         (-1, n_s.clone()),
         (0, scaled(&ol.o.n_o, delta)),
+        (0, wt.shape_n.clone()),
         (1, added(&w.w_l, &wt.c_nr)),
         (2, added(&w.w_r, &wt.c_nl)),
-        (3, scaled(&wt.c_no, delta_inv)),
+        (3, added(&scaled(&wt.c_no, delta_inv), &n_v)),
     ]);
     let l_hat = VecPoly(vec![
         (-1, l_s.clone()),
@@ -601,16 +654,19 @@ pub(crate) fn prove_inner<C: Curve, T: BpppTranscript + ?Sized, R: RngCore + Cry
         g.add(deg, -(s * r[0]));
         for (j, e) in E_R.iter().enumerate() {
             g.add(deg + e, beta * s * r[j + 1]);
+            g.add(deg, wt.shape_h[j] * s * r[j + 1]);
         }
     }
     let mut d = f;
     d.sub_poly(&g);
     let beta_inv = util::invert(beta);
+    // r_S's slots H_j cancel T^{e_j - 1}; with the shape rows they also reach T^-1, which
+    // r_S's G slot cancels last.
     let mut r_s = [zero; 8];
-    r_s[0] = -d.coeff(-1);
     for (j, e) in E_R.iter().enumerate() {
         r_s[j + 1] = beta_inv * d.coeff(e - 1);
     }
+    r_s[0] = ip(&wt.shape_h, &r_s[1..]) - d.coeff(-1);
     let C_S = C::compress(&commit(gens, &r_s, &l_s, &n_s));
     transcript.append_point(b"C_S", &C_S);
     let tau: C::Scalar = nonzero(transcript, b"tau")?;
@@ -621,7 +677,7 @@ pub(crate) fn prove_inner<C: Curve, T: BpppTranscript + ?Sized, R: RngCore + Cry
     let r_tau = (0..8).map(|j| pw(-1) * r_s[j] + delta * r_o[j] + pw(1) * r_l[j] + pw(2) * r_r[j] + pw(3) * r_v[j]);
     let l: Vec<C::Scalar> = r_tau.skip(1).chain(l_hat.eval(tau, tau_inv, n_lin)).collect();
     let n = n_t.eval(tau, tau_inv, n_m);
-    let cvec: Vec<C::Scalar> = c_r(beta, tau, tau_inv).chain(c_l.eval(tau, tau_inv, n_lin)).collect();
+    let cvec: Vec<C::Scalar> = wt.c_r(beta, tau, tau_inv).chain(c_l.eval(tau, tau_inv, n_lin)).collect();
     let st = WnlaStatement { g: &gens.g, h: &gens.h, n: gens.n, c: &cvec, rho };
     let wnla = wnla::prove_unbound(&st, transcript, l, n, true)?;
     Ok(CircuitProof { C_L: ol.C_L, C_R: cr.C_R, C_O: ol.o.C_O, C_S, wnla })
@@ -688,7 +744,8 @@ impl<C: Curve> CircuitProof<C> {
         let lambda: C::Scalar = transcript.challenge(b"lambda");
         let beta: C::Scalar = nonzero(transcript, b"beta")?;
         let delta: C::Scalar = nonzero(transcript, b"delta")?;
-        let wt = Weights::new(c, rho, lambda);
+        let kappa: C::Scalar = transcript.challenge(b"kappa");
+        let wt = Weights::new(c, rho, lambda, kappa);
         let delta_inv = util::invert(delta);
         transcript.append_point(b"C_S", &self.C_S);
         let tau: C::Scalar = nonzero(transcript, b"tau")?;
@@ -697,7 +754,7 @@ impl<C: Curve> CircuitProof<C> {
 
         let p_n = wt.p_n(delta_inv).eval(tau, tau_inv, c.n_m);
         let p_s = p_n.iter().zip(&p_n).zip(&wt.mu_vec).map(|((a, b), m)| *a * b * m).sum::<C::Scalar>() + tau3 * wt.affine;
-        let cvec: Vec<C::Scalar> = c_r(beta, tau, tau_inv).chain(wt.c_l(delta_inv).eval(tau, tau_inv, c.n_lin)).collect();
+        let cvec: Vec<C::Scalar> = wt.c_r(beta, tau, tau_inv).chain(wt.c_l(delta_inv).eval(tau, tau_inv, c.n_lin)).collect();
         let s = self.wnla.verification_scalars(&cvec, rho, c.n_m, transcript)?;
 
         let decompress = |p: &C::Compressed| C::decompress(p).ok_or(ProofError::VerificationError);

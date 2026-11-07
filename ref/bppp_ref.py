@@ -341,7 +341,7 @@ def circuit_public(c, chal):
     weights, input scalings and the public Laurent polynomials p_n, p_s, c_l_hat, c_r."""
     nm, no, nv, nlin, k = (c[x] for x in ("n_m", "n_o", "n_v", "n_lin", "k"))
     fl, fm = c["f_l"], c["f_m"]
-    rho, lam, beta, delta = chal["rho"], chal["lambda"], chal["beta"], chal["delta"]
+    rho, lam, beta, delta, kappa = (chal[x] for x in ("rho", "lambda", "beta", "delta", "kappa"))
     mu = rho * rho % L
     mus = [pow(mu, r + 1, L) for r in range(nm)]
     Lam = circuit_lambda(c, lam, mu)
@@ -366,17 +366,25 @@ def circuit_public(c, chal):
     nu = [2 * (fm * pow(mu, nv * i + 1, L) - fl * pow(lam, nv * i, L)) % L for i in range(k)]
     c_V = [-(fm * pow(mu, j, L) + fl * pow(lam, j, L)) % L for j in range(1, nv)]
     c_V += [0] * (nlin - len(c_V))
+    # shape rows: kappa^1, kappa^2, ... on N_0.. (over mu), H_1..H_6, the linear slots n_v - 1..
+    shape_n, shape_h, shape_l = [0] * nm, [0] * 7, [0] * nlin
+    if k > 0:
+        kp = [pow(kappa, q + 1, L) for q in range(nm + 6 + nlin + 1 - nv)]
+        shape_n = [kp[t] * inv(mus[t]) % L for t in range(nm)]
+        shape_h = [0] + kp[nm:nm + 6]
+        shape_l = [0] * (nv - 1) + kp[nm + 6:]
     di = inv(delta)
-    p_n = vp_norm({3: [di * x for x in c_n["nO"]], 2: c_n["nL"], 1: c_n["nR"]})
+    p_n = vp_norm({3: [di * x for x in c_n["nO"]], 2: c_n["nL"], 1: c_n["nR"], 0: shape_n})
     p_s = lp_add(vp_wip(p_n, p_n, mu),
                  {3: 2 * ip(mus, c["a_m"]) - 2 * ip(Lam, c["a_l"])})
     c_l_hat = vp_norm({3: [2 * di * x for x in c_l["lO"]], 2: [2 * x for x in c_l["lL"]],
-                       1: [2 * x for x in c_l["lR"]], 0: c_V})
-    c_r = {}
+                       1: [2 * x for x in c_l["lR"]],
+                       0: [(a + b) % L for a, b in zip(c_V, shape_l)]})
+    c_r = {0: shape_h}
     for j, e in enumerate(CR_EXP):
         c_r[e] = [beta if i == j else 0 for i in range(7)]
     return {"mu": mu, "mus": mus, "Lambda": Lam, "y": y, "c_n": c_n, "c_l": c_l, "nu": nu,
-            "c_V": c_V, "p_n": p_n, "p_s": p_s, "c_l_hat": c_l_hat, "c_r": vp_norm(c_r)}
+            "c_V": c_V, "shape_h": shape_h, "p_n": p_n, "p_s": p_s, "c_l_hat": c_l_hat, "c_r": vp_norm(c_r)}
 
 
 def circuit_layout(c, wit):
@@ -472,7 +480,9 @@ def circuit_prove(c, wit, rnd, chal, gammas):
         inner = lp_add(vp_ip(pub["c_r"], {0: rX[X][1:]}), {0: -rX[X][0]})
         g = lp_add(g, lp_mul(sigma[X], inner))
     d = lp_add(f_hat, lp_scale(g, -1))
-    r_S = [-d.get(-1, 0) % L] + [inv(beta) * d.get(e - 1, 0) % L for e in CR_EXP]
+    # H slots first (T^{e_j - 1}); with the shape rows they also reach T^-1, cancelled last by G
+    r_S_h = [inv(beta) * d.get(e - 1, 0) % L for e in CR_EXP]
+    r_S = [(ip(pub["shape_h"], r_S_h) - d.get(-1, 0)) % L] + r_S_h
     C_S = circuit_commit(G, H, N, r_S, l_S, n_S)
 
     # 3.7: opening at tau and the norm argument

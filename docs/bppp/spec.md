@@ -177,14 +177,13 @@ capacity must be at least $\max(N_m, N_{lin} + 6)$.
 Input commitments: $V_i = v_{i,0} G + s_i H_0 + \sum_{j=1}^{N_v - 1} v_{i,j} H_{6+j}$. For
 $N_v = 1$ this is `PedersenGens::commit(v, s)`, the same commitment as in the BP backend.
 
-**What is proven about the inputs.** The protocol binds the coordinates of $V_i$ that enter the
-constraints — $v_{i,0}$ on $G$ and $v_{i,1..}$ on $H_{7..}$ — and the prover knows the rest of an
-opening. It does not prove that $V_i$ has exactly the form above: components on
-$H_1, \dots, H_6$, on linear slots beyond $N_v - 1$, or on $N$ (where orthogonal to the norm
-slots in use) are absorbed by the blinding (found in review; the paper's relation (32) states the
-strict form, and its extractor has the same gap). Applications that need $V_i = v G + s H_0$
-exactly (e.g. homomorphic balance checks with a signature on the excess over $H_0$) get it from
-their own equations.
+**What is proven about the inputs** (2026-11-07). Every $V_i$ has exactly the form above, the
+paper's relation (32): the shape rows of §3.4 force the coordinates of $V_i$ on $H_1, \dots, H_6$,
+on the linear slots from $N_v - 1$ on and on $N$ to zero. Before 2026-11-07 only the coordinates
+that enter the constraints were bound — $v_{i,0}$ on $G$ and $v_{i,1..}$ on $H_{7..}$ — and the
+others were absorbed by the blinding (erratum 9; a forging prover's proofs with such inputs
+verified for $H_1..H_3$, the unused linear slots and the norm generators the witness does not
+cross, test `off_form_inputs_are_rejected`).
 
 ### 3.3 Commitments
 
@@ -203,8 +202,8 @@ $$r_O = (r'_{O,0}, r'_{O,1}, r'_{O,2}, r'_{O,3}, 0, r'_{O,4}, r'_{O,5}, 0), \qua
 
 ### 3.4 Challenges and weights
 
-After $C_L, C_R, C_O$: $\rho, \lambda, \beta, \delta$; $\rho$, $\beta$, $\delta$ must be non-zero (else the
-prover fails and the verifier rejects). $\mu = \rho^2$, $\boldsymbol\mu_r = \mu^{r+1}$ for $r < N_m$.
+After $C_L, C_R, C_O$: $\rho, \lambda, \beta, \delta, \kappa$; $\rho$, $\beta$, $\delta$ must be non-zero (else the
+prover fails and the verifier rejects; $\lambda = 0$ and $\kappa = 0$ are allowed). $\mu = \rho^2$, $\boldsymbol\mu_r = \mu^{r+1}$ for $r < N_m$.
 
 Linear weights: $\Lambda_t = \lambda^t$ for $t < N_l$ (so $\Lambda_0 = 1$; $\lambda = 0$ is allowed), except when $f_l = f_m = 1$, where for
 $t = N_v i + j$ with $i < k$ and $1 \le j < N_v$:
@@ -227,13 +226,38 @@ $\hat v = \sum_i \nu_i v_{i,0}$, $l_V = \sum_i \nu_i v_{i,1:}$ and
 $c_{V,j-1} = -(f_m \mu^j + f_l \lambda^j)$ for $1 \le j < N_v$ (both at linear indices
 $0..N_v - 2$, zero beyond), $r_V = (0, \sum_i \nu_i s_i, 0, 0, 0, 0, 0, 0)$.
 
+**Shape rows** (2026-11-07). Number the coordinates outside the inputs' form: $N_t$ is $q = t$
+($t < N_m$), $H_a$ is $q = N_m + a - 1$ ($1 \le a \le 6$), the linear slot $t \ge N_v - 1$ is
+$q = N_m + 6 + t - (N_v - 1)$. Their weights are $\kappa^{q+1}$:
+
+$$c_{n,V,t} = \kappa^{t+1} / \boldsymbol\mu_t, \qquad c_{h,V} = (0, \kappa^{N_m+1}, \dots, \kappa^{N_m+6}), \qquad c_{l,V,t} = \kappa^{N_m + 7 + t - (N_v - 1)} \ (t \ge N_v - 1),$$
+
+$c_{l,V,t} = 0$ for $t < N_v - 1$, and all three are zero when $k = 0$ (no inputs; $\kappa$ is
+still drawn). $c_{h,V}$ weights the blinding slots $H_0..H_6$, $H_0$ (the inputs' blinding)
+with 0.
+
+*Why they work (argument, not a formal proof).* An extracted opening of $V_i$ with $x_{i,q}$ on
+coordinate $q$ enters the opening of $C(T)$ at $T^3$ (through $T^3 \hat V$), and the shape
+weights sit at $T^0$ (§3.5), so $\hat f_3$ gains $-\sum_i \nu_i \sum_q \kappa^{q+1} x_{i,q}$
+(twice that for $q < N_m$, which enter through $|n|^2_\mu$). Nothing else in $\hat f_3$ depends on
+$\kappa$: the other $T^3$ products are $E$, the cross term $2\nu_i \langle x_{i,N}, \delta n_O\rangle_\mu$ and
+public terms that cancel against $p_s$; the honest parts of the openings meet the shape weights
+only at $T^{-1}..T^2$, and $C_S$ — the only message after $\kappa$ — reaches no $T^3$ (§3.6). The
+$x_{i,q}$ are fixed by $V_i$ and $C_L, C_R, C_O$ before $\kappa$, so $\hat f_3 = 0$ (the norm
+relation) gives, by Schwartz–Zippel in $\kappa$, $\sum_i \nu_i x_{i,q} = 0$ for every $q$, and since
+the $\nu_i$ are distinct monomials in $\mu$ ($f_m$) or $\lambda$ ($f_l$), drawn after the $V_i$,
+$x_{i,q} = 0$ for every input. The values and the constraint check are untouched: the
+$\kappa$-free part of $\hat f_3$ is the old one. This is the paper's Theorem 2 with relation (32)
+as stated; fastcrypto's BP++ (ePrint 2026/2648, §4.5) closes the same gap with shape rows of its
+own.
+
 ### 3.5 Polynomials
 
 Laurent polynomials in $T$:
 
-$$p_n(T) = \delta^{-1} T^3 c_{n,O} + T^2 c_{n,L} + T c_{n,R}, \qquad p_s(T) = |p_n(T)|^2_\mu + T^3\left(2\langle \boldsymbol\mu, a_m\rangle - 2\langle \Lambda, a_l\rangle\right),$$
+$$p_n(T) = \delta^{-1} T^3 c_{n,O} + T^2 c_{n,L} + T c_{n,R} + c_{n,V}, \qquad p_s(T) = |p_n(T)|^2_\mu + T^3\left(2\langle \boldsymbol\mu, a_m\rangle - 2\langle \Lambda, a_l\rangle\right),$$
 
-$$\hat c_l(T) = 2\left(\delta^{-1} T^3 c_{l,O} + T^2 c_{l,L} + T c_{l,R}\right) + c_V, \qquad c_r(T) = \beta\,(T^{-1}, T, T^2, T^3, T^5, T^6, T^7),$$
+$$\hat c_l(T) = 2\left(\delta^{-1} T^3 c_{l,O} + T^2 c_{l,L} + T c_{l,R}\right) + c_V + c_{l,V}, \qquad c_r(T) = \beta\,(T^{-1}, T, T^2, T^3, T^5, T^6, T^7) + c_{h,V},$$
 
 $$\hat l(T) = T^{-1} l_S + \delta l_O + T l_L + T^2 l_R + T^3 l_V, \qquad n(T) = p_n(T) + T^{-1} n_S + \delta n_O + T n_L + T^2 n_R,$$
 
@@ -244,18 +268,20 @@ $$\hat f(T) = p_s(T) + T^3 \hat v - \langle \hat c_l(T), \hat l(T)\rangle - |n(T
 $$E = \Lambda^\top (W_l w + f_l w_V + a_l) + \langle w_L, w_R\rangle_\mu - \boldsymbol\mu^\top (W_m w + f_m w_V + a_m),$$
 
 which is 0 for a satisfying witness and, by Schwartz–Zippel in $\lambda$ and $\mu$, non-zero with
-overwhelming probability otherwise.
+overwhelming probability otherwise. The shape weights ($T^0$) meet the honest openings only at
+$T^{-1}..T^2$: an honest $V_i$ has no coordinate they weight, so they leave $\hat f_3$ unchanged.
 
 ### 3.6 Blinding commitment
 
 Write $(e_1, \dots, e_7) = (-1, 1, 2, 3, 5, 6, 7)$ for the exponents of $c_r$ and
 
-$$g(T) = \sum_{(X, \sigma)} \left( \sum_{j=1}^{7} \beta T^{e_j} \sigma\, r_{X,j} - \sigma\, r_{X,0} \right), \qquad (X, \sigma) \in \{(O, \delta), (L, T), (R, T^2), (V, T^3)\}.$$
+$$g(T) = \sum_{(X, \sigma)} \left( \langle c_r(T), \sigma\, r_{X,1..7}\rangle - \sigma\, r_{X,0} \right), \qquad (X, \sigma) \in \{(O, \delta), (L, T), (R, T^2), (V, T^3)\}.$$
 
-The zero pattern of $r_O, r_L, r_R$ makes $g$ free of $T^3$ and of degree $\le 6$. With
-$d(T) = \hat f(T) - g(T)$:
+The zero pattern of $r_O, r_L, r_R$ makes $g$ free of $T^3$ and of degree $\le 6$ ($c_{h,V}$ is at
+$T^0$ and $r_{V,2..7} = 0$). With $d(T) = \hat f(T) - g(T)$, the $H$ slots of $r_S$ first, then its
+$G$ slot, since through $c_{h,V}$ the $H$ slots also reach $T^{-1}$ (and $e_j - 1 \ne -1$):
 
-$$r_{S,0} = -d_{-1}, \qquad r_{S,j} = \beta^{-1} d_{e_j - 1} \quad (j = 1..7).$$
+$$r_{S,j} = \beta^{-1} d_{e_j - 1} \quad (j = 1..7), \qquad r_{S,0} = \langle c_{h,V}, r_{S,1..7}\rangle - d_{-1}.$$
 
 These cancel every coefficient of $d$ except $d_3 = \hat f_3$. The prover refuses (returns an
 error) when $\hat f_3 \ne 0$, i.e. for a witness that does not satisfy the circuit. Then $C_S$ as in §3.3 with
@@ -283,7 +309,7 @@ $$(v' - p_s(\tau)) G + \langle h, H\rangle + \langle n' - p_n(\tau), N\rangle - 
 `domain_sep("bppp-circuit v1")`; `u64` `"N_m"`, `"N_O"`, `"N_v"`, `"N_lin"`, `"k"`, `"N_l"`,
 `"f_l"`, `"f_m"`; points `"G"` and `"H_0"` (the value and blinding generators, which may be
 application-specific); message `"circuit"` = the circuit digest (§3.9); point `"V"` for each input;
-points `"C_L"`, `"C_R"`, `"C_O"`; challenges `"rho"`, `"lambda"`, `"beta"`, `"delta"`; point
+points `"C_L"`, `"C_R"`, `"C_O"`; challenges `"rho"`, `"lambda"`, `"beta"`, `"delta"`, `"kappa"`; point
 `"C_S"`; challenge `"tau"`; then the norm argument's header and rounds (§2.3).
 
 The public `prove`/`verify` absorb the digest (strong Fiat–Shamir). Protocols built on top
@@ -421,7 +447,7 @@ the first $kN_v$ rows of $W_l$; the requirements of §3.1 apply to the compiled 
    $\alpha + w_{D,i} = 0$ for some $i$, and both prover and verifier fail if $\alpha + t = 0$
    for a public pole $t$ (probability negligible in either case). Commit $C_R$ for $(r_R, l_R, w'_R)$ (randomness $r'_R$).
 4. Absorb $C_R$ and run the inner protocol of §3 on the compiled circuit from the challenges
-   $\rho, \lambda, \beta, \delta$ on (§3.4–3.7). The prover refuses if the compiled circuit is not
+   $\rho, \lambda, \beta, \delta, \kappa$ on (§3.4–3.7). The prover refuses if the compiled circuit is not
    satisfied (its value term is non-zero).
 
 The verifier compiles the circuit for $(\eta, \alpha)$ and runs the §3 verification on $C_L, C_R, C_O, C_S$.

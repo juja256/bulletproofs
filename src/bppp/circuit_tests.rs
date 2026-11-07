@@ -133,7 +133,7 @@ fn prove_unchecked<C: Curve, T: BpppTranscript + ?Sized, R: RngCore + CryptoRng>
     t: &mut T,
     rng: &mut R,
 ) -> Result<CircuitProof<C>, ProofError> {
-    prove_impl(c, g, V, w, t, |_, _| rng, false)
+    prove_impl(c, g, V, w, t, |_, _| rng, false, &[])
 }
 
 fn prove_and_verify(c: &ArithmeticCircuit<Scalar>, w: &CircuitWitness<Scalar>, rng: &mut ChaCha20Rng) -> Result<(), ProofError> {
@@ -202,7 +202,7 @@ where
         let randomness: Vec<C::Scalar> =
             ["r_O", "r_L", "r_R", "l_S", "n_S"].iter().flat_map(|k| scs(&r[*k])).collect();
         let ch = &case["chal"];
-        let challenges: Vec<C::Scalar> = ["rho", "lambda", "beta", "delta", "tau"]
+        let challenges: Vec<C::Scalar> = ["rho", "lambda", "beta", "delta", "kappa", "tau"]
             .iter()
             .map(|k| sc(&ch[*k]))
             .chain(scs(&case["gammas"]))
@@ -319,6 +319,7 @@ fn transcript_binds_messages() {
         (b"lambda", vec![]),
         (b"beta", vec![]),
         (b"delta", vec![]),
+        (b"kappa", vec![]),
         (b"C_S", proof.C_S.as_bytes().to_vec()),
         (b"tau", vec![]),
     ];
@@ -381,14 +382,15 @@ fn forged_value_generator_is_rejected() {
     t.append_point(b"C_O", &proof.C_O);
     let (rho, lambda): (Scalar, Scalar) = (t.challenge(b"rho"), t.challenge(b"lambda"));
     let (beta, delta): (Scalar, Scalar) = (t.challenge(b"beta"), t.challenge(b"delta"));
-    let wt = Weights::new(&c, rho, lambda);
+    let kappa: Scalar = t.challenge(b"kappa");
+    let wt = Weights::new(&c, rho, lambda, kappa);
     let delta_inv = delta.invert();
     t.append_point(b"C_S", &proof.C_S);
     let tau: Scalar = t.challenge(b"tau");
     let (tau_inv, tau3) = (tau.invert(), tau * tau * tau);
     let p_n = wt.p_n(delta_inv).eval(tau, tau_inv, c.n_m);
     let p_s = p_n.iter().zip(&wt.mu_vec).map(|(a, m)| a * a * m).sum::<Scalar>() + tau3 * wt.affine;
-    let cvec: Vec<Scalar> = c_r(beta, tau, tau_inv).chain(wt.c_l(delta_inv).eval(tau, tau_inv, c.n_lin)).collect();
+    let cvec: Vec<Scalar> = wt.c_r(beta, tau, tau_inv).chain(wt.c_l(delta_inv).eval(tau, tau_inv, c.n_lin)).collect();
     let sc = proof.wnla.verification_scalars(&cvec, rho, c.n_m, &mut t).unwrap();
     let d = |p: &CompressedRistretto| p.decompress().unwrap();
     let mut B = -(d(&proof.C_S) * tau_inv) - d(&proof.C_O) * delta - d(&proof.C_L) * tau - d(&proof.C_R) * (tau * tau);
@@ -466,8 +468,8 @@ fn degenerate_challenges_fail() {
     let (pc, bp) = gens_for(&c);
     let g = BpppGens::new(&pc, &bp, c.n_lin, c.n_m).unwrap();
     let V = commitments(&g, &w);
-    // challenge order: rho, lambda, beta, delta, tau, gammas...
-    for zero in [0usize, 2, 3, 4] {
+    // challenge order: rho, lambda, beta, delta, kappa, tau, gammas...
+    for zero in [0usize, 2, 3, 5] {
         let mut chal: Vec<Scalar> = (2..20u64).map(Scalar::from).collect();
         chal[zero] = Scalar::ZERO;
         assert!(prove(&c, &g, &V, &w, &mut Replay::new(chal), &mut rng).is_err(), "challenge {} zero", zero);
@@ -475,14 +477,14 @@ fn degenerate_challenges_fail() {
     let good: Vec<Scalar> = (2..20u64).map(Scalar::from).collect();
     let proof = prove(&c, &g, &V, &w, &mut Replay::new(good.clone()), &mut rng).unwrap();
     proof.verify(&c, &g, &V, &mut Replay::new(good)).unwrap();
-    for zero in [0usize, 2, 3, 4] {
+    for zero in [0usize, 2, 3, 5] {
         let mut chal: Vec<Scalar> = (2..20u64).map(Scalar::from).collect();
         chal[zero] = Scalar::ZERO;
         assert!(proof.verify(&c, &g, &V, &mut Replay::new(chal)).is_err(), "challenge {} zero", zero);
     }
 }
 
-/// Challenges that may be zero (lambda, the norm argument's gamma): honest proofs still
+/// Challenges that may be zero (lambda, kappa, the norm argument's gamma): honest proofs still
 /// verify (spec §3.4); rho, beta, delta, tau are checked above. The verifier rejects a zero
 /// rho/beta/delta/tau before looking at the proof, so no proof crafted for it can pass.
 #[test]
@@ -493,7 +495,7 @@ fn zero_lambda_and_gamma_are_complete() {
     let (pc, bp) = gens_for(&c);
     let g = BpppGens::new(&pc, &bp, c.n_lin, c.n_m).unwrap();
     let V = commitments(&g, &w);
-    for zero in [1usize, 5, 6, 7] {
+    for zero in [1usize, 4, 6, 7, 8] {
         let mut chal: Vec<Scalar> = (2..20u64).map(Scalar::from).collect();
         chal[zero] = Scalar::ZERO;
         let proof = prove(&c, &g, &V, &w, &mut Replay::new(chal.clone()), &mut rng).unwrap();
@@ -534,4 +536,58 @@ fn malformed_inputs_are_errors() {
     assert!(c3.check().is_err(), "partition not injective");
     let small = BulletproofGens::new(2, 1);
     assert!(BpppGens::new(&pc, &small, c.n_lin, c.n_m).is_err());
+}
+
+/// The generator of an off-form coordinate.
+fn off_gen(g: &BpppGens<'_, Ristretto>, at: Off) -> RistrettoPoint {
+    match at {
+        Off::H(a) => g.h[a],
+        Off::Lin(t) => g.h[H_FIXED + t],
+        Off::Norm(t) => g.n[t],
+    }
+}
+
+/// A forging prover who opens an input commitment `V_i` with extra coordinates (on `H_1..H_6`,
+/// on a linear slot past the input's, on a norm generator) and runs the honest protocol on
+/// that opening. The proof binds the values, so it verifies unless the inputs' form is checked
+/// too (the shape rows of spec §3.4; erratum 9). Each coordinate kind, each input.
+#[test]
+fn off_form_inputs_are_rejected() {
+    let mut rng = ChaCha20Rng::seed_from_u64(91);
+    // NormO in slots 0, 1: the norm coordinates 2, 3 are not crossed by the witness
+    let s = Shape { n_m: 4, n_o: 2, n_v: 2, n_lin: 3, k: 2, n_l: 5, f_l: true, f_m: true, spread: false };
+    let (c, w) = instance(&mut rng, &s);
+    let (pc, bp) = gens_for(&c);
+    let g = BpppGens::new(&pc, &bp, c.n_lin, c.n_m).unwrap();
+    let mut cases: Vec<Off> = (1..=6).map(Off::H).collect();
+    cases.extend([Off::Lin(1), Off::Lin(2), Off::Norm(0), Off::Norm(2), Off::Norm(3)]);
+    let mut accepted = Vec::new();
+    for at in cases {
+        for i in 0..c.k {
+            let x = Scalar::random(&mut rng);
+            let mut V: Vec<RistrettoPoint> = w.v.iter().zip(&w.s).map(|(v, s)| g.commit_input(v, *s)).collect();
+            V[i] += off_gen(&g, at) * x;
+            let V: Vec<CompressedRistretto> = V.iter().map(|p| p.compress()).collect();
+            let proof = prove_impl(&c, &g, &V, &w, &mut Transcript::new(b"off"), |_, _| &mut rng, false, &[(i, at, x)]).unwrap();
+            if proof.verify(&c, &g, &V, &mut Transcript::new(b"off")).is_ok() {
+                accepted.push((i, at));
+            }
+        }
+    }
+    assert!(accepted.is_empty(), "off-form inputs accepted: {:?}", accepted);
+}
+
+/// The forging prover of `off_form_inputs_are_rejected` with zero extra coordinates is the
+/// honest prover: its proofs verify (the test rejects for the form, not for the hook).
+#[test]
+fn off_form_hook_with_zeros_is_honest() {
+    let mut rng = ChaCha20Rng::seed_from_u64(92);
+    let s = Shape { n_m: 4, n_o: 2, n_v: 2, n_lin: 3, k: 2, n_l: 5, f_l: true, f_m: true, spread: false };
+    let (c, w) = instance(&mut rng, &s);
+    let (pc, bp) = gens_for(&c);
+    let g = BpppGens::new(&pc, &bp, c.n_lin, c.n_m).unwrap();
+    let V = commitments(&g, &w);
+    let off = [(0, Off::H(3), Scalar::ZERO), (1, Off::Lin(2), Scalar::ZERO), (1, Off::Norm(3), Scalar::ZERO)];
+    let proof = prove_impl(&c, &g, &V, &w, &mut Transcript::new(b"off"), |_, _| &mut rng, false, &off).unwrap();
+    assert!(proof.verify(&c, &g, &V, &mut Transcript::new(b"off")).is_ok());
 }

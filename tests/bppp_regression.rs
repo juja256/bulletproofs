@@ -130,14 +130,14 @@ fn bppp_proofs_are_pinned() {
         ("builder §7", h(&r1cs_proof(true))),
     ];
     let want: [&str; 7] = [
-        "15028aab7946ac21d4b1bae04ef149261a623151293fbb1d31ca08de6f51cdd0",
-        "ebb2104f71a77d994f5127546617a38d1c8a20c3674f3f40e39038c18b82ff62",
-        "8ffe2a23d9fc9ab7a56602c7de5ef5424f1ed87db14ac7b08fecdb65d1613653",
-        "2a48d4d8030d829f69b59399816e9bad94c0723e6eb09f8ada733f04ccd1c176",
-        "c0901efd7fa5282e8e55cb0b79016df2a5b7265869b63d88b0df2d28bc4fb713",
-        "21078855863d69b79787eb06eff4da666c2267a5e07fdd33b4beb59427b6db0a",
-        // 2026-10-22: the witness `w` of the product is folded into its left wire
-        "1fb847f35ff5f3c2e275a0acab75dfec1085c088b8b4a3f7371344dca119149b",
+        // 2026-11-07: every pin changes with the challenge kappa and the shape rows (spec §3.4)
+        "3f0814c7328d2db335166c6f615c699131f70c0fdfbed079fe5e8ce282af395e",
+        "4e8eabc44223a3e9d793ef442dcd1c4764d5a8c268358c8f641a776d0ec25241",
+        "2ea36b7e2c910d7348a108b130a69de35372830b66d2b479df5fc152f7ebf109",
+        "ed0a4e39a73a871c23258cda2e7021fd92d2da43fbed99954b0c6fd3fc133685",
+        "e08c2bf40b82082d971ea45ee22fe8cb098f683bc3da24ee86928cf2746de967",
+        "a283b53754f29325c60867aa15668fd2cbe4839c1664722471307d3180407126",
+        "922a204a951e0563652726b4e33411e160c654c6632206623061ca0eba049aef",
     ];
     for (name, g) in &got {
         println!("{}: {}", name, g);

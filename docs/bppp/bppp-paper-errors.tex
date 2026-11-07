@@ -231,12 +231,19 @@ generators orthogonal to the norm slots in use, is accepted with a satisfying wi
 prover folds $Z$ into its blinding. The values $v_i$ are still bound, but the extractor cannot
 output an opening of the strict form of eq.~(32).
 
-\noindent\textbf{Fix.} Either state the relation with $V_i \in v_{i,0} G + \sum_j v_{i,j}
-H_{6+j} + \langle H_0, \dots, H_6, \dots\rangle$ (values bound, the rest a blinding), or make
-applications that need the strict form check it by other means (for confidential transactions
-the balance equation with a signature over $H_0$ does).
-\status{Observed (review probe: junk components on $H_1..H_3$, unused slots and $N$ accepted;
-an unsatisfied witness with the same junk rejected).}
+\noindent\textbf{Fix} (2026-11-07). Prove the strict form with \emph{shape rows}: a challenge
+$\kappa$ drawn after $\delta$ and weights $\kappa^{q+1}$ at $T^0$ on every coordinate outside the form
+--- in $p_n$ on the norm generators (divided by $\boldsymbol\mu_t$), in $c_r$ on $H_1, \dots, H_6$,
+in $\hat c_l$ on the linear slots from $N_v - 1$ on. A coordinate $x_{i,q}$ of $V_i$ then adds
+$-\nu_i \kappa^{q+1} x_{i,q}$ (doubled on $N$) to the $T^3$ coefficient, which must vanish; nothing
+else there depends on $\kappa$, so $x_{i,q} = 0$. The new cross terms with the honest openings
+land at $T^{-1}..T^2$ and are cancelled by $r_S$, whose $G$ slot is now solved after its $H$
+slots ($r_{S,0} = \langle c_{h,V}, r_{S,1..7}\rangle - d_{-1}$). Proof size and the norm argument are
+unchanged (\texttt{spec.md} \S3.4--3.6). Before, we stated the weaker relation (values bound, the
+rest a blinding); fastcrypto's BP++ (ePrint 2026/2648, \S4.5) adds shape rows too.
+\status{Verified (a forging prover's proofs with off-form inputs: accepted before for
+$H_1..H_3$, unused slots and $N$, rejected now for every coordinate kind and input; honest
+proofs and the Python reference's vectors agree).}
 
 \subsection*{10. Inputs that enter no constraint}
 \loc{\S5 eq.~(32), Theorem~2.}

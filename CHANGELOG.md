@@ -4,6 +4,14 @@ Entries are listed in reverse chronological order.
 
 ## Unreleased (this fork)
 
+* BP++ proves the exact form of the inputs (2026-11-07, breaking: every BP++ proof changes).
+  A challenge `kappa` after `delta` and shape rows at `T^0` (spec §3.4) force the coordinates of
+  each `V_i` on `H_1..H_6`, on the linear slots past the input and on the norm generators to
+  zero; before, they were absorbed by the blinding (erratum 9). Proof size, the norm argument
+  and the BP backend are unchanged; BP++ vectors, pins and Simplicity verifiers (CMRs, about
+  +3% cost) are regenerated.
+* R1CS builder: a free witness indexed below the number of folded ones no longer overflows in
+  debug builds (`Placement::slot` computed its fallback eagerly).
 * Simplicity: the compiler prefers programs whose own bytes pay for their cost (annex padding
   is not relayed on Liquid); `Stats::cost_mwu`, `Stats::budget_mwu`; `SimplicityVerifier::spend`
   returns the pruned program and witness encodings for a transaction (`Spend`). The verifier of

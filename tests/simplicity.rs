@@ -297,6 +297,12 @@ fn new_backend_not_worse_than_stage1() {
     }
 }
 
+/// A cost measured before the shape rows of spec §3.4 (2026-11-07) with their allowance: the
+/// verifier checks the inputs' form since, which cost at most 3.3% more on the circuits below.
+fn with_shape_rows(cost: u64) -> u64 {
+    cost + cost / 25
+}
+
 /// Stage 3 is not worse than stage 2 (its measured cost and program size, 2026-10-21) on the
 /// same circuits: `x · y = 15` and the chains of 2 to 64 gates.
 #[test]
@@ -306,7 +312,7 @@ fn stage3_not_worse_than_stage2() {
     let sv = compile(&V);
     let r = sv.execute(&sv.witness(&proof).unwrap(), &env).unwrap();
     println!("x·y = 15: {} mWU (stage 2: 3134520), {} B (stage 2: 6102), data {} mWU", r.cost_mwu, r.program_bytes, r.data_mwu);
-    assert!(r.cost_mwu <= 3_134_520 && r.program_bytes <= 6_102, "x·y = 15");
+    assert!(r.cost_mwu <= with_shape_rows(3_134_520) && r.program_bytes <= 6_102, "x·y = 15");
     for (n, cost, bytes) in [
         (2, 3_103_445u64, 6_156usize),
         (4, 4_051_373, 7_694),
@@ -318,7 +324,7 @@ fn stage3_not_worse_than_stage2() {
         let (p, v) = chain_proof_and_verifier(n, &env);
         let r = v.execute(&v.witness(&p).unwrap(), &env).unwrap();
         println!("chain {}: {} mWU (stage 2: {}), {} B (stage 2: {}), data {} mWU, steps {}", n, r.cost_mwu, cost, r.program_bytes, bytes, r.data_mwu, v.stats().steps);
-        assert!(r.cost_mwu <= cost && r.program_bytes <= bytes, "chain {}", n);
+        assert!(r.cost_mwu <= with_shape_rows(cost) && r.program_bytes <= bytes, "chain {}", n);
     }
 }
 
@@ -381,7 +387,7 @@ fn stage4_not_heavier_than_stage3() {
         let (p, v) = chain_proof_and_verifier(n, &env);
         let w = weight(v.execute(&v.witness(&p).unwrap(), &env));
         println!("chain {}: {} mWU (stage 3: {})", n, w, stage3);
-        assert!(w <= stage3, "chain {}", n);
+        assert!(w <= with_shape_rows(stage3), "chain {}", n);
     }
 }
 

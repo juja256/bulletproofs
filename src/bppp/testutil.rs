@@ -246,7 +246,7 @@ where
     }
     let r = &case["rand"];
     let randomness: Vec<C::Scalar> = ["r_O", "r_L", "r_R", "l_S", "n_S"].iter().flat_map(|k| scs(&r[*k])).collect();
-    let names: &[&str] = if uses_eta { &["eta", "alpha", "rho", "lambda", "beta", "delta", "tau"] } else { &["alpha", "rho", "lambda", "beta", "delta", "tau"] };
+    let names: &[&str] = if uses_eta { &["eta", "alpha", "rho", "lambda", "beta", "delta", "kappa", "tau"] } else { &["alpha", "rho", "lambda", "beta", "delta", "kappa", "tau"] };
     let challenges: Vec<C::Scalar> = names.iter().map(|k| sc(&ch[*k])).chain(scs(&case["gammas"])).collect();
     let proof = reciprocal::prove_impl(c, &g, &V, w, &mut Replay::new(challenges.clone()), &mut ScalarRng::new(&randomness), false)
         .unwrap();

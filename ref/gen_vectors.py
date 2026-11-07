@@ -119,7 +119,7 @@ def circuit_case(rng, name, nm, no, nv, nlin, k, nl, fl, fm, part, violate=None)
     rnd = {"r_O": [s() for _ in range(6)], "r_L": [s() for _ in range(5)],
            "r_R": [s() for _ in range(4)], "l_S": [s() for _ in range(nlin)],
            "n_S": [s() for _ in range(nm)]}
-    chal = {x: s() for x in ("rho", "lambda", "beta", "delta", "tau")}
+    chal = {x: s() for x in ("rho", "lambda", "beta", "delta", "kappa", "tau")}
     gammas = [s() for _ in range(wnla_rounds(7 + nlin, nm)[0])]
     proof = circuit_prove(c, wit, rnd, chal, gammas)
     satisfied, verifies = circuit_self_check(c, wit, chal, gammas, proof)
@@ -139,7 +139,7 @@ def circuit_case(rng, name, nm, no, nv, nlin, k, nl, fl, fm, part, violate=None)
         "w_L": hxs(wit["w_L"]), "w_R": hxs(wit["w_R"]), "w_O": hxs(wit["w_O"]),
         "v": [hxs(v) for v in wit["v"]], "s": hxs(wit["s"]),
         "rand": {x: hxs(rnd[x]) for x in ("r_O", "r_L", "r_R", "l_S", "n_S")},
-        "chal": {x: hx(chal[x]) for x in ("rho", "lambda", "beta", "delta", "tau")},
+        "chal": {x: hx(chal[x]) for x in ("rho", "lambda", "beta", "delta", "kappa", "tau")},
         "gammas": hxs(gammas),
         "satisfied": satisfied,
         "V": [pt(x) for x in proof["V"]],
@@ -276,7 +276,7 @@ def recip_run(rng, name, rc, wit, expect, extra=False, verifier_rc=None):
     head["w_D"] = hxs(wit["w_D"])
     if v2:
         head["w_D_eta"] = hxs(proof["w_D_eta"])
-    chal_keys = (["eta"] if v2 else []) + ["alpha", "rho", "lambda", "beta", "delta", "tau"]
+    chal_keys = (["eta"] if v2 else []) + ["alpha", "rho", "lambda", "beta", "delta", "kappa", "tau"]
     return {
         **head,
         "w_L": hxs(wit["w_L"]), "w_R": hxs(wit["w_R"]),
@@ -298,7 +298,7 @@ def recip_run(rng, name, rc, wit, expect, extra=False, verifier_rc=None):
 def challenges(rng, eta=False):
     """The challenges of a reciprocal proof; eta (drawn last, so that the v1 draws are those
     of phase 5) only for a circuit that uses it."""
-    c = {x: rng.randrange(1, L) for x in ("alpha", "rho", "lambda", "beta", "delta", "tau")}
+    c = {x: rng.randrange(1, L) for x in ("alpha", "rho", "lambda", "beta", "delta", "kappa", "tau")}
     if eta:
         c["eta"] = rng.randrange(1, L)
     return c
@@ -480,7 +480,7 @@ def recip_edge_checks(rng):
     rc, wit = range_case(rng, "edge", 4, 4, "shared", 27)
     wit.pop("chal")
     rnd = {"r_O": [1] * 6, "r_L": [1] * 5, "r_R": [1] * 4, "l_S": [1] * 4, "n_S": [1] * 4}
-    chal = {x: 5 for x in ("rho", "lambda", "beta", "delta", "tau")}
+    chal = {x: 5 for x in ("rho", "lambda", "beta", "delta", "kappa", "tau")}
     chal["alpha"] = -wit["w_D"][1] % L  # digit 2, also the public pole 2
     try:
         recip_prove(rc, wit, rnd, chal, [1] * wnla_rounds(11, 4)[0])

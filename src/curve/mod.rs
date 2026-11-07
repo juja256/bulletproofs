@@ -1,6 +1,9 @@
 //! The prime-order groups the proofs run over: ristretto255 (the default) and, with the
 //! `secp256k1` feature, secp256k1.
 
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+use core::any::Any;
 use core::fmt::Debug;
 
 pub use ff;
@@ -70,7 +73,7 @@ pub trait Curve: Copy + Clone + Debug + Default + PartialEq + Eq + Send + Sync +
     /// The scalar field (the group order).
     type Scalar: Field;
     /// A group element.
-    type Point: group::Group<Scalar = Self::Scalar> + subtle::ConditionallySelectable + Copy + Debug + Send + Sync + zeroize::Zeroize;
+    type Point: group::Group<Scalar = Self::Scalar> + subtle::ConditionallySelectable + Copy + Debug + Send + Sync + zeroize::Zeroize + 'static;
     /// An encoded group element of `POINT_BYTES` bytes.
     type Compressed: PointEncoding;
     /// The name used in transcripts: `"ristretto255"`, `"secp256k1"`.
@@ -92,16 +95,25 @@ pub trait Curve: Copy + Clone + Debug + Default + PartialEq + Eq + Send + Sync +
     /// `sum s_i P_i` in variable time: for public scalars only.
     fn msm_vt(s: &[Self::Scalar], p: &[Self::Point]) -> Self::Point;
 
-    /// Precomputed multiples of fixed points (the generators) for [`Curve::msm_vt_table`].
-    type Table: Send + Sync;
     /// Up to this many weighted points (fixed ones plus 3 per other point) a multiplication
-    /// with tables beats [`Curve::msm_vt`] (measured; 0: never).
-    const TABLE_CROSSOVER: usize;
-    /// The table of the fixed points `p`.
-    fn table(p: &[Self::Point]) -> Self::Table;
-    /// `sum s_i P_i + sum ds_j dp_j` in variable time, `P` the fixed points of `table` (as
-    /// many as `s`) and `dp` other points: for public scalars only.
-    fn msm_vt_table(table: &Self::Table, s: &[Self::Scalar], ds: &[Self::Scalar], dp: &[Self::Point]) -> Self::Point;
+    /// with tables beats [`Curve::msm_vt`] (measured); by default 0, never.
+    const TABLE_CROSSOVER: usize = 0;
+
+    /// The table of the fixed points `p` for [`Curve::msm_vt_table`]: opaque; by default the
+    /// points themselves.
+    fn table(p: &[Self::Point]) -> Table {
+        Table::new(p.to_vec())
+    }
+
+    /// `sum s_i P_i + sum ds_j dp_j` in variable time, `P` the fixed points of `table` (made by
+    /// [`Curve::table`] of this curve, as many as `s`) and `dp` other points: for public
+    /// scalars only. By default [`Curve::msm_vt`] over all of them.
+    fn msm_vt_table(table: &Table, s: &[Self::Scalar], ds: &[Self::Scalar], dp: &[Self::Point]) -> Self::Point {
+        let p = table.get::<Vec<Self::Point>>().expect("a table of Curve::table");
+        let ss: Vec<Self::Scalar> = s.iter().chain(ds).copied().collect();
+        let ps: Vec<Self::Point> = p.iter().chain(dp).copied().collect();
+        Self::msm_vt(&ss, &ps)
+    }
 
     /// `sum_{v < len} s_v P_v` with the terms `term(v)`, by chunks (in parallel with
     /// `parallel`); constant time unless `vartime` (public scalars only).
@@ -121,16 +133,36 @@ pub trait Curve: Copy + Clone + Debug + Default + PartialEq + Eq + Send + Sync +
     }
 }
 
-/// Fixed points with their table (the BP++ verifier's generators, spec §3.7).
+/// A table of fixed points made by [`Curve::table`]: opaque, each curve stores its own type.
+pub struct Table(Box<dyn Any + Send + Sync>);
+
+impl Table {
+    /// Wrap a curve's table.
+    pub fn new<T: Any + Send + Sync>(t: T) -> Self {
+        Table(Box::new(t))
+    }
+
+    /// The table as `T`, if it is one.
+    pub fn get<T: Any>(&self) -> Option<&T> {
+        self.0.downcast_ref()
+    }
+}
+
+impl Debug for Table {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("Table")
+    }
+}
+
+/// The table of fixed points (the BP++ verifier's generators, spec §3.7) of a curve.
 pub(crate) struct Fixed<C: Curve> {
-    pub(crate) points: alloc::vec::Vec<C::Point>,
-    table: C::Table,
+    table: Table,
+    curve: core::marker::PhantomData<C>,
 }
 
 impl<C: Curve> Fixed<C> {
-    pub(crate) fn new(points: alloc::vec::Vec<C::Point>) -> Self {
-        let table = C::table(&points);
-        Fixed { points, table }
+    pub(crate) fn new(points: Vec<C::Point>) -> Self {
+        Fixed { table: C::table(&points), curve: core::marker::PhantomData }
     }
 
     /// `<s, points> + <ds, dp>` (variable time; `s` as long as the points).

@@ -180,7 +180,6 @@ impl Curve for Secp256k1 {
         super::pippenger::msm(s, p)
     }
 
-    type Table = super::straus::Table;
     // Straus with tables runs on one thread, Pippenger on all with `parallel`. Serial: 2.5x at
     // 260 weighted points, 1.1x at 1300, 0.9x at 2500; parallel: 1.5x at 100, 1.1x at 140, 0.98x
     // at 176 (Apple M4 Pro, 2026-11-07).
@@ -189,12 +188,12 @@ impl Curve for Secp256k1 {
     #[cfg(feature = "parallel")]
     const TABLE_CROSSOVER: usize = 128;
 
-    fn table(p: &[ProjectivePoint]) -> super::straus::Table {
-        super::straus::table(p)
+    fn table(p: &[ProjectivePoint]) -> super::Table {
+        super::Table::new(super::straus::table(p))
     }
 
-    fn msm_vt_table(table: &super::straus::Table, s: &[Scalar], ds: &[Scalar], dp: &[ProjectivePoint]) -> ProjectivePoint {
-        super::straus::msm(table, s, ds, dp)
+    fn msm_vt_table(table: &super::Table, s: &[Scalar], ds: &[Scalar], dp: &[ProjectivePoint]) -> ProjectivePoint {
+        super::straus::msm(table.get().expect("a table of Secp256k1::table"), s, ds, dp)
     }
 }
 

@@ -15,9 +15,11 @@ Entries are listed in reverse chronological order.
   below `Curve::TABLE_CROSSOVER` (1536 weighted points serial, 128 with `parallel`; 0 on
   ristretto255, whose dalek tables do not pay off). Range proofs on secp256k1: serial, verify
   about 2x faster and prove 1.1-1.8x, already on the first proof; with `parallel`, verify
-  25-45% faster for small configurations. The same proofs. `Curve` gains `Table`,
-  `TABLE_CROSSOVER`, `table` and `msm_vt_table`; `BpppGens` has a private field (build it
-  with `BpppGens::new`); `examples/bppp_range_configs.rs` measures.
+  25-45% faster for small configurations. The same proofs. `Curve` gains
+  `TABLE_CROSSOVER`, `table` and `msm_vt_table`, with defaults (no tables, a correct
+  fallback), so other implementations compile unchanged; the opaque `curve::Table` holds a
+  curve's table. `BpppGens` has a private field (build it with `BpppGens::new`);
+  `examples/bppp_range_configs.rs` measures.
 * R1CS builder: a free witness indexed below the number of folded ones no longer overflows in
   debug builds (`Placement::slot` computed its fallback eagerly).
 * Simplicity: the compiler prefers programs whose own bytes pay for their cost (annex padding

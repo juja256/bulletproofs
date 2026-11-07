@@ -14,7 +14,8 @@ use super::Field;
 const W_FIXED: usize = 7;
 /// NAF width of the other points, whose tables are built per call.
 const W_OTHER: usize = 5;
-/// Digits of a width-`w` NAF: the carry out of the top bit needs up to `w` more positions.
+/// Digits of a width-`w` NAF of a scalar below `2^256`: positions `0..=256` (a carry from the
+/// digit at `p` lands at `p + w <= 256`); the scan runs `w` positions past them.
 const NAF_LEN: usize = 256 + W_FIXED + 1;
 
 /// The odd multiples `P, 3P, ..., (2^(W_FIXED - 1) - 1) P` of every fixed point, point after
@@ -130,7 +131,8 @@ mod tests {
     #[test]
     fn naf_recomposes() {
         let mut rng = ChaCha20Rng::seed_from_u64(3);
-        let mut xs = alloc::vec![Scalar::ZERO, Scalar::ONE, -Scalar::ONE, -Scalar::from(2u64)];
+        // the largest scalars carry out of the top bit
+        let mut xs = alloc::vec![Scalar::ZERO, Scalar::ONE, -Scalar::ONE, -Scalar::from(2u64), -Scalar::from(1u64 << 40)];
         xs.extend((0..50).map(|_| Scalar::random(&mut rng)));
         for x in xs {
             for w in [W_OTHER, W_FIXED] {
@@ -145,6 +147,7 @@ mod tests {
                     }
                 }
                 assert_eq!(acc, x);
+                assert!(d[257..].iter().all(|z| *z == 0), "a digit above position 256");
             }
         }
     }

@@ -1,8 +1,7 @@
 //! ristretto255 (curve25519-dalek): the default curve, byte-identical to the upstream crate.
 
 use curve25519_dalek::constants::{RISTRETTO_BASEPOINT_COMPRESSED, RISTRETTO_BASEPOINT_POINT};
-use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint, VartimeRistrettoPrecomputation};
-use curve25519_dalek::traits::VartimePrecomputedMultiscalarMul;
+use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
 use curve25519_dalek::scalar::Scalar;
 use sha3::Sha3_512;
 
@@ -77,19 +76,10 @@ impl Curve for Ristretto {
         util::msm_slices(s, p, util::MSM_CHUNK_VT, true)
     }
 
-    type Table = VartimeRistrettoPrecomputation;
-    // Never: curve25519-dalek's tables (width-8 NAF of affine Niels points, used with width-5
-    // digits) cost about 40 multiplications to build and save 2-10% per multiplication
-    // (Apple M4 Pro, 2026-11-07); the first proof of a shape would be 2-3x slower.
-    const TABLE_CROSSOVER: usize = 0;
-
-    fn table(p: &[RistrettoPoint]) -> VartimeRistrettoPrecomputation {
-        VartimeRistrettoPrecomputation::new(p.iter())
-    }
-
-    fn msm_vt_table(table: &VartimeRistrettoPrecomputation, s: &[Scalar], ds: &[Scalar], dp: &[RistrettoPoint]) -> RistrettoPoint {
-        table.vartime_mixed_multiscalar_mul(s.iter(), ds.iter(), dp.iter())
-    }
+    // No tables (TABLE_CROSSOVER 0): curve25519-dalek's VartimeRistrettoPrecomputation (width-8
+    // NAF of affine Niels points, used with width-5 digits) costs about 40 multiplications to
+    // build and saved 2-10% per multiplication (Apple M4 Pro, 2026-11-07); the first proof of a
+    // shape was 2-3x slower.
 
     fn msm_index<'a, T>(len: usize, vartime: bool, term: T) -> RistrettoPoint
     where

@@ -547,34 +547,93 @@ fn off_gen(g: &BpppGens<'_, Ristretto>, at: Off) -> RistrettoPoint {
     }
 }
 
-/// A forging prover who opens an input commitment `V_i` with extra coordinates (on `H_1..H_6`,
-/// on a linear slot past the input's, on a norm generator) and runs the honest protocol on
-/// that opening. The proof binds the values, so it verifies unless the inputs' form is checked
-/// too (the shape rows of spec §3.4; erratum 9). Each coordinate kind, each input.
-#[test]
-fn off_form_inputs_are_rejected() {
-    let mut rng = ChaCha20Rng::seed_from_u64(91);
-    // NormO in slots 0, 1: the norm coordinates 2, 3 are not crossed by the witness
-    let s = Shape { n_m: 4, n_o: 2, n_v: 2, n_lin: 3, k: 2, n_l: 5, f_l: true, f_m: true, spread: false };
-    let (c, w) = instance(&mut rng, &s);
-    let (pc, bp) = gens_for(&c);
-    let g = BpppGens::new(&pc, &bp, c.n_lin, c.n_m).unwrap();
-    let mut cases: Vec<Off> = (1..=6).map(Off::H).collect();
-    cases.extend([Off::Lin(1), Off::Lin(2), Off::Norm(0), Off::Norm(2), Off::Norm(3)]);
-    let mut accepted = Vec::new();
-    for at in cases {
-        for i in 0..c.k {
-            let x = Scalar::random(&mut rng);
-            let mut V: Vec<RistrettoPoint> = w.v.iter().zip(&w.s).map(|(v, s)| g.commit_input(v, *s)).collect();
-            V[i] += off_gen(&g, at) * x;
-            let V: Vec<CompressedRistretto> = V.iter().map(|p| p.compress()).collect();
-            let proof = prove_impl(&c, &g, &V, &w, &mut Transcript::new(b"off"), |_, _| &mut rng, false, &[(i, at, x)]).unwrap();
-            if proof.verify(&c, &g, &V, &mut Transcript::new(b"off")).is_ok() {
-                accepted.push((i, at));
+/// Shapes for the forging prover: each flag combination, `n_v` from 1 to 3, one or three
+/// inputs; two norm slots in `n_O` (0, 1), so slots 2, 3 are not crossed by the witness, and two
+/// linear slots past the inputs'.
+fn off_form_shapes() -> Vec<Shape> {
+    let mut out = Vec::new();
+    for &(f_l, f_m) in &[(true, false), (false, true), (true, true)] {
+        for n_v in 1..=3 {
+            for k in [1, 3] {
+                out.push(Shape { n_m: (k * n_v).max(4), n_o: 2, n_v, n_lin: n_v + 1, k, n_l: k * n_v + 2, f_l, f_m, spread: false });
             }
         }
     }
-    assert!(accepted.is_empty(), "off-form inputs accepted: {:?}", accepted);
+    out
+}
+
+/// Every coordinate outside the inputs' form for a circuit of shape `s`.
+fn off_form_coordinates(s: &Shape) -> Vec<Off> {
+    let mut out: Vec<Off> = (1..=6).map(Off::H).collect();
+    out.extend((s.n_v - 1..s.n_lin).map(Off::Lin));
+    out.extend((0..s.n_m).map(Off::Norm));
+    out
+}
+
+/// Prove with the inputs opened with the extra coordinates `off` (input, coordinate, value)
+/// and verify; whether the proof is accepted.
+fn off_form_accepted(c: &ArithmeticCircuit<Scalar>, w: &CircuitWitness<Scalar>, g: &BpppGens<'_, Ristretto>, off: &[(usize, Off, Scalar)], rng: &mut ChaCha20Rng) -> bool {
+    let mut V: Vec<RistrettoPoint> = w.v.iter().zip(&w.s).map(|(v, s)| g.commit_input(v, *s)).collect();
+    for &(i, at, x) in off {
+        V[i] += off_gen(g, at) * x;
+    }
+    let V: Vec<CompressedRistretto> = V.iter().map(|p| p.compress()).collect();
+    let proof = prove_impl(c, g, &V, w, &mut Transcript::new(b"off"), |_, _| &mut *rng, false, off).unwrap();
+    proof.verify(c, g, &V, &mut Transcript::new(b"off")).is_ok()
+}
+
+/// A forging prover who opens an input commitment `V_i` with an extra coordinate (on
+/// `H_1..H_6`, on a linear slot past the input's, on a norm generator) and runs the honest
+/// protocol on that opening. The proof binds the values, so it verifies unless the inputs'
+/// form is checked too (the shape rows of spec §3.4; erratum 9). Every coordinate, input and
+/// shape; before the shape rows `H_1..H_3`, the extra linear slots and the norm slots outside
+/// `n_O` were accepted.
+#[test]
+fn off_form_inputs_are_rejected() {
+    let mut rng = ChaCha20Rng::seed_from_u64(91);
+    let mut accepted = Vec::new();
+    for s in off_form_shapes() {
+        let (c, w) = instance(&mut rng, &s);
+        let (pc, bp) = gens_for(&c);
+        let g = BpppGens::new(&pc, &bp, c.n_lin, c.n_m).unwrap();
+        for at in off_form_coordinates(&s) {
+            for i in 0..c.k {
+                let x = Scalar::random(&mut rng);
+                if off_form_accepted(&c, &w, &g, &[(i, at, x)], &mut rng) {
+                    accepted.push((s.f_l, s.f_m, s.n_v, s.k, i, at));
+                }
+            }
+        }
+    }
+    assert!(accepted.is_empty(), "off-form inputs accepted (f_l, f_m, n_v, k, input, at): {:?}", accepted);
+}
+
+/// Two extra coordinates of one input whose shape terms would cancel if their `kappa` powers
+/// coincided (a norm coordinate weighs twice): rejected for every pair of the coordinates the
+/// shape rows alone reject.
+#[test]
+fn off_form_pairs_are_rejected() {
+    let mut rng = ChaCha20Rng::seed_from_u64(97);
+    let s = Shape { n_m: 4, n_o: 2, n_v: 2, n_lin: 3, k: 2, n_l: 6, f_l: true, f_m: true, spread: false };
+    let (c, w) = instance(&mut rng, &s);
+    let (pc, bp) = gens_for(&c);
+    let g = BpppGens::new(&pc, &bp, c.n_lin, c.n_m).unwrap();
+    let weight = |at: Off| if let Off::Norm(_) = at { Scalar::from(2u64) } else { Scalar::ONE };
+    // the coordinates accepted without the shape rows: H_1..H_3, the extra linear slots, the
+    // norm slots outside n_O
+    let mut coords: Vec<Off> = (1..=3).map(Off::H).collect();
+    coords.extend([Off::Lin(1), Off::Lin(2), Off::Norm(2), Off::Norm(3)]);
+    let mut accepted = Vec::new();
+    for (j, &a) in coords.iter().enumerate() {
+        for &b in &coords[j + 1..] {
+            let x = Scalar::random(&mut rng);
+            let y = -(x * weight(a) * weight(b).invert());
+            if off_form_accepted(&c, &w, &g, &[(1, a, x), (1, b, y)], &mut rng) {
+                accepted.push((a, b));
+            }
+        }
+    }
+    assert!(accepted.is_empty(), "off-form pairs accepted: {:?}", accepted);
 }
 
 /// The forging prover of `off_form_inputs_are_rejected` with zero extra coordinates is the

@@ -1,7 +1,8 @@
 //! ristretto255 (curve25519-dalek): the default curve, byte-identical to the upstream crate.
 
 use curve25519_dalek::constants::{RISTRETTO_BASEPOINT_COMPRESSED, RISTRETTO_BASEPOINT_POINT};
-use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
+use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint, VartimeRistrettoPrecomputation};
+use curve25519_dalek::traits::VartimePrecomputedMultiscalarMul;
 use curve25519_dalek::scalar::Scalar;
 use sha3::Sha3_512;
 
@@ -74,6 +75,18 @@ impl Curve for Ristretto {
 
     fn msm_vt(s: &[Scalar], p: &[RistrettoPoint]) -> RistrettoPoint {
         util::msm_slices(s, p, util::MSM_CHUNK_VT, true)
+    }
+
+    type Table = VartimeRistrettoPrecomputation;
+    // 1.2x below 120 fixed points, even at 300 (Apple M4 Pro, 2026-11-07)
+    const TABLE_CROSSOVER: usize = 256;
+
+    fn table(p: &[RistrettoPoint]) -> VartimeRistrettoPrecomputation {
+        VartimeRistrettoPrecomputation::new(p.iter())
+    }
+
+    fn msm_vt_table(table: &VartimeRistrettoPrecomputation, s: &[Scalar], ds: &[Scalar], dp: &[RistrettoPoint]) -> RistrettoPoint {
+        table.vartime_mixed_multiscalar_mul(s.iter(), ds.iter(), dp.iter())
     }
 
     fn msm_index<'a, T>(len: usize, vartime: bool, term: T) -> RistrettoPoint

@@ -9,6 +9,7 @@ pub use group;
 mod ristretto;
 pub use self::ristretto::Ristretto;
 mod pippenger;
+mod straus;
 mod secp256k1;
 pub use self::secp256k1::{Secp256k1, Secp256k1Compressed};
 
@@ -91,6 +92,17 @@ pub trait Curve: Copy + Clone + Debug + Default + PartialEq + Eq + Send + Sync +
     /// `sum s_i P_i` in variable time: for public scalars only.
     fn msm_vt(s: &[Self::Scalar], p: &[Self::Point]) -> Self::Point;
 
+    /// Precomputed multiples of fixed points (the generators) for [`Curve::msm_vt_table`].
+    type Table: Send + Sync;
+    /// Up to this many weighted points (fixed ones plus 3 per other point) a multiplication
+    /// with tables beats [`Curve::msm_vt`] (measured; 0: never).
+    const TABLE_CROSSOVER: usize;
+    /// The table of the fixed points `p`.
+    fn table(p: &[Self::Point]) -> Self::Table;
+    /// `sum s_i P_i + sum ds_j dp_j` in variable time, `P` the fixed points of `table` (as
+    /// many as `s`) and `dp` other points: for public scalars only.
+    fn msm_vt_table(table: &Self::Table, s: &[Self::Scalar], ds: &[Self::Scalar], dp: &[Self::Point]) -> Self::Point;
+
     /// `sum_{v < len} s_v P_v` with the terms `term(v)`, by chunks (in parallel with
     /// `parallel`); constant time unless `vartime` (public scalars only).
     fn msm_index<'a, T>(len: usize, vartime: bool, term: T) -> Self::Point
@@ -106,5 +118,60 @@ pub trait Curve: Copy + Clone + Debug + Default + PartialEq + Eq + Send + Sync +
         })
         .into_iter()
         .fold(<Self::Point as group::Group>::identity(), |a, b| a + b)
+    }
+}
+
+/// Fixed points with their table (the BP++ verifier's generators, spec §3.7).
+pub(crate) struct Fixed<C: Curve> {
+    pub(crate) points: alloc::vec::Vec<C::Point>,
+    table: C::Table,
+}
+
+impl<C: Curve> Fixed<C> {
+    pub(crate) fn new(points: alloc::vec::Vec<C::Point>) -> Self {
+        let table = C::table(&points);
+        Fixed { points, table }
+    }
+
+    /// `<s, points> + <ds, dp>` (variable time; `s` as long as the points).
+    pub(crate) fn msm(&self, s: &[C::Scalar], ds: &[C::Scalar], dp: &[C::Point]) -> C::Point {
+        C::msm_vt_table(&self.table, s, ds, dp)
+    }
+}
+
+#[cfg(test)]
+mod table_tests {
+    use super::*;
+    use alloc::vec::Vec;
+    use ff::Field as _;
+    use group::Group;
+    use rand_chacha::rand_core::SeedableRng;
+    use rand_chacha::ChaCha20Rng;
+
+    /// `msm_vt_table` is `msm_vt` over the fixed and the other points, for every split,
+    /// including empty parts and the scalars 0, 1 and -1.
+    fn table_msm_matches_msm<C: Curve>() {
+        let mut rng = ChaCha20Rng::seed_from_u64(5);
+        for (nf, nd) in [(0usize, 0usize), (0, 3), (1, 0), (5, 1), (40, 7), (130, 20)] {
+            let fp: Vec<C::Point> = (0..nf).map(|_| C::Point::random(&mut rng)).collect();
+            let dp: Vec<C::Point> = (0..nd).map(|_| C::Point::random(&mut rng)).collect();
+            let special = [C::Scalar::ZERO, C::Scalar::ONE, -C::Scalar::ONE];
+            let s = |i: usize, rng: &mut ChaCha20Rng| special.get(i).copied().unwrap_or_else(|| C::Scalar::random(rng));
+            let fs: Vec<C::Scalar> = (0..nf).map(|i| s(i, &mut rng)).collect();
+            let ds: Vec<C::Scalar> = (0..nd).map(|i| s(i, &mut rng)).collect();
+            let table = C::table(&fp);
+            let want = C::msm_vt(&fs, &fp) + C::msm_vt(&ds, &dp);
+            assert_eq!(C::msm_vt_table(&table, &fs, &ds, &dp), want, "{} fixed, {} other", nf, nd);
+        }
+    }
+
+    #[test]
+    fn table_msm_matches_msm_ristretto() {
+        table_msm_matches_msm::<Ristretto>();
+    }
+
+    #[test]
+    fn table_msm_matches_msm_secp256k1() {
+        table_msm_matches_msm::<Secp256k1>();
     }
 }

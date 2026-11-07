@@ -8,6 +8,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use core::marker::PhantomData;
+use std::sync::{Arc, Mutex};
 use digest::{ExtendableOutput, Update, XofReader};
 use sha3::{Shake256, Shake256Reader};
 
@@ -178,6 +179,9 @@ pub struct BulletproofGens<C: Curve> {
     G_vec: Vec<Vec<C::Point>>,
     /// Precomputed \\(\mathbf H\\) generators for each party.
     H_vec: Vec<Vec<C::Point>>,
+    /// Tables of `H_0[..h] || G_0[..n]` (party 0) by `(h, n)`, for the BP++ verifier; built on
+    /// first use, shared by clones (prefixes do not change when the capacity grows).
+    tables: Arc<Mutex<Vec<((usize, usize), Arc<crate::curve::Fixed<C>>)>>>,
 }
 
 impl<C: Curve> BulletproofGens<C> {
@@ -199,6 +203,7 @@ impl<C: Curve> BulletproofGens<C> {
             party_capacity,
             G_vec: (0..party_capacity).map(|_| Vec::new()).collect(),
             H_vec: (0..party_capacity).map(|_| Vec::new()).collect(),
+            tables: Arc::default(),
         };
         gens.increase_capacity(gens_capacity);
         gens
@@ -211,6 +216,25 @@ impl<C: Curve> BulletproofGens<C> {
             gens: &self,
             share: j,
         }
+    }
+
+    /// The table of `H_0[..h] || G_0[..n]` (party 0), built on first use and cached. Panics
+    /// beyond the capacity.
+    pub(crate) fn table(&self, h: usize, n: usize) -> Arc<crate::curve::Fixed<C>> {
+        let mut tables = self.tables.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, t)) = tables.iter().find(|(k, _)| *k == (h, n)) {
+            return t.clone();
+        }
+        let points = self.H_vec[0][..h].iter().chain(&self.G_vec[0][..n]).copied().collect();
+        let t = Arc::new(crate::curve::Fixed::new(points));
+        tables.push(((h, n), t.clone()));
+        t
+    }
+
+    /// The number of cached tables.
+    #[cfg(test)]
+    pub(crate) fn cached_tables(&self) -> usize {
+        self.tables.lock().unwrap().len()
     }
 
     /// Increases the generators' capacity to the amount specified.

@@ -337,7 +337,7 @@ struct Trace {
 fn trace(c: &ReciprocalCircuit<K>, V: &[Secp256k1Compressed], t: &CompileTranscript, gens: &BpppGens<Secp256k1>, proof: &DummyProof) -> Result<Trace, R1CSError> {
     let ct = c.map_scalars(Traced::constant);
     let n: Vec<TracedPoint> = gens.n.iter().map(|p| TracedPoint::constant(*p)).collect();
-    let tg = BpppGens::<TracedCurve> { g: TracedPoint::constant(gens.g), h: gens.h.iter().map(|p| TracedPoint::constant(*p)).collect(), n: &n };
+    let tg = BpppGens::<TracedCurve> { g: TracedPoint::constant(gens.g), h: gens.h.iter().map(|p| TracedPoint::constant(*p)).collect(), n: &n, bp: None };
     let mut tt = t.clone();
     let run = || {
         with_tape(|| {

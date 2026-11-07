@@ -406,7 +406,7 @@ fn forged_value_generator_is_rejected() {
     for ((s_, p), n) in sc.n.iter().zip(&p_n).zip(g.n.iter()) {
         B += n * (s_ - p);
     }
-    let forged = BpppGens { g: -(B * (sc.g - p_s).invert()), h: g.h.clone(), n: g.n };
+    let forged = BpppGens { g: -(B * (sc.g - p_s).invert()), h: g.h.clone(), n: g.n, bp: Some(&bp) };
     assert!(proof.verify(&c, &forged, &V, &mut Transcript::new(b"t")).is_err());
 }
 
@@ -590,4 +590,33 @@ fn off_form_hook_with_zeros_is_honest() {
     let off = [(0, Off::H(3), Scalar::ZERO), (1, Off::Lin(2), Scalar::ZERO), (1, Off::Norm(3), Scalar::ZERO)];
     let proof = prove_impl(&c, &g, &V, &w, &mut Transcript::new(b"off"), |_, _| &mut rng, false, &off).unwrap();
     assert!(proof.verify(&c, &g, &V, &mut Transcript::new(b"off")).is_ok());
+}
+
+/// The verifier multiplies with tables cached per `BulletproofGens` (spec §3.7) only for the
+/// generators they were built from: generators changed after `BpppGens::new` are used as they
+/// are, before and after the table exists.
+#[test]
+fn changed_generators_do_not_use_cached_tables() {
+    let mut rng = ChaCha20Rng::seed_from_u64(93);
+    let s = Shape { n_m: 4, n_o: 2, n_v: 2, n_lin: 3, k: 2, n_l: 5, f_l: true, f_m: true, spread: true };
+    let (c, w) = instance(&mut rng, &s);
+    let (pc, bp) = gens_for(&c);
+    let g = BpppGens::new(&pc, &bp, c.n_lin, c.n_m).unwrap();
+    let V = commitments(&g, &w);
+    let proof = prove_unchecked(&c, &g, &V, &w, &mut Transcript::new(b"tab"), &mut rng).unwrap();
+    proof.verify(&c, &g, &V, &mut Transcript::new(b"tab")).unwrap();
+    assert!(bp.cached_tables() > 0, "the verifier built a table");
+    let other: Vec<RistrettoPoint> = (0..c.n_m).map(|_| RistrettoPoint::random(&mut rng)).collect();
+    for change in 0..3 {
+        let mut g2 = BpppGens::new(&pc, &bp, c.n_lin, c.n_m).unwrap();
+        match change {
+            0 => g2.h[3] = RistrettoPoint::random(&mut rng),
+            1 => g2.h[H_FIXED + 1] = RistrettoPoint::random(&mut rng),
+            _ => g2.n = &other,
+        }
+        let V2 = commitments(&g2, &w);
+        assert!(proof.verify(&c, &g2, &V, &mut Transcript::new(b"tab")).is_err(), "change {}", change);
+        let proof2 = prove_unchecked(&c, &g2, &V2, &w, &mut Transcript::new(b"tab"), &mut rng).unwrap();
+        proof2.verify(&c, &g2, &V2, &mut Transcript::new(b"tab")).unwrap_or_else(|e| panic!("change {}: {:?}", change, e));
+    }
 }

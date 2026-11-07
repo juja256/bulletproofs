@@ -429,6 +429,7 @@ pub(crate) fn prove<C: Curve, T: BpppTranscript + ?Sized, R: RngCore + CryptoRng
 /// (`1 <= a <= 6`), on the linear slot `t` (`t >= n_v - 1`) or on `N_t`. Only a forging prover
 /// (the tests) knows such openings; spec §3.4 makes them fail.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) enum Off {
     H(usize),
     Lin(usize),
@@ -679,7 +680,9 @@ fn prove_inner_off<C: Curve, T: BpppTranscript + ?Sized, R: RngCore + CryptoRng>
     let n = n_t.eval(tau, tau_inv, n_m);
     let cvec: Vec<C::Scalar> = wt.c_r(beta, tau, tau_inv).chain(c_l.eval(tau, tau_inv, n_lin)).collect();
     let st = WnlaStatement { g: &gens.g, h: &gens.h, n: gens.n, c: &cvec, rho };
-    let wnla = wnla::prove_unbound(&st, transcript, l, n, true)?;
+    // h[0], G and nothing else besides the table's points
+    let table = gens.table(2);
+    let wnla = wnla::prove_unbound(&st, transcript, l, n, true, table.as_deref())?;
     Ok(CircuitProof { C_L: ol.C_L, C_R: cr.C_R, C_O: ol.o.C_O, C_S, wnla })
 }
 

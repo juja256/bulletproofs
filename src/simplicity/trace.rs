@@ -808,6 +808,15 @@ impl Curve for TracedCurve {
     fn msm_vt(_: &[Traced], _: &[TracedPoint]) -> TracedPoint {
         panic!("trace: the multiscalar multiplication is lowered separately")
     }
+
+    type Table = ();
+    const TABLE_CROSSOVER: usize = 0;
+
+    fn table(_: &[TracedPoint]) {}
+
+    fn msm_vt_table(_: &(), _: &[Traced], _: &[Traced], _: &[TracedPoint]) -> TracedPoint {
+        panic!("trace: the multiscalar multiplication is lowered separately")
+    }
 }
 
 #[cfg(test)]

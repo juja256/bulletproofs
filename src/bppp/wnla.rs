@@ -19,7 +19,7 @@ use ff::Field as _;
 
 use super::terms::Terms;
 use super::transcript::BpppTranscript;
-use crate::curve::{Curve, Field, PointEncoding};
+use crate::curve::{Curve, Field, Fixed, PointEncoding};
 use crate::errors::ProofError;
 use crate::util;
 
@@ -161,7 +161,7 @@ pub(crate) fn prove<C: Curve, T: BpppTranscript + ?Sized>(
 ) -> Result<WnlaProof<C>, ProofError> {
     st.check(l.len(), n.len())?;
     absorb_statement(transcript, st, &C::compress(com));
-    prove_unbound(st, transcript, l, n, false)
+    prove_unbound(st, transcript, l, n, false, None)
 }
 
 /// [`prove`] without absorbing the statement, for the circuit protocol: there `C`, `c` and
@@ -175,8 +175,9 @@ pub(crate) fn prove_unbound<C: Curve, T: BpppTranscript + ?Sized>(
     l: Vec<C::Scalar>,
     n: Vec<C::Scalar>,
     vartime: bool,
+    table: Option<&Fixed<C>>,
 ) -> Result<WnlaProof<C>, ProofError> {
-    prove_rounds(st, transcript, l, n, vartime, if vartime { DEFERRED_VT } else { DEFERRED_CT })
+    prove_rounds(st, transcript, l, n, vartime, if vartime { DEFERRED_VT } else { DEFERRED_CT }, table)
 }
 
 /// Rounds that compute `X`, `R` from the input generators instead of folding them: a fold
@@ -237,6 +238,23 @@ impl<'a, C: Curve> Deferred<'a, C> {
         }
     }
 
+    /// While deferred, the scalar of every input generator in `sum_j x_j P'_j` over all
+    /// positions `j` or only the odd ones (as [`Deferred::terms`]); `None` once folded.
+    fn input_scalars(&self, odd_only: bool, x: &(dyn Fn(usize) -> C::Scalar + Sync)) -> Option<Vec<C::Scalar>> {
+        if self.folded.is_some() {
+            return None;
+        }
+        let mask = (1usize << self.shift) - 1;
+        Some(util::map_index(self.input.len(), |v| {
+            let j = v >> self.shift;
+            if odd_only && j % 2 == 0 {
+                C::Scalar::ZERO
+            } else {
+                x(j) * self.coef[v & mask]
+            }
+        }))
+    }
+
     /// Fold: `P'_i = P_{2i} + g P_{2i+1}`; materialise after `defer` rounds.
     fn fold(&mut self, g: C::Scalar, defer: usize) {
         match &self.folded {
@@ -266,6 +284,7 @@ fn prove_rounds<C: Curve, T: BpppTranscript + ?Sized>(
     n: Vec<C::Scalar>,
     vartime: bool,
     defer: usize,
+    table: Option<&Fixed<C>>,
 ) -> Result<WnlaProof<C>, ProofError> {
     st.check(l.len(), n.len())?;
     absorb_header::<C, T>(transcript, l.len(), n.len());
@@ -306,6 +325,11 @@ fn prove_rounds<C: Curve, T: BpppTranscript + ?Sized>(
         let r_l = |j: usize| l[j];
         let r_n = |j: usize| s * n[j];
         let msm = |odd: bool, fl: &(dyn Fn(usize) -> C::Scalar + Sync), fnn: &(dyn Fn(usize) -> C::Scalar + Sync)| {
+            if let (true, Some(t), Some(hs), Some(gs)) = (vartime, table, h.input_scalars(odd, fl), g.input_scalars(odd, fnn)) {
+                // over the input generators: h[0] with the other points, h[1..] || n in the table
+                let s: Vec<C::Scalar> = hs[1..].iter().chain(&gs).copied().collect();
+                return t.msm(&s, &hs[..1], &st.h[..1]);
+            }
             let ((hn, ht), (gn, gt)) = (h.terms(odd), g.terms(odd));
             C::msm_index(hn + gn, vartime, |v| {
                 if v < hn {
@@ -494,9 +518,9 @@ mod tests {
             .collect()
     }
 
-    /// The stop rule is secp256k1-zkp's size-optimal layout (PR #352): its closed form, ported.
-    /// Deferred folding and variable-time multiplications give the same proof as folding in
-    /// every round, for every number of deferred rounds and odd lengths.
+    /// Deferred folding, variable-time multiplications and the tables of `h[1..] || n` give
+    /// the same proof as folding in every round, for every number of deferred rounds and odd
+    /// lengths.
     #[test]
     fn deferred_rounds_do_not_change_the_proof() {
         let mut rng = rand::thread_rng();
@@ -507,16 +531,18 @@ mod tests {
             let l: Vec<Scalar> = (0..a).map(|_| Scalar::random(&mut rng)).collect();
             let n: Vec<Scalar> = (0..b).map(|_| Scalar::random(&mut rng)).collect();
             let gammas: Vec<Scalar> = (0..20).map(|_| Scalar::random(&mut rng)).collect();
-            let p0 = prove_rounds(&st, &mut Replay::new(gammas.clone()), l.clone(), n.clone(), false, 0).unwrap();
+            let p0 = prove_rounds(&st, &mut Replay::new(gammas.clone()), l.clone(), n.clone(), false, 0, None).unwrap();
+            let table = crate::curve::Fixed::<Ristretto>::new(h[1..].iter().chain(&nv).copied().collect());
             for d in 0..6 {
-                for vt in [false, true] {
-                    let p = prove_rounds(&st, &mut Replay::new(gammas.clone()), l.clone(), n.clone(), vt, d).unwrap();
-                    assert_eq!(p, p0, "a {} b {} defer {} vartime {}", a, b, d, vt);
+                for (vt, t) in [(false, None), (true, None), (true, Some(&table))] {
+                    let p = prove_rounds(&st, &mut Replay::new(gammas.clone()), l.clone(), n.clone(), vt, d, t).unwrap();
+                    assert_eq!(p, p0, "a {} b {} defer {} vartime {} table {}", a, b, d, vt, t.is_some());
                 }
             }
         }
     }
 
+    /// The stop rule is secp256k1-zkp's size-optimal layout (PR #352): its closed form, ported.
     #[test]
     fn rounds_match_secp256k1_zkp_optimal_layout() {
         fn log2_ceil(n: usize) -> usize {
@@ -550,7 +576,7 @@ mod tests {
             let st = WnlaStatement::<C> { g: &G, h: &H, n: &N, c: &c, rho: sc(&case["rho"]) };
             let gammas: Vec<C::Scalar> = scs(&case["gammas"]);
             let (l, n): (Vec<C::Scalar>, Vec<C::Scalar>) = (scs(&case["l"]), scs(&case["n"]));
-            let proof = prove_unbound(&st, &mut Replay::new(gammas.clone()), l.clone(), n.clone(), false).unwrap();
+            let proof = prove_unbound(&st, &mut Replay::new(gammas.clone()), l.clone(), n.clone(), false, None).unwrap();
             let point = |p: &serde_json::Value| sym_point::<C>(p, &G, &H, &N);
             let rounds = case["rounds"].as_array().unwrap();
             assert_eq!(proof.X.len(), rounds.len(), "case {a}x{b}");

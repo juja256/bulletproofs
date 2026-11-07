@@ -4,7 +4,9 @@ use alloc::vec::Vec;
 use core::iter::once;
 
 
-use crate::curve::Curve;
+use std::sync::Arc;
+
+use crate::curve::{Curve, Fixed};
 use crate::errors::ProofError;
 use crate::{BulletproofGens, PedersenGens};
 
@@ -24,6 +26,9 @@ pub struct BpppGens<'a, C: Curve> {
     pub h: Vec<C::Point>,
     /// Norm-part generators, `n_m` of them.
     pub n: &'a [C::Point],
+    /// The setup `h[1..]` and `n` come from, whose cached tables the verifier uses while they
+    /// still equal these generators (spec §3.7).
+    pub(crate) bp: Option<&'a BulletproofGens<C>>,
 }
 
 impl<'a, C: Curve> BpppGens<'a, C> {
@@ -37,7 +42,20 @@ impl<'a, C: Curve> BpppGens<'a, C> {
         }
         let (G, H) = bp.share(0).G_H_slices(need);
         let h = once(pc.B_blinding).chain(H[..from_bp].iter().copied()).collect();
-        Ok(BpppGens { g: pc.B, h, n: &G[..n_m] })
+        Ok(BpppGens { g: pc.B, h, n: &G[..n_m], bp: Some(bp) })
+    }
+
+    /// The cached table of `h[1..] || n` when a multiplication over them and `other` further
+    /// points gains from it (`Curve::TABLE_CROSSOVER`, the others weighing 3 each) and the
+    /// table is of these very generators (they are public fields).
+    pub(crate) fn table(&self, other: usize) -> Option<Arc<Fixed<C>>> {
+        let bp = self.bp?;
+        let (nh, nn) = (self.h.len().checked_sub(1)?, self.n.len());
+        if nh + nn + 3 * other > C::TABLE_CROSSOVER {
+            return None;
+        }
+        let t = bp.table(nh, nn);
+        (t.points[..nh] == self.h[1..] && t.points[nh..] == *self.n).then(|| t)
     }
 
     /// The `BulletproofGens` capacity for a linear part of length `n_lin` and `n_m` norm

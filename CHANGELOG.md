@@ -10,6 +10,12 @@ Entries are listed in reverse chronological order.
   zero; before, they were absorbed by the blinding (erratum 9). Proof size, the norm argument
   and the BP backend are unchanged; BP++ vectors, pins and Simplicity verifiers (CMRs, about
   +3% cost) are regenerated.
+* BP++ multiplies the fixed generators with precomputed tables cached in `BulletproofGens`
+  (verifier and the prover's deferred norm-argument rounds, below `Curve::TABLE_CROSSOVER`):
+  range proofs verify about 2x faster on secp256k1 and prove 1.1-1.8x faster; about 10% on
+  ristretto255 for small configurations; the same proofs. `Curve` gains `Table`,
+  `TABLE_CROSSOVER`, `table` and `msm_vt_table`; `BpppGens` has a private field (build it
+  with `BpppGens::new`); `examples/bppp_range_configs.rs` measures.
 * R1CS builder: a free witness indexed below the number of folded ones no longer overflows in
   debug builds (`Placement::slot` computed its fallback eagerly).
 * Simplicity: the compiler prefers programs whose own bytes pay for their cost (annex padding

@@ -78,7 +78,7 @@ fn traced_terms(st: &Statement, proof: &R1CSProof<Secp256k1>, V: &[Secp256k1Comp
     let gens = BpppGens::new(&st.pc, &st.bp, n_lin, n_mm).unwrap();
     let ct = c.map_scalars(Traced::constant);
     let n: Vec<TracedPoint> = gens.n.iter().map(|p| TracedPoint::constant(*p)).collect();
-    let tg = BpppGens::<TracedCurve> { g: TracedPoint::constant(gens.g), h: gens.h.iter().map(|p| TracedPoint::constant(*p)).collect(), n: &n };
+    let tg = BpppGens::<TracedCurve> { g: TracedPoint::constant(gens.g), h: gens.h.iter().map(|p| TracedPoint::constant(*p)).collect(), n: &n, bp: None };
     let bytes = cp.to_bytes();
     let wit: Vec<K> = cp.wnla.l.iter().chain(&cp.wnla.n).copied().collect();
     let (terms, tape) = with_tape(|| {

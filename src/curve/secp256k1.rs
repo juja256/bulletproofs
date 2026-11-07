@@ -179,6 +179,18 @@ impl Curve for Secp256k1 {
     fn msm_vt(s: &[Scalar], p: &[ProjectivePoint]) -> ProjectivePoint {
         super::pippenger::msm(s, p)
     }
+
+    type Table = super::straus::Table;
+    // 2.5x at 260 weighted points, 1.1x at 1300, 0.9x at 2500 (Apple M4 Pro, 2026-11-07)
+    const TABLE_CROSSOVER: usize = 1536;
+
+    fn table(p: &[ProjectivePoint]) -> super::straus::Table {
+        super::straus::table(p)
+    }
+
+    fn msm_vt_table(table: &super::straus::Table, s: &[Scalar], ds: &[Scalar], dp: &[ProjectivePoint]) -> ProjectivePoint {
+        super::straus::msm(table, s, ds, dp)
+    }
 }
 
 // A scalar on the left of a variable or a linear combination (the generic impls have the
